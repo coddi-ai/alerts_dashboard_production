@@ -35,13 +35,13 @@ def create_machines_tab() -> dbc.Container:
         # SECTION 1: Fleet Status Summary (OIL-M-01)
         # ========================================
         html.H4("📊 Fleet Status Summary", className="mt-4 mb-3"),
-        html.P("Click a segment in the donut chart to filter the priority table by status.", className="text-muted"),
+        html.P("Haga clic en un segmento del gráfico de dona para filtrar la tabla de prioridad por estado.", className="text-muted"),
         
         dbc.Row([
             # Left: Status Donut (interactive)
             dbc.Col([
                 dbc.Card([
-                    dbc.CardHeader("Machine Status Distribution", className="fw-bold"),
+                    dbc.CardHeader("Distribución de Estado de Máquinas", className="fw-bold"),
                     dbc.CardBody([
                         dcc.Graph(id='status-donut-chart'),
                         html.Div(id='status-filter-indicator', className="mt-2 text-center")
@@ -52,7 +52,7 @@ def create_machines_tab() -> dbc.Container:
             # Right: Priority Table (OIL-M-02)
             dbc.Col([
                 dbc.Card([
-                    dbc.CardHeader("Priority Machines", className="fw-bold"),
+                    dbc.CardHeader("Máquinas Prioritarias", className="fw-bold"),
                     dbc.CardBody(
                         html.Div(id='priority-table-container')
                     )
@@ -64,8 +64,8 @@ def create_machines_tab() -> dbc.Container:
         # SECTION 2: Machine Detail (OIL-M-03, OIL-M-04)
         # ========================================
         html.Hr(),
-        html.H4("🔍 Machine Component Details", className="mt-4 mb-3"),
-        html.P("Select a machine from the priority table or use the selector below.", className="text-muted"),
+        html.H4("🔍 Detalles de Componentes de Máquina", className="mt-4 mb-3"),
+        html.P("Seleccione una máquina de la tabla de prioridad o use el selector a continuación.", className="text-muted"),
         
         # Persistent machine selection indicator
         dbc.Alert(
@@ -89,7 +89,7 @@ def create_machines_tab() -> dbc.Container:
         
         # Component detail table
         dbc.Card([
-            dbc.CardHeader("Component Breakdown (Sorted Worst-First)", className="fw-bold"),
+            dbc.CardHeader("Desglose de Componentes (Ordenado de Peor a Mejor)", className="fw-bold"),
             dbc.CardBody(
                 html.Div(id='machine-detail-table-container')
             )
@@ -99,23 +99,23 @@ def create_machines_tab() -> dbc.Container:
         # SECTION 3: Quick Navigation (OIL-M-05)
         # ========================================
         html.Hr(),
-        html.H4("🧭 Quick Navigation to Report Detail", className="mt-4 mb-3"),
+        html.H4("🧭 Navegación Rápida al Detalle de Reporte", className="mt-4 mb-3"),
         
         dbc.Card([
             dbc.CardBody([
                 dbc.Row([
                     dbc.Col([
-                        html.Label("Equipment:", className="fw-bold"),
+                        html.Label("Equipo:", className="fw-bold"),
                         dcc.Dropdown(
                             id='nav-equipment-selector',
-                            placeholder='Select equipment...'
+                            placeholder='Seleccionar equipo...'
                         )
                     ], width=4),
                     dbc.Col([
-                        html.Label("Component:", className="fw-bold"),
+                        html.Label("Componente:", className="fw-bold"),
                         dcc.Dropdown(
                             id='nav-component-selector',
-                            placeholder='Select component...',
+                            placeholder='Seleccionar componente...',
                             disabled=True
                         )
                     ], width=4),
@@ -123,7 +123,7 @@ def create_machines_tab() -> dbc.Container:
                         html.Div([
                             html.Label("\u00a0", className="fw-bold"),  # Spacer
                             dbc.Button(
-                                "Navigate to Report Detail →",
+                                "Ir al Detalle de Reporte \u2192",
                                 id='nav-to-report-button',
                                 color="primary",
                                 className="w-100",
@@ -139,13 +139,13 @@ def create_machines_tab() -> dbc.Container:
         # SECTION 4: Component Distribution (OIL-M-06)
         # ========================================
         html.Hr(),
-        html.H4("📈 Component Status Distribution", className="mt-4 mb-3"),
+        html.H4("📈 Distribución de Estado de Componentes", className="mt-4 mb-3"),
         
         dbc.Row([
             dbc.Col([
                 dbc.Card([
                     dbc.CardHeader([
-                        html.Span("Component Status by Type", className="fw-bold"),
+                        html.Span("Estado de Componentes por Tipo", className="fw-bold"),
                         dbc.Button(
                             "Toggle Grouping",
                             id='toggle-component-grouping',

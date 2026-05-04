@@ -123,7 +123,7 @@ def create_alerts_datatable(alerts_df: pd.DataFrame) -> dash_table.DataTable:
 
 def create_alert_detail_card(alert_row: pd.Series) -> dbc.Card:
     """
-    Create card displaying detailed alert specification.
+    Create card displaying detailed alert specification with structured AI diagnosis.
     
     Args:
         alert_row: Series with alert data
@@ -135,67 +135,155 @@ def create_alert_detail_card(alert_row: pd.Series) -> dbc.Card:
         return dbc.Alert("No se ha seleccionado ninguna alerta", color="warning")
     
     try:
+        # Parse AI diagnosis into structured sections (if formatted)
+        # Expected format: sections separated by newlines or keywords
+        ai_message = alert_row['mensaje_ia']
+        
+        # Try to parse structured diagnosis (basic implementation)
+        # This assumes the AI message might contain keywords or is a single paragraph
+        diagnosis_sections = {
+            'diagnosis': ai_message,  # Default: full message as diagnosis
+            'cause': None,
+            'risk': None,
+            'actions': None
+        }
+        
+        # TODO: Enhance this parsing logic if AI messages have consistent structure
+        # For now, display as unified diagnosis with improved formatting
+        
         card_content = dbc.Card([
             dbc.CardHeader([
                 html.H4([
-                    html.I(className="fas fa-exclamation-triangle me-2"),
-                    "Especificación de Alerta"
-                ], className="mb-0")
-            ], className="bg-warning text-dark"),
+                    html.I(className="fas fa-exclamation-circle me-2"),
+                    f"Alerta: {alert_row.get('FusionID', 'N/A')}"
+                ], className="mb-0 text-white")
+            ], className="bg-danger"),
             
             dbc.CardBody([
-                dbc.Row([
-                    dbc.Col([
-                        html.P([
-                            html.Strong("📅 Fecha: "),
-                            alert_row['Timestamp'].strftime('%Y-%m-%d %H:%M:%S')
-                        ], className="mb-2"),
-                        
-                        html.P([
-                            html.Strong("🚜 Unidad: "),
-                            alert_row['UnitId']
-                        ], className="mb-2"),
-                        
-                        html.P([
-                            html.Strong("🔧 Sistema: "),
-                            alert_row['sistema']
-                        ], className="mb-2")
-                    ], md=6),
-                    
-                    dbc.Col([
-                        html.P([
-                            html.Strong("📍 SubSistema: "),
-                            alert_row['subsistema']
-                        ], className="mb-2"),
-                        
-                        html.P([
-                            html.Strong("⚙️ Componente: "),
-                            alert_row['componente']
-                        ], className="mb-2"),
-                        
-                        html.P([
-                            html.Strong("📡 Fuente: "),
-                            alert_row['Trigger_type']
-                        ], className="mb-2")
-                    ], md=6)
-                ]),
-                
-                html.Hr(),
-                
+                # Alert Metadata Section
                 html.Div([
                     html.H5([
-                        html.I(className="fas fa-robot me-2"),
-                        "Diagnóstico AI"
-                    ], className="text-primary mb-3"),
+                        html.I(className="fas fa-info-circle me-2"),
+                        "Información de la Alerta"
+                    ], className="text-primary mb-3 pb-2 border-bottom"),
                     
-                    html.P(
-                        alert_row['mensaje_ia'],
-                        className="text-muted",
-                        style={'whiteSpace': 'pre-wrap'}
-                    )
+                    dbc.Row([
+                        dbc.Col([
+                            html.Div([
+                                html.Span([
+                                    html.I(className="fas fa-calendar-alt me-2 text-muted"),
+                                    html.Strong("Fecha: ")
+                                ]),
+                                html.Span(alert_row['Timestamp'].strftime('%d/%m/%Y %H:%M:%S'))
+                            ], className="mb-3"),
+                            
+                            html.Div([
+                                html.Span([
+                                    html.I(className="fas fa-truck me-2 text-muted"),
+                                    html.Strong("Unidad: ")
+                                ]),
+                                html.Span(alert_row['UnitId'], className="badge bg-primary")
+                            ], className="mb-3"),
+                            
+                            html.Div([
+                                html.Span([
+                                    html.I(className="fas fa-broadcast-tower me-2 text-muted"),
+                                    html.Strong("Fuente: ")
+                                ]),
+                                html.Span(alert_row['Trigger_type'], 
+                                         className="badge bg-info")
+                            ], className="mb-3")
+                        ], md=6),
+                        
+                        dbc.Col([
+                            html.Div([
+                                html.Span([
+                                    html.I(className="fas fa-cogs me-2 text-muted"),
+                                    html.Strong("Sistema: ")
+                                ]),
+                                html.Span(alert_row['sistema'], className="text-dark")
+                            ], className="mb-3"),
+                            
+                            html.Div([
+                                html.Span([
+                                    html.I(className="fas fa-layer-group me-2 text-muted"),
+                                    html.Strong("SubSistema: ")
+                                ]),
+                                html.Span(alert_row['subsistema'] if pd.notna(alert_row['subsistema']) else 'N/A')
+                            ], className="mb-3"),
+                            
+                            html.Div([
+                                html.Span([
+                                    html.I(className="fas fa-wrench me-2 text-muted"),
+                                    html.Strong("Componente: ")
+                                ]),
+                                html.Span(alert_row['componente'] if pd.notna(alert_row['componente']) else 'N/A')
+                            ], className="mb-3")
+                        ], md=6)
+                    ])
+                ], className="mb-4"),
+                
+                # AI Diagnosis Section - Structured
+                html.Div([
+                    html.H5([
+                        html.I(className="fas fa-brain me-2"),
+                        "Análisis Inteligente"
+                    ], className="text-primary mb-3 pb-2 border-bottom"),
+                    
+                    # Diagnosis subsection
+                    html.Div([
+                        html.H6([
+                            html.I(className="fas fa-stethoscope me-2 text-danger"),
+                            "Diagnóstico"
+                        ], className="text-dark mb-2"),
+                        html.P(
+                            diagnosis_sections['diagnosis'],
+                            className="text-muted ps-4",
+                            style={'whiteSpace': 'pre-wrap', 'lineHeight': '1.6'}
+                        )
+                    ], className="mb-3 p-3 bg-light rounded"),
+                    
+                    # Note: If AI messages are structured in the future, uncomment these sections
+                    # and implement proper parsing logic above
+                    
+                    # # Probable Cause subsection
+                    # html.Div([
+                    #     html.H6([
+                    #         html.I(className="fas fa-search me-2 text-warning"),
+                    #         "Causa Probable"
+                    #     ], className="text-dark mb-2"),
+                    #     html.P(
+                    #         diagnosis_sections['cause'] or "Análisis en progreso...",
+                    #         className="text-muted ps-4"
+                    #     )
+                    # ], className="mb-3 p-3 bg-light rounded"),
+                    
+                    # # Operational Risk subsection
+                    # html.Div([
+                    #     html.H6([
+                    #         html.I(className="fas fa-exclamation-triangle me-2 text-danger"),
+                    #         "Riesgo Operacional"
+                    #     ], className="text-dark mb-2"),
+                    #     html.P(
+                    #         diagnosis_sections['risk'] or "Evaluación pendiente...",
+                    #         className="text-muted ps-4"
+                    #     )
+                    # ], className="mb-3 p-3 bg-light rounded"),
+                    
+                    # # Recommended Actions subsection
+                    # html.Div([
+                    #     html.H6([
+                    #         html.I(className="fas fa-tasks me-2 text-success"),
+                    #         "Acciones Recomendadas"
+                    #     ], className="text-dark mb-2"),
+                    #     html.P(
+                    #         diagnosis_sections['actions'] or "Recomendaciones en desarrollo...",
+                    #         className="text-muted ps-4"
+                    #     )
+                    # ], className="mb-3 p-3 bg-light rounded")
                 ])
             ])
-        ], className="shadow mb-4")
+        ], className="shadow-sm mb-4 border-0")
         
         logger.info(f"Created alert detail card for FusionID: {alert_row.get('FusionID', 'N/A')}")
         return card_content

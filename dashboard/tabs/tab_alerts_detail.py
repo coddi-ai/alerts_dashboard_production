@@ -31,22 +31,35 @@ def create_layout() -> html.Div:
     logger.info("Creating Alerts Detail Tab layout")
     
     layout = html.Div([
+        # Page Header
+        html.Div([
+            html.H3([
+                html.I(className="fas fa-microscope me-2"),
+                "Análisis Detallado de Alerta"
+            ], className="text-primary mb-2"),
+            html.P("Explore evidencia completa de telemetría, tribología y mantenimiento", 
+                   className="text-muted")
+        ], className="mb-4"),
+        
         # Filters Section
         dbc.Card([
             dbc.CardHeader([
                 html.H5([
                     html.I(className="fas fa-filter me-2"),
-                    "Filtros"
+                    "Filtros de Búsqueda"
                 ], className="mb-0")
-            ]),
+            ], className="bg-light"),
             dbc.CardBody([
                 dbc.Row([
                     # Unit Filter
                     dbc.Col([
-                        html.Label("Unidad:", className="fw-bold mb-2"),
+                        html.Label([
+                            html.I(className="fas fa-truck me-1"),
+                            "Unidad"
+                        ], className="fw-bold mb-2"),
                         dcc.Dropdown(
                             id='detail-filter-unit',
-                            placeholder="Seleccionar unidad...",
+                            placeholder="Todas las unidades...",
                             clearable=True,
                             searchable=True,
                             multi=True
@@ -55,10 +68,13 @@ def create_layout() -> html.Div:
                     
                     # System Filter
                     dbc.Col([
-                        html.Label("Sistema:", className="fw-bold mb-2"),
+                        html.Label([
+                            html.I(className="fas fa-cogs me-1"),
+                            "Sistema"
+                        ], className="fw-bold mb-2"),
                         dcc.Dropdown(
                             id='detail-filter-sistema',
-                            placeholder="Seleccionar sistema...",
+                            placeholder="Todos los sistemas...",
                             clearable=True,
                             multi=True
                         )
@@ -66,12 +82,15 @@ def create_layout() -> html.Div:
                     
                     # Has Telemetry Filter
                     dbc.Col([
-                        html.Label("Con Telemetría:", className="fw-bold mb-2"),
+                        html.Label([
+                            html.I(className="fas fa-signal me-1"),
+                            "Con Telemetría"
+                        ], className="fw-bold mb-2"),
                         dcc.Dropdown(
                             id='detail-filter-telemetry',
                             options=[
-                                {'label': 'Sí', 'value': 'yes'},
-                                {'label': 'No', 'value': 'no'}
+                                {'label': '✓ Sí', 'value': 'yes'},
+                                {'label': '✗ No', 'value': 'no'}
                             ],
                             placeholder="Todos",
                             clearable=True
@@ -80,12 +99,15 @@ def create_layout() -> html.Div:
                     
                     # Has Tribology Filter
                     dbc.Col([
-                        html.Label("Con Tribología:", className="fw-bold mb-2"),
+                        html.Label([
+                            html.I(className="fas fa-oil-can me-1"),
+                            "Con Tribología"
+                        ], className="fw-bold mb-2"),
                         dcc.Dropdown(
                             id='detail-filter-tribology',
                             options=[
-                                {'label': 'Sí', 'value': 'yes'},
-                                {'label': 'No', 'value': 'no'}
+                                {'label': '✓ Sí', 'value': 'yes'},
+                                {'label': '✗ No', 'value': 'no'}
                             ],
                             placeholder="Todos",
                             clearable=True
@@ -99,22 +121,31 @@ def create_layout() -> html.Div:
         dbc.Card([
             dbc.CardHeader([
                 html.H5([
-                    html.I(className="fas fa-search me-2"),
-                    "Seleccionar Alerta"
+                    html.I(className="fas fa-bullseye me-2"),
+                    "Selección de Alerta"
                 ], className="mb-0")
-            ]),
+            ], className="bg-primary text-white"),
             dbc.CardBody([
-                html.Label("Alerta:", className="fw-bold mb-2"),
-                dcc.Dropdown(
-                    id='alert-selector-dropdown',
-                    placeholder="Seleccione una alerta...",
-                    clearable=True,
-                    searchable=True
-                ),
-                html.Small(
-                    "También puede seleccionar una alerta desde la Vista General",
-                    className="text-muted mt-2 d-block"
-                )
+                dbc.Row([
+                    dbc.Col([
+                        html.Label([
+                            html.I(className="fas fa-search me-1"),
+                            "Buscar alerta:"
+                        ], className="fw-bold mb-2"),
+                        dcc.Dropdown(
+                            id='alert-selector-dropdown',
+                            placeholder="Buscar por ID, unidad, sistema...",
+                            clearable=True,
+                            searchable=True
+                        )
+                    ], md=12)
+                ]),
+                html.Div([
+                    html.Small([
+                        html.I(className="fas fa-info-circle me-1"),
+                        "También puede seleccionar una alerta desde la Vista General"
+                    ], className="text-muted mt-2 d-block")
+                ])
             ])
         ], className="shadow-sm mb-4"),
         
@@ -186,9 +217,21 @@ def create_alert_detail_content(
     
     # 2. Telemetry Evidence: TimeSeries | GPS Route (conditional)
     if show_telemetry:
+        # Section header for telemetry evidence
+        sections.append(
+            html.Div([
+                html.H4([
+                    html.I(className="fas fa-signal me-2"),
+                    "Evidencia de Telemetría"
+                ], className="text-primary mb-3 mt-4 pb-2 border-bottom"),
+                html.P("Análisis de datos de sensores y ubicación GPS durante el evento", 
+                       className="text-muted mb-3")
+            ])
+        )
+        
         sections.append(
             dbc.Row([
-                # Sensor Trends (left side - 6 columns)
+                # Sensor Trends (left side - 7 columns)
                 dbc.Col([
                     dbc.Card([
                         dbc.CardHeader([
@@ -196,7 +239,7 @@ def create_alert_detail_content(
                                 html.I(className="fas fa-chart-line me-2"),
                                 "Tendencias de Sensores"
                             ], className="mb-0")
-                        ]),
+                        ], className="bg-light"),
                         dbc.CardBody([
                             dcc.Loading(
                                 id="loading-sensor-trends",
@@ -210,17 +253,17 @@ def create_alert_detail_content(
                             )
                         ])
                     ], className="shadow-sm mb-4")
-                ], md=6),
+                ], md=7),
                 
-                # GPS Map (right side - 6 columns)
+                # GPS Map (right side - 5 columns)
                 dbc.Col([
                     dbc.Card([
                         dbc.CardHeader([
                             html.H5([
                                 html.I(className="fas fa-map-marked-alt me-2"),
-                                "Ruta GPS"
+                                "Ubicación y Ruta"
                             ], className="mb-0")
-                        ]),
+                        ], className="bg-light"),
                         dbc.CardBody([
                             dcc.Loading(
                                 id="loading-gps-map",
@@ -229,27 +272,29 @@ def create_alert_detail_content(
                                     dcc.Graph(
                                         id='gps-route-map',
                                         config={'displayModeBar': True},
-                                        style={'height': '600px'}
+                                        style={'height': '500px'}
                                     )
                                 ]
                             )
                         ])
                     ], className="shadow-sm mb-4")
-                ], md=6)
+                ], md=5)
             ])
         )
         
         # 3. KPIs Row (full width: 3 KPIs side by side)
         sections.append(
+            html.Div([
+                html.H5([
+                    html.I(className="fas fa-tachometer-alt me-2"),
+                    "Contexto Operacional"
+                ], className="text-secondary mb-3")
+            ])
+        )
+        sections.append(
             dbc.Row([
                 dbc.Col([
                     dbc.Card([
-                        dbc.CardHeader([
-                            html.H5([
-                                html.I(className="fas fa-tachometer-alt me-2"),
-                                "Indicadores de Contexto"
-                            ], className="mb-0")
-                        ]),
                         dbc.CardBody([
                             dcc.Loading(
                                 id="loading-context-kpis",
@@ -258,14 +303,26 @@ def create_alert_detail_content(
                                     dbc.Row(id='context-kpis-container', className="g-3")
                                 ]
                             )
-                        ])
-                    ], className="shadow-sm mb-4")
+                        ], className="p-2")
+                    ], className="shadow-sm mb-4 border-0")
                 ], md=12)
             ])
         )
     
     # 4. Oil Evidence: Radar Chart (conditional - full width)
     if show_oil:
+        # Section header for oil evidence
+        sections.append(
+            html.Div([
+                html.H4([
+                    html.I(className="fas fa-oil-can me-2"),
+                    "Evidencia Tribológica"
+                ], className="text-primary mb-3 mt-4 pb-2 border-bottom"),
+                html.P("Análisis de aceite y desgaste de componentes", 
+                       className="text-muted mb-3")
+            ])
+        )
+        
         sections.append(
             dbc.Row([
                 dbc.Col([
@@ -273,9 +330,9 @@ def create_alert_detail_content(
                         dbc.CardHeader([
                             html.H5([
                                 html.I(className="fas fa-flask me-2"),
-                                "Evidencia de Tribología - Análisis de Aceite"
+                                "Niveles de Elementos y Estado"
                             ], className="mb-0")
-                        ]),
+                        ], className="bg-light"),
                         dbc.CardBody([
                             dbc.Row([
                                 # Radar Chart
@@ -305,16 +362,28 @@ def create_alert_detail_content(
     
     # 5. Maintenance Evidence (conditional - full width)
     if show_maintenance:
+        # Section header for maintenance evidence
+        sections.append(
+            html.Div([
+                html.H4([
+                    html.I(className="fas fa-tools me-2"),
+                    "Historial de Mantenimiento"
+                ], className="text-primary mb-3 mt-4 pb-2 border-bottom"),
+                html.P("Actividades de mantenimiento relacionadas con el sistema afectado", 
+                       className="text-muted mb-3")
+            ])
+        )
+        
         sections.append(
             dbc.Row([
                 dbc.Col([
                     dbc.Card([
                         dbc.CardHeader([
                             html.H5([
-                                html.I(className="fas fa-tools me-2"),
-                                "Evidencia de Mantenimiento"
+                                html.I(className="fas fa-wrench me-2"),
+                                "Intervenciones Recientes"
                             ], className="mb-0")
-                        ]),
+                        ], className="bg-light"),
                         dbc.CardBody([
                             html.Div(id='maintenance-display-container')
                         ])

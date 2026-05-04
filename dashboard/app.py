@@ -45,6 +45,12 @@ import dashboard.callbacks.telemetry_callbacks
 # Import oil callbacks (uses @callback decorator, auto-registered on import)
 import dashboard.callbacks.oil_callbacks
 
+# Import menace control callbacks (uses @callback decorator, auto-registered on import)
+import dashboard.callbacks.menace_control_callbacks
+
+# Import hot sheet callbacks (uses @callback decorator, auto-registered on import)
+import dashboard.callbacks.hot_sheet_callbacks
+
 # Import health index callbacks module
 from dashboard.callbacks.health_index_callbacks import register_health_index_callbacks
 

@@ -24,7 +24,7 @@ def create_reports_tab() -> dbc.Container:
         Bootstrap container with tab layout
     """
     return dbc.Container([
-        html.H3("Reports Detail Analysis", className="mt-4 mb-3"),
+        html.H3("Análisis Detallado de Reportes", className="mt-4 mb-3"),
         html.Hr(),
         
         # STICKY REPORT IDENTITY HEADER (OIL-R-01)
@@ -37,7 +37,7 @@ def create_reports_tab() -> dbc.Container:
                             html.Label("Familia:", className="fw-bold mb-1", style={'fontSize': '0.9rem'}),
                             dcc.Dropdown(
                                 id='reports-familia-selector',
-                                placeholder='Select machine type...',
+                                placeholder='Seleccionar tipo de máquina...',
                                 className="mb-2"
                             )
                         ], width=3),
@@ -45,7 +45,7 @@ def create_reports_tab() -> dbc.Container:
                             html.Label("Equipo:", className="fw-bold mb-1", style={'fontSize': '0.9rem'}),
                             dcc.Dropdown(
                                 id='reports-equipo-selector',
-                                placeholder='Select equipment...',
+                                placeholder='Seleccionar equipo...',
                                 className="mb-2"
                             )
                         ], width=3),
@@ -53,15 +53,15 @@ def create_reports_tab() -> dbc.Container:
                             html.Label("Componente:", className="fw-bold mb-1", style={'fontSize': '0.9rem'}),
                             dcc.Dropdown(
                                 id='reports-component-selector',
-                                placeholder='Select component...',
+                                placeholder='Seleccionar componente...',
                                 className="mb-2"
                             )
                         ], width=3),
                         dbc.Col([
-                            html.Label("Sample Date:", className="fw-bold mb-1", style={'fontSize': '0.9rem'}),
+                            html.Label("Fecha de Muestra:", className="fw-bold mb-1", style={'fontSize': '0.9rem'}),
                             dcc.Dropdown(
                                 id='reports-date-selector',
-                                placeholder='Select date...',
+                                placeholder='Seleccionar fecha...',
                                 className="mb-2"
                             )
                         ], width=3)
@@ -81,50 +81,40 @@ def create_reports_tab() -> dbc.Container:
         
         # DECISION SUMMARY SECTION (OIL-R-02)
         dbc.Card([
-            dbc.CardHeader("🎯 Decision Summary", className="fw-bold bg-primary text-white"),
+            dbc.CardHeader("🎯 Resumen de Decisión", className="fw-bold bg-primary text-white"),
             dbc.CardBody(
                 html.Div(id='reports-decision-summary')
             )
         ], className="mb-4"),
         
-        # AI RECOMMENDATION SECTION (OIL-R-04) - Moved before evidence
+        # AI RECOMMENDATION SECTION (OIL-R-04) - Plain text display
         dbc.Card([
-            dbc.CardHeader("🤖 AI Analysis", className="fw-bold bg-info text-white"),
-            dbc.CardBody([
-                # Diagnosis
-                html.Div([
-                    html.H6("Diagnostic Explanation", className="fw-bold mb-2"),
-                    html.Div(id='reports-ai-diagnosis', className="mb-3")
-                ]),
-                html.Hr(),
-                # Action
-                html.Div([
-                    html.H5("⚠️ Recommended Action", className="fw-bold text-danger mb-2"),
-                    html.Div(id='reports-ai-action')
-                ])
-            ])
+            dbc.CardHeader("🤖 Análisis y Recomendación de IA", className="fw-bold bg-info text-white"),
+            dbc.CardBody(
+                html.Div(id='reports-ai-diagnosis')  # Single plain text display
+            )
         ], className="mb-4"),
         
         # EVIDENCE ANALYSIS SECTION (OIL-R-03) - Tables AND Radar Charts
         dbc.Card([
-            dbc.CardHeader("📊 Essay Evidence Analysis", className="fw-bold"),
+            dbc.CardHeader("📊 Análisis de Evidencia por Ensayo", className="fw-bold"),
             dbc.CardBody([
-                html.P("Evidence grouped by essay category (tables + radar charts)", className="text-muted mb-3"),
+                html.P("Evidencia agrupada por categoría de ensayo (tablas + gráficos radiales)", className="text-muted mb-3"),
                 html.Div(id='reports-evidence-container')  # Contains both tables and radar charts
             ])
         ], className="mb-4"),
         
         # TIME SERIES ANALYSIS (OIL-R-05) - User-selectable
         dbc.Card([
-            dbc.CardHeader("📈 Time Series Analysis", className="fw-bold"),
+            dbc.CardHeader("📈 Análisis de Series Temporales", className="fw-bold"),
             dbc.CardBody([
-                html.P("Breached essays are pre-selected by default. You can modify the selection below.", 
+                html.P("Los ensayos fuera de límite están preseleccionados por defecto. Puede modificar la selección a continuación.", 
                        className="text-muted mb-2"),
-                html.Label("Select Essays to Plot:", className="fw-bold mb-2"),
+                html.Label("Seleccionar Ensayos para Graficar:", className="fw-bold mb-2"),
                 dcc.Dropdown(
                     id='reports-essays-selector',
                     multi=True,
-                    placeholder='Select essays (up to 6)...',
+                    placeholder='Seleccionar ensayos (hasta 6)...',
                     className="mb-3"
                 ),
                 dcc.Graph(id='reports-time-series-chart')
@@ -133,7 +123,7 @@ def create_reports_tab() -> dbc.Container:
         
         # DELTA SUMMARY COMPARISON (OIL-R-06)
         dbc.Card([
-            dbc.CardHeader("🔄 Change Analysis vs Previous Report", className="fw-bold"),
+            dbc.CardHeader("🔄 Análisis de Cambios vs Reporte Anterior", className="fw-bold"),
             dbc.CardBody(
                 html.Div(id='reports-delta-summary')
             )

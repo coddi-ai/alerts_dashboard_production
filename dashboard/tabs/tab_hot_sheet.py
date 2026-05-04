@@ -1,8 +1,8 @@
 """
-General Overview Tab Layout.
+Hot Sheet Tab Layout.
 
 This tab provides a quick status overview of all units with traffic light indicators
-combining telemetry and tribology status.
+combining alerts and tribology status.
 """
 
 from dash import html, dcc
@@ -14,20 +14,20 @@ logger = get_logger(__name__)
 
 def create_layout() -> html.Div:
     """
-    Create layout for General Overview tab.
+    Create layout for Hot Sheet tab.
     
     Returns:
-        Dash HTML Div with general overview layout
+        Dash HTML Div with hot sheet layout
     """
-    logger.info("Creating General Overview Tab layout")
+    logger.info("Creating Hot Sheet Tab layout")
     
     layout = html.Div([
         # Header Section
         dbc.Row([
             dbc.Col([
                 html.H2([
-                    html.I(className="fas fa-chart-pie me-3"),
-                    "Resumen General - Estado de Unidades"
+                    html.I(className="fas fa-th me-3"),
+                    "Hot Sheet - Estado de Unidades"
                 ], className="text-primary mb-1"),
                 html.P(
                     "Vista rápida del estado de todas las unidades basado en telemetría y tribología",
@@ -61,5 +61,5 @@ def create_layout() -> html.Div:
         
     ], className="container-fluid p-4")
     
-    logger.info("General Overview Tab layout created successfully")
+    logger.info("Hot Sheet Tab layout created successfully")
     return layout

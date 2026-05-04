@@ -109,7 +109,7 @@ def register_machines_callbacks(app):
         machine_file = settings.get_machine_status_path(client.lower())
         
         if not machine_file.exists():
-            return "No machine data available", ""
+            return "No hay datos de máquinas disponibles", ""
         
         try:
             df = safe_read_parquet(machine_file)
@@ -158,7 +158,7 @@ def register_machines_callbacks(app):
         Implements OIL-M-03 (persistent master-detail), OIL-M-04 (condition-focused).
         """
         if not client:
-            return "No machine selected", "light", "Select a client to view machine details"
+            return "Ninguna máquina seleccionada", "light", "Seleccione un cliente para ver detalles de la máquina"
         
         # Determine which machine to show
         unit_id = None
@@ -175,7 +175,7 @@ def register_machines_callbacks(app):
             selection_source = "dropdown"
         
         if not unit_id:
-            return "No machine selected", "light", "Select a machine from the priority table or dropdown above"
+            return "Ninguna máquina seleccionada", "light", "Seleccione una máquina de la tabla de prioridad o del menú desplegable"
         
         # Load data
         settings = get_settings()
@@ -184,7 +184,7 @@ def register_machines_callbacks(app):
         logger.info(f"Looking for unit_id: {unit_id} in classified reports")
         
         if not reports_file.exists():
-            return "No machine selected", "light", "No reports data available"
+            return "Ninguna máquina seleccionada", "light", "No hay datos de reportes disponibles"
         
         try:
             df = safe_read_parquet(reports_file)
@@ -245,7 +245,7 @@ def register_machines_callbacks(app):
             
         except Exception as e:
             logger.error(f"Error updating machine detail for {unit_id}: {str(e)}")
-            return f"Error loading machine {unit_id}", "danger", f"Error: {str(e)}"
+            return f"Error al cargar máquina {unit_id}", "danger", f"Error: {str(e)}"
     
     
     # ========================================

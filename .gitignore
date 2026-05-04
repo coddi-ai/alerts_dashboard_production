@@ -60,7 +60,7 @@ venv.bak/
 
 # Jupyter Notebook
 .ipynb_checkpoints
-
+.ipynb
 # mypy
 .mypy_cache/
 .dmypy.json

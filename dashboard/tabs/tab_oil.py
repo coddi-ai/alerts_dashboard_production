@@ -46,13 +46,13 @@ def create_layout() -> html.Div:
             value='fleet-overview',
             children=[
                 dcc.Tab(
-                    label='Fleet Overview',
+                    label='Visión de Flota',
                     value='fleet-overview',
                     className='custom-tab',
                     selected_className='custom-tab--selected'
                 ),
                 dcc.Tab(
-                    label='Report Detail',
+                    label='Detalle de Reporte',
                     value='report-detail',
                     className='custom-tab',
                     selected_className='custom-tab--selected'

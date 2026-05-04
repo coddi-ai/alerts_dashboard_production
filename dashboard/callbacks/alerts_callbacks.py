@@ -28,7 +28,6 @@ from src.data.loaders import (
 from dashboard.components.alerts_charts import (
     create_alerts_per_unit_chart,
     create_alerts_per_month_chart,
-    create_trigger_distribution_treemap,
     create_system_distribution_pie_chart,
     create_oil_radar_chart,
     create_sensor_trends_chart_golden,
@@ -94,12 +93,11 @@ def render_tab_content(active_tab):
     [
         Input('alerts-unit-distribution-chart', 'clickData'),
         Input('alerts-month-distribution-chart', 'clickData'),
-        Input('alerts-trigger-distribution-chart', 'clickData'),
         Input('alerts-system-distribution-chart', 'clickData')
     ],
     [State('alerts-filter-store', 'data')]
 )
-def update_filters_from_clicks(unit_click, month_click, trigger_click, system_click, current_filters):
+def update_filters_from_clicks(unit_click, month_click, system_click, current_filters):
     """
     Update filter store based on chart clicks.
     Toggle behavior: clicking the same value again clears that filter.
@@ -107,7 +105,6 @@ def update_filters_from_clicks(unit_click, month_click, trigger_click, system_cl
     Args:
         unit_click: Click data from unit distribution chart
         month_click: Click data from month distribution chart
-        trigger_click: Click data from trigger distribution chart
         system_click: Click data from system distribution chart
         current_filters: Current filter state
     
@@ -144,17 +141,6 @@ def update_filters_from_clicks(unit_click, month_click, trigger_click, system_cl
             filters['month'] = month
             logger.info(f"Month filter set to: {month}")
     
-    # Handle trigger click - toggle behavior
-    elif trigger_id == 'alerts-trigger-distribution-chart' and trigger_click:
-        trigger = trigger_click['points'][0]['label']
-        if filters.get('trigger') == trigger:
-            # Clicking same trigger - clear filter
-            filters.pop('trigger', None)
-            logger.info(f"Trigger filter cleared (was: {trigger})")
-        else:
-            filters['trigger'] = trigger
-            logger.info(f"Trigger filter set to: {trigger}")
-    
     # Handle system click - toggle behavior
     elif trigger_id == 'alerts-system-distribution-chart' and system_click:
         system = system_click['points'][0]['label']
@@ -177,7 +163,6 @@ def update_filters_from_clicks(unit_click, month_click, trigger_click, system_cl
     [
         Output('alerts-unit-distribution-chart', 'figure'),
         Output('alerts-month-distribution-chart', 'figure'),
-        Output('alerts-trigger-distribution-chart', 'figure'),
         Output('alerts-system-distribution-chart', 'figure'),
         Output('alerts-summary-stats', 'children'),
         Output('alerts-table-container', 'children')
@@ -193,10 +178,10 @@ def update_general_tab(client: str, filters: dict):
     
     Args:
         client: Selected client identifier
-        filters: Dictionary with active filters (unit, month, trigger, sistema)
+        filters: Dictionary with active filters (unit, month, sistema)
     
     Returns:
-        Tuple of (unit_chart, month_chart, trigger_chart, system_chart, stats, table)
+        Tuple of (unit_chart, month_chart, system_chart, stats, table)
     """
     if not client:
         raise PreventUpdate
@@ -212,7 +197,7 @@ def update_general_tab(client: str, filters: dict):
         logger.warning(f"No alerts data available for client: {client}")
         empty_fig = {'data': [], 'layout': {'title': 'No data available'}}
         empty_alert = dbc.Alert("No hay datos de alertas disponibles", color="warning")
-        return empty_fig, empty_fig, empty_fig, empty_fig, empty_alert, empty_alert
+        return empty_fig, empty_fig, empty_fig, empty_alert, empty_alert
     
     try:
         # Apply filters if present
@@ -228,9 +213,6 @@ def update_general_tab(client: str, filters: dict):
                 filtered_df['Month_str'] = filtered_df['Month'].astype(str).str[:7]
                 filtered_df = filtered_df[filtered_df['Month_str'] == month_str]
                 logger.info(f"After month filter ({month_str}): {len(filtered_df)} rows")
-            if 'trigger' in filters and filters['trigger']:
-                filtered_df = filtered_df[filtered_df['Trigger_type'] == filters['trigger']]
-                logger.info(f"After trigger filter: {len(filtered_df)} rows")
             if 'sistema' in filters and filters['sistema']:
                 filtered_df = filtered_df[filtered_df['sistema'] == filters['sistema']]
                 logger.info(f"After sistema filter: {len(filtered_df)} rows")
@@ -239,12 +221,11 @@ def update_general_tab(client: str, filters: dict):
             logger.warning("No data after applying filters")
             empty_fig = {'data': [], 'layout': {'title': 'No hay datos con los filtros aplicados'}}
             empty_alert = dbc.Alert("No hay datos con los filtros aplicados", color="info")
-            return empty_fig, empty_fig, empty_fig, empty_fig, empty_alert, empty_alert
+            return empty_fig, empty_fig, empty_fig, empty_alert, empty_alert
         
-        # Create charts (using filtered data for visualization)
+        # Create charts (using filtered data for visualization) - removed trigger_chart
         unit_chart = create_alerts_per_unit_chart(filtered_df)
         month_chart = create_alerts_per_month_chart(filtered_df)
-        trigger_chart = create_trigger_distribution_treemap(filtered_df)
         system_chart = create_system_distribution_pie_chart(filtered_df)
         
         # Calculate summary statistics
@@ -259,13 +240,13 @@ def update_general_tab(client: str, filters: dict):
         table = create_alerts_datatable(filtered_df)
         
         logger.info(f"General tab updated successfully with {total_alerts} alerts")
-        return unit_chart, month_chart, trigger_chart, system_chart, stats, table
+        return unit_chart, month_chart, system_chart, stats, table
     
     except Exception as e:
         logger.error(f"Error updating general tab: {e}")
         error_fig = {'data': [], 'layout': {'title': f'Error: {str(e)}'}}
         error_alert = dbc.Alert(f"Error al cargar datos: {str(e)}", color="danger")
-        return error_fig, error_fig, error_fig, error_fig, error_alert, error_alert
+        return error_fig, error_fig, error_fig, error_alert, error_alert
 
 
 @callback(

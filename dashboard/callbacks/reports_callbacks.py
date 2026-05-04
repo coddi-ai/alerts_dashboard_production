@@ -325,7 +325,6 @@ def register_reports_callbacks(app):
          Output('reports-decision-summary', 'children'),
          Output('reports-evidence-container', 'children'),
          Output('reports-ai-diagnosis', 'children'),
-         Output('reports-ai-action', 'children'),
          Output('reports-essays-selector', 'options'),
          Output('reports-essays-selector', 'value'),
          Output('reports-delta-summary', 'children')],
@@ -344,8 +343,8 @@ def register_reports_callbacks(app):
         
         if not all([sample_date, component, equipo, familia, client]):
             logger.warning(f"Missing parameters in update_report_display")
-            return (html.Div(), html.P("Select filters"), html.Div(), 
-                   html.P("No data"), html.P("No data"), [], None, html.Div())
+            return (html.Div(), html.P("Seleccionar filtros"), html.Div(), 
+                   html.P("Sin datos"), [], None, html.Div())
         
         settings = get_settings()
         reports_file = settings.get_classified_reports_path(client)
@@ -355,8 +354,8 @@ def register_reports_callbacks(app):
         
         if not reports_file.exists():
             logger.error(f"Reports file not found: {reports_file}")
-            return (html.Div(), html.P("No data"), html.Div(),
-                   html.P("No data"), html.P("No data"), [], None, html.Div())
+            return (html.Div(), html.P("Sin datos"), html.Div(),
+                   html.P("Sin datos"), [], None, html.Div())
         
         try:
             df = safe_read_parquet(reports_file)
@@ -378,8 +377,8 @@ def register_reports_callbacks(app):
             
             if sample_df.empty:
                 logger.warning(f"No sample found after filtering")
-                return (html.Div(), html.P("No sample found"), html.Div(),
-                       html.P("No data"), html.P("No data"), [], None, html.Div())
+                return (html.Div(), html.P("No se encontró muestra"), html.Div(),
+                       html.P("Sin datos"), [], None, html.Div())
             
             sample = sample_df.iloc[0]
             logger.info(f"Sample found: {sample.get('sampleNumber', 'N/A')}")
@@ -393,8 +392,8 @@ def register_reports_callbacks(app):
             # 3. Evidence Tables AND Radar Charts (OIL-R-03)
             evidence_container = create_evidence_tables_and_radar(sample, limits, df)
             
-            # 4. AI Diagnosis and Action (OIL-R-04)
-            ai_diagnosis, ai_action = create_ai_diagnosis_and_action(sample)
+            # 4. AI Recommendation (OIL-R-04) - Plain text display
+            ai_recommendation, _ = create_ai_diagnosis_and_action(sample)
             
             # 5. Essay selector options and pre-selection (OIL-R-05)
             essay_options = get_essay_options(df)
@@ -418,12 +417,12 @@ def register_reports_callbacks(app):
             delta_summary = create_delta_summary(sample, df, equipo, component, limits, client, familia)
             
             logger.info("Successfully generated all report components")
-            return identity, decision_summary, evidence_container, ai_diagnosis, ai_action, essay_options, breached_essays, delta_summary
+            return identity, decision_summary, evidence_container, ai_recommendation, essay_options, breached_essays, delta_summary
             
         except Exception as e:
             logger.exception(f"Error in update_report_display: {e}")
             return (html.Div(), f"Error: {str(e)}", html.Div(),
-                   "Error", "Error", [], None, html.Div())
+                   "Error", [], None, html.Div())
     
     
     # Time series callback - Create subplot for each essay
@@ -527,7 +526,7 @@ def register_reports_callbacks(app):
                                 x=essay_dates,
                                 y=[thresholds['threshold_alert']] * len(essay_dates),
                                 mode='lines',
-                                name='Alert',
+                                name='Alerta',
                                 line=dict(color='orange', dash='dash', width=1),
                                 showlegend=(idx == 1)
                             ),
@@ -541,7 +540,7 @@ def register_reports_callbacks(app):
                                 x=essay_dates,
                                 y=[thresholds['threshold_critic']] * len(essay_dates),
                                 mode='lines',
-                                name='Critic',
+                                name='Crítico',
                                 line=dict(color='red', dash='dash', width=1),
                                 showlegend=(idx == 1)
                             ),
@@ -552,12 +551,12 @@ def register_reports_callbacks(app):
                 fig.update_yaxes(title_text="ppm", row=idx, col=1)
             
             # Update x-axis label (only last one)
-            fig.update_xaxes(title_text="Date", row=len(essays), col=1)
+            fig.update_xaxes(title_text="Fecha", row=len(essays), col=1)
             
             # Update layout
             fig.update_layout(
                 height=300 * len(essays),
-                title_text="Time Series Analysis",
+                title_text="Análisis de Series Temporales",
                 hovermode='x unified',
                 showlegend=True,
                 legend=dict(
@@ -689,7 +688,7 @@ def create_radar_charts_by_group(sample, limits, df):
         if limits and client in limits and machine in limits[client] and component_normalized in limits[client][machine]:
             comp_limits = limits[client][machine][component_normalized]
         else:
-            return html.P("No limits available for radar charts", className="text-muted")
+            return html.P("No hay límites disponibles para gráficos radiales", className="text-muted")
         
         # Create radar charts
         charts = []
@@ -910,7 +909,7 @@ def create_value_analysis_table(sample, limits):
     client = sample.get('client', '')
     
     if not (limits and client in limits and machine in limits[client] and component in limits[client][machine]):
-        return html.P("No limits available", className="text-muted")
+        return html.P("No hay límites disponibles", className="text-muted")
     
     comp_limits = limits[client][machine][component]
     
@@ -963,7 +962,7 @@ def create_value_analysis_table(sample, limits):
                 continue
     
     if not analysis_data:
-        return html.P("No analysis data available", className="text-muted")
+        return html.P("No hay datos de análisis disponibles", className="text-muted")
     
     # Sort by status severity
     status_order = {'Crítico': 0, 'Condenatorio': 1, 'Marginal': 2, 'Normal': 3}
@@ -1183,41 +1182,34 @@ def create_report_identity_display(sample):
     return dbc.Row([
         dbc.Col([
             html.Div([
-                html.Small("Client", className="text-muted d-block"),
+                html.Small("Cliente", className="text-muted d-block"),
                 html.Strong(str(sample.get('client', 'N/A')).upper())
             ])
         ], width=2),
         dbc.Col([
             html.Div([
-                html.Small("Equipment", className="text-muted d-block"),
+                html.Small("Equipo", className="text-muted d-block"),
                 html.Strong(str(sample.get('unitId', 'N/A')).title())
             ])
         ], width=2),
         dbc.Col([
             html.Div([
-                html.Small("Component", className="text-muted d-block"),
+                html.Small("Componente", className="text-muted d-block"),
                 html.Strong(str(sample.get('componentName', 'N/A')).title())
             ])
-        ], width=2),
+        ], width=3),
         dbc.Col([
             html.Div([
-                html.Small("Sample Date", className="text-muted d-block"),
+                html.Small("Fecha de Muestra", className="text-muted d-block"),
                 html.Strong(pd.to_datetime(sample.get('sampleDate')).strftime('%Y-%m-%d') if sample.get('sampleDate') is not None else 'N/A')
             ])
         ], width=2),
         dbc.Col([
             html.Div([
-                html.Small("Status", className="text-muted d-block"),
+                html.Small("Estado", className="text-muted d-block"),
                 html.Span(sample.get('report_status', 'N/A'), className=f"badge bg-{status_color}")
             ])
-        ], width=2),
-        dbc.Col([
-            html.Div([
-                html.Small("Severity Score", className="text-muted d-block"),
-                html.Strong(f"{sample.get('severity_score', 0):.2f}", 
-                           className=f"text-{status_color}")
-            ])
-        ], width=2)
+        ], width=3)
     ], className="mt-2")
 
 
@@ -1225,13 +1217,10 @@ def create_decision_summary(sample, limits, client, machine, component):
     """
     Create decision summary section (OIL-R-02).
     
-    Prioritizes: report status, severity score, desgaste score, essays broken,
-    breached essays summary, previous sample context.
-    
-    Includes data quality validation to ensure essays_broken matches breached_essays.
+    Simplified to show: Report Status | Essays Broken | Breached Essays
     """
     if sample is None or len(sample) == 0:
-        return html.P("No data available", className="text-muted")
+        return html.P("No hay datos disponibles", className="text-muted")
     
     status_color = {
         'Anormal': 'danger',
@@ -1254,15 +1243,15 @@ def create_decision_summary(sample, limits, client, machine, component):
     # Use calculated if stored is empty or inconsistent
     essays_broken_count = int(sample.get('essays_broken', 0))
     if not stored_breached_essays and calculated_breached_essays:
+        # Successfully filled missing data with calculated values - no warning needed
         breached_essays = calculated_breached_essays
-        data_quality_warning = True
+        data_quality_warning = False
     else:
         breached_essays = stored_breached_essays
-        # Check for inconsistency
-        data_quality_warning = (essays_broken_count > 0 and len(stored_breached_essays) == 0) or \
-                              (essays_broken_count != len(stored_breached_essays))
+        # Only warn if we have essays_broken > 0 but can't show any breached essays at all
+        data_quality_warning = (essays_broken_count > 0 and len(breached_essays) == 0)
     
-    breached_text = ", ".join(breached_essays) if breached_essays else "None"
+    breached_text = ", ".join(breached_essays) if breached_essays else "Ninguno"
     
     # Previous sample context
     prev_date = "N/A"
@@ -1273,147 +1262,69 @@ def create_decision_summary(sample, limits, client, machine, component):
     
     days_prev = sample.get('daysSincePrevious')
     if days_prev is not None and not (isinstance(days_prev, float) and pd.isna(days_prev)):
-        days_since = f"{int(days_prev)} days"
+        days_since = f"{int(days_prev)} d\u00edas"
     
-    return dbc.Row([
-        # Left column - Decision metrics
+    main_summary = dbc.Row([
+        # Simplified metrics: Status | Essays Broken | Breached Essays
         dbc.Col([
             dbc.Card([
                 dbc.CardBody([
-                    html.H5("🎯 Report Outcome", className="mb-3"),
+                    html.H5("\ud83c\udfaf Resultado del Reporte", className="mb-3"),
                     dbc.Row([
                         dbc.Col([
                             html.Div([
-                                html.Small("Report Status", className="text-muted d-block mb-1"),
+                                html.Small("Estado del Reporte", className="text-muted d-block mb-1"),
                                 html.H4(html.Span(sample.get('report_status', 'N/A'), 
                                        className=f"badge bg-{status_color}"))
                             ])
                         ], width=4),
                         dbc.Col([
                             html.Div([
-                                html.Small("Severity Score", className="text-muted d-block mb-1"),
-                                html.H4(f"{sample.get('severity_score', 0):.2f}", 
+                                html.Small("Ensayos Fuera de L\u00edmite", className="text-muted d-block mb-1"),
+                                html.H3(f"{essays_broken_count}", 
                                        className=f"text-{status_color}")
                             ])
                         ], width=4),
                         dbc.Col([
                             html.Div([
-                                html.Small("Desgaste Score", className="text-muted d-block mb-1"),
-                                html.H4(f"{sample.get('desgaste_score', 0):.2f}",
-                                       className=f"text-{status_color}")
-                            ])
-                        ], width=4)
-                    ]),
-                    html.Hr(),
-                    dbc.Row([
-                        dbc.Col([
-                            html.Div([
-                                html.Small("Essays Broken", className="text-muted d-block mb-1"),
-                                html.H3(f"{sample.get('essays_broken', 0)}", 
-                                       className=f"text-{status_color}")
-                            ])
-                        ], width=6),
-                        dbc.Col([
-                            html.Div([
-                                html.Small("Breached Essays", className="text-muted d-block mb-1"),
+                                html.Small("Ensayos Cr\u00edticos", className="text-muted d-block mb-1"),
                                 html.P(breached_text, className="mb-0", 
                                       style={'fontSize': '0.9rem', 'fontWeight': 'bold'})
                             ])
-                        ], width=6)
+                        ], width=4)
                     ])
                 ])
             ], color="light")
         ], width=8),
-        # Right column - Previous sample context
+        # Previous sample context
         dbc.Col([
             dbc.Card([
                 dbc.CardBody([
-                    html.H6("📅 Previous Sample Context", className="mb-3"),
+                    html.H6("\ud83d\udcc5 Contexto de Muestra Anterior", className="mb-3"),
                     html.Div([
-                        html.Small("Previous Sample Date", className="text-muted d-block"),
+                        html.Small("Fecha de Muestra Anterior", className="text-muted d-block"),
                         html.Strong(prev_date, className="d-block mb-2")
                     ]),
                     html.Div([
-                        html.Small("Days Since Previous", className="text-muted d-block"),
+                        html.Small("D\u00edas Desde Anterior", className="text-muted d-block"),
                         html.Strong(days_since, className="d-block")
                     ])
                 ])
             ], color="light")
         ], width=4)
-    ], className="mb-2") if not data_quality_warning else html.Div([
-        dbc.Row([
-            # Left column - Decision metrics
-            dbc.Col([
-                dbc.Card([
-                    dbc.CardBody([
-                        html.H5("🎯 Report Outcome", className="mb-3"),
-                        dbc.Row([
-                            dbc.Col([
-                                html.Div([
-                                    html.Small("Report Status", className="text-muted d-block mb-1"),
-                                    html.H4(html.Span(sample.get('report_status', 'N/A'), 
-                                           className=f"badge bg-{status_color}"))
-                                ])
-                            ], width=4),
-                            dbc.Col([
-                                html.Div([
-                                    html.Small("Severity Score", className="text-muted d-block mb-1"),
-                                    html.H4(f"{sample.get('severity_score', 0):.2f}", 
-                                           className=f"text-{status_color}")
-                                ])
-                            ], width=4),
-                            dbc.Col([
-                                html.Div([
-                                    html.Small("Desgaste Score", className="text-muted d-block mb-1"),
-                                    html.H4(f"{sample.get('desgaste_score', 0):.2f}",
-                                           className=f"text-{status_color}")
-                                ])
-                            ], width=4)
-                        ]),
-                        html.Hr(),
-                        dbc.Row([
-                            dbc.Col([
-                                html.Div([
-                                    html.Small("Essays Broken", className="text-muted d-block mb-1"),
-                                    html.H3(f"{essays_broken_count}", 
-                                           className=f"text-{status_color}")
-                                ])
-                            ], width=6),
-                            dbc.Col([
-                                html.Div([
-                                    html.Small("Breached Essays", className="text-muted d-block mb-1"),
-                                    html.P(breached_text, className="mb-0", 
-                                          style={'fontSize': '0.9rem', 'fontWeight': 'bold'})
-                                ])
-                            ], width=6)
-                        ])
-                    ])
-                ], color="light")
-            ], width=8),
-            # Right column - Previous sample context
-            dbc.Col([
-                dbc.Card([
-                    dbc.CardBody([
-                        html.H6("📅 Previous Sample Context", className="mb-3"),
-                        html.Div([
-                            html.Small("Previous Sample Date", className="text-muted d-block"),
-                            html.Strong(prev_date, className="d-block mb-2")
-                        ]),
-                        html.Div([
-                            html.Small("Days Since Previous", className="text-muted d-block"),
-                            html.Strong(days_since, className="d-block")
-                        ])
-                    ])
-                ], color="light")
-            ], width=4)
-        ], className="mb-2"),
-        # Data quality warning
-        dbc.Alert([
-            html.Strong("⚠️ Data Quality Notice: "),
-            f"The essays_broken count ({essays_broken_count}) doesn't match the breached_essays list. ",
-            "Showing dynamically calculated breached essays based on actual values and thresholds."
-        ], color="warning", className="mb-0")
-    ])
+    ], className="mb-2")
+    
+    if data_quality_warning:
+        return html.Div([
+            main_summary,
+            dbc.Alert([
+                html.Strong("\u26a0\ufe0f Aviso de Calidad de Datos: "),
+                f"El conteo de ensayos fuera de l\u00edmite ({essays_broken_count}) no coincide con la lista de ensayos cr\u00edticos. ",
+                "Mostrando ensayos cr\u00edticos calculados din\u00e1micamente basados en valores reales y umbrales."
+            ], color="warning", className="mb-0")
+        ])
+    else:
+        return main_summary
 
 
 def create_evidence_tables(sample, limits, df):
@@ -1459,7 +1370,7 @@ def create_evidence_tables(sample, limits, df):
         client = sample.get('client', '')
         
         if not (limits and client in limits and machine in limits[client] and component_normalized in limits[client][machine]):
-            return html.P("No limits available for evidence tables", className="text-muted")
+            return html.P("No hay límites disponibles para tablas de evidencia", className="text-muted")
         
         comp_limits = limits[client][machine][component_normalized]
         
@@ -1514,7 +1425,7 @@ def create_evidence_tables(sample, limits, df):
                     'value': round(value, 2),
                     'threshold_band': f"{round(normal, 1)} / {round(alert, 1)} / {round(critic, 1)}",
                     'status': status,
-                    'breached': '⚠️ Yes' if is_breached else 'No',
+                    'breached': '⚠️ Sí' if is_breached else 'No',
                     '_color': color
                 })
             
@@ -1525,11 +1436,11 @@ def create_evidence_tables(sample, limits, df):
             # Create table
             group_table = dash_table.DataTable(
                 columns=[
-                    {'name': 'Essay', 'id': 'essay'},
-                    {'name': 'Current Value (ppm)', 'id': 'value', 'type': 'numeric'},
-                    {'name': 'Thresholds (N/A/C)', 'id': 'threshold_band'},
-                    {'name': 'Status', 'id': 'status'},
-                    {'name': 'Breached?', 'id': 'breached'}
+                    {'name': 'Ensayo', 'id': 'essay'},
+                    {'name': 'Valor Actual (ppm)', 'id': 'value', 'type': 'numeric'},
+                    {'name': 'Umbrales (N/A/C)', 'id': 'threshold_band'},
+                    {'name': 'Estado', 'id': 'status'},
+                    {'name': '¿Crítico?', 'id': 'breached'}
                 ],
                 data=[{k: v for k, v in item.items() if k != '_color'} for item in table_data],
                 style_cell={
@@ -1571,7 +1482,7 @@ def create_evidence_tables(sample, limits, df):
                 ], className="mb-4")
             )
         
-        return html.Div(tables) if tables else html.P("No evidence data available", className="text-muted")
+        return html.Div(tables) if tables else html.P("No hay datos de evidencia disponibles", className="text-muted")
         
     except Exception as e:
         logger.exception(f"Error creating evidence tables: {e}")
@@ -1620,7 +1531,7 @@ def create_evidence_tables_and_radar(sample, limits, df):
         client = sample.get('client', '')
         
         if not (limits and client in limits and machine in limits[client] and component_normalized in limits[client][machine]):
-            return html.P("No limits available for evidence analysis", className="text-muted")
+            return html.P("No hay límites disponibles para análisis de evidencia", className="text-muted")
         
         comp_limits = limits[client][machine][component_normalized]
         
@@ -1677,7 +1588,7 @@ def create_evidence_tables_and_radar(sample, limits, df):
                     'value': round(value, 2),
                     'threshold_band': f"{round(normal, 1)} / {round(alert, 1)} / {round(critic, 1)}",
                     'status': status,
-                    'breached': '⚠️ Yes' if is_breached else 'No',
+                    'breached': '⚠️ Sí' if is_breached else 'No',
                     '_color': color
                 })
             
@@ -1688,11 +1599,11 @@ def create_evidence_tables_and_radar(sample, limits, df):
             # Create table
             group_table = dash_table.DataTable(
                 columns=[
-                    {'name': 'Essay', 'id': 'essay'},
-                    {'name': 'Value (ppm)', 'id': 'value', 'type': 'numeric'},
-                    {'name': 'Thresholds (N/A/C)', 'id': 'threshold_band'},
-                    {'name': 'Status', 'id': 'status'},
-                    {'name': 'Breached?', 'id': 'breached'}
+                    {'name': 'Ensayo', 'id': 'essay'},
+                    {'name': 'Valor (ppm)', 'id': 'value', 'type': 'numeric'},
+                    {'name': 'Umbrales (N/A/C)', 'id': 'threshold_band'},
+                    {'name': 'Estado', 'id': 'status'},
+                    {'name': '\u00bfCr\u00edtico?', 'id': 'breached'}
                 ],
                 data=[{k: v for k, v in item.items() if k != '_color'} for item in table_data],
                 style_cell={
@@ -1841,14 +1752,14 @@ def create_evidence_tables_and_radar(sample, limits, df):
                         ], width=7),
                         # Right: Radar (secondary)
                         dbc.Col([
-                            html.H6("Visual Pattern", className="text-muted mb-2", style={'fontSize': '0.9rem'}),
+                            html.H6("Patrón Visual", className="text-muted mb-2", style={'fontSize': '0.9rem'}),
                             dcc.Graph(figure=fig, config={'displayModeBar': False})
                         ], width=5)
                     ])
                 ], className="mb-4")
             )
         
-        return html.Div(sections) if sections else html.P("No evidence data available", className="text-muted")
+        return html.Div(sections) if sections else html.P("No hay datos de evidencia disponibles", className="text-muted")
         
     except Exception as e:
         logger.exception(f"Error creating evidence tables and radar: {e}")
@@ -1857,59 +1768,27 @@ def create_evidence_tables_and_radar(sample, limits, df):
 
 def create_ai_diagnosis_and_action(sample):
     """
-    Create AI analysis with separate diagnosis and action (OIL-R-04).
+    Create AI analysis with plain text display (OIL-R-04).
     
-    Returns: (diagnosis_element, action_element)
+    Returns: (full_recommendation_element, empty_element)
     """
     ai_rec = sample.get('ai_recommendation', '')
     
     # Handle NaN, None, or empty string
     if ai_rec is None or (isinstance(ai_rec, float) and pd.isna(ai_rec)) or ai_rec == '' or not isinstance(ai_rec, str):
-        diagnosis = html.P("No diagnosis available", className="text-muted")
-        action = html.P("No action recommended", className="text-muted")
-        return diagnosis, action
+        return html.P("No hay recomendación de IA disponible para este reporte.", className="text-muted"), html.Div()
     
-    # Split by common action keywords
-    action_keywords = ['recomienda', 'debe', 'programar', 'realizar', 'verificar', 'solicitar']
+    # Display full AI recommendation as plain text
+    recommendation = html.Div([
+        html.P(ai_rec, style={
+            'whiteSpace': 'pre-wrap',
+            'fontSize': '1rem',
+            'lineHeight': '1.6',
+            'color': '#333'
+        })
+    ])
     
-    diagnosis_text = ai_rec
-    action_text = "No specific action identified"
-    
-    # Find first action keyword
-    for keyword in action_keywords:
-        if keyword.lower() in ai_rec.lower():
-            idx = ai_rec.lower().find(keyword.lower())
-            diagnosis_text = ai_rec[:idx].strip()
-            action_text = ai_rec[idx:].strip()
-            break
-    
-    # If no split occurred, treat first sentence as diagnosis
-    if diagnosis_text == ai_rec:
-        sentences = ai_rec.split('.')
-        if len(sentences) > 1:
-            diagnosis_text = sentences[0] + '.'
-            action_text = '.'.join(sentences[1:]).strip()
-    
-    # Create diagnosis element (collapsible if long)
-    if len(diagnosis_text) > 200:
-        diagnosis = html.Div([
-            html.P(diagnosis_text[:200] + "...", id="diagnosis-short", className="mb-2"),
-            dbc.Button("Read more", id="diagnosis-expand-btn", color="link", size="sm", className="p-0"),
-            dbc.Collapse(
-                html.P(diagnosis_text, className="mt-2"),
-                id="diagnosis-full",
-                is_open=False
-            )
-        ])
-    else:
-        diagnosis = html.P(diagnosis_text, style={'whiteSpace': 'pre-wrap'})
-    
-    # Create action element (highlighted)
-    action = dbc.Alert([
-        html.P(action_text, className="mb-0", style={'fontSize': '1.1rem', 'whiteSpace': 'pre-wrap'})
-    ], color="danger")
-    
-    return diagnosis, action
+    return recommendation, html.Div()
 
 
 def create_delta_summary(sample, df, equipo, component, limits, client, machine):
@@ -1929,7 +1808,7 @@ def create_delta_summary(sample, df, equipo, component, limits, client, machine)
     history = df[(df['unitId'] == equipo) & (df['componentName'] == component)].sort_values('sampleDate', ascending=False)
     
     if len(history) < 2:
-        return dbc.Alert("Need at least 2 reports for comparison. This is the first report for this component.", 
+        return dbc.Alert("Se necesitan al menos 2 reportes para comparación. Este es el primer reporte para este componente.", 
                         color="info", className="mb-0")
     
     # Get current and previous report
@@ -1950,11 +1829,6 @@ def create_delta_summary(sample, df, equipo, component, limits, client, machine)
     previous_status = previous.get('report_status', 'N/A')
     status_changed = current_status != previous_status
     
-    # Severity delta
-    current_severity = current.get('severity_score', 0)
-    previous_severity = previous.get('severity_score', 0)
-    severity_delta = current_severity - previous_severity
-    
     # Date context
     current_date = pd.to_datetime(current.get('sampleDate')).strftime('%Y-%m-%d')
     previous_date = pd.to_datetime(previous.get('sampleDate')).strftime('%Y-%m-%d')
@@ -1970,29 +1844,20 @@ def create_delta_summary(sample, df, equipo, component, limits, client, machine)
         dbc.Col([
             dbc.Card([
                 dbc.CardBody([
-                    html.H6("📊 Comparison Overview", className="mb-3"),
+                    html.H6("📊 Resumen de Comparación", className="mb-3"),
                     dbc.Row([
                         dbc.Col([
-                            html.Small("Current Report", className="text-muted d-block"),
+                            html.Small("Reporte Actual", className="text-muted d-block"),
                             html.Strong(current_date, className="d-block"),
                             html.Span(current_status, 
                                      className=f"badge bg-{current_badge_color}")
                         ], width=6),
                         dbc.Col([
-                            html.Small("Previous Report", className="text-muted d-block"),
+                            html.Small("Reporte Anterior", className="text-muted d-block"),
                             html.Strong(previous_date, className="d-block"),
                             html.Span(previous_status,
                                      className=f"badge bg-{previous_badge_color}")
                         ], width=6)
-                    ]),
-                    html.Hr(),
-                    html.Div([
-                        html.Small("Severity Change", className="text-muted d-block"),
-                        html.H4([
-                            f"{severity_delta:+.2f}",
-                            html.Span(" ↑" if severity_delta > 0 else " ↓" if severity_delta < 0 else " →",
-                                     className=f"text-{'danger' if severity_delta > 0 else 'success' if severity_delta < 0 else 'muted'}")
-                        ], className="mb-0")
                     ])
                 ])
             ])
@@ -2001,30 +1866,20 @@ def create_delta_summary(sample, df, equipo, component, limits, client, machine)
         dbc.Col([
             dbc.Card([
                 dbc.CardBody([
-                    html.H6("⬆️ Worsening", className="mb-2 text-danger"),
-                    html.P(f"{len(new_breaches)} new breached essays", className="mb-1", style={'fontSize': '0.9rem'}),
-                    html.Ul([html.Li(essay, style={'fontSize': '0.85rem'}) for essay in new_breaches[:5]]) if new_breaches else html.P("None", className="text-muted mb-0", style={'fontSize': '0.9rem'})
+                    html.H6("⬆️ Empeorando", className="mb-2 text-danger"),
+                    html.P(f"{len(new_breaches)} nuevos ensayos críticos", className="mb-1", style={'fontSize': '0.9rem'}),
+                    html.Ul([html.Li(essay, style={'fontSize': '0.85rem'}) for essay in new_breaches[:5]]) if new_breaches else html.P("Ninguno", className="text-muted mb-0", style={'fontSize': '0.9rem'})
                 ])
             ], color="light")
-        ], width=3),
+        ], width=4),
         # Middle-Right - Improving
         dbc.Col([
             dbc.Card([
                 dbc.CardBody([
-                    html.H6("⬇️ Improving", className="mb-2 text-success"),
-                    html.P(f"{len(resolved_breaches)} resolved breaches", className="mb-1", style={'fontSize': '0.9rem'}),
-                    html.Ul([html.Li(essay, style={'fontSize': '0.85rem'}) for essay in resolved_breaches[:5]]) if resolved_breaches else html.P("None", className="text-muted mb-0", style={'fontSize': '0.9rem'})
+                    html.H6("⬇️ Mejorando", className="mb-2 text-success"),
+                    html.P(f"{len(resolved_breaches)} ensayos resueltos", className="mb-1", style={'fontSize': '0.9rem'}),
+                    html.Ul([html.Li(essay, style={'fontSize': '0.85rem'}) for essay in resolved_breaches[:5]]) if resolved_breaches else html.P("Ninguno", className="text-muted mb-0", style={'fontSize': '0.9rem'})
                 ])
             ], color="light")
-        ], width=3),
-        # Right - Unchanged Critical
-        dbc.Col([
-            dbc.Card([
-                dbc.CardBody([
-                    html.H6("→ Still Critical", className="mb-2 text-warning"),
-                    html.P(f"{len(unchanged_critical)} persistent breaches", className="mb-1", style={'fontSize': '0.9rem'}),
-                    html.Ul([html.Li(essay, style={'fontSize': '0.85rem'}) for essay in unchanged_critical[:5]]) if unchanged_critical else html.P("None", className="text-muted mb-0", style={'fontSize': '0.9rem'})
-                ])
-            ], color="light")
-        ], width=2)
+        ], width=4)
     ])
