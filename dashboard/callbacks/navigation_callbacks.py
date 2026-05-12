@@ -12,6 +12,7 @@ from pathlib import Path
 # Active tabs
 from dashboard.tabs.tab_alerts import create_layout as create_alerts_tab
 from dashboard.tabs.tab_overview_general import create_layout as create_overview_general_tab
+from dashboard.tabs.tab_data_freshness import create_layout as create_data_freshness_tab
 from dashboard.tabs.tab_oil import create_layout as create_oil_tab
 
 # Commented tabs - not currently active
@@ -114,6 +115,7 @@ def register_navigation_callbacks(app: dash.Dash) -> None:
     # Map subsection IDs to their content generators
     SECTION_CONTENT_MAP = {
         'overview-general': create_overview_general_tab,
+        'overview-data-freshness': create_data_freshness_tab,
         # 'monitoring-hot-sheet': create_hot_sheet_tab,  # Commented - moved to overview-general
         'monitoring-alerts': lambda client: get_alerts_content(client),
         # 'monitoring-menace-control': create_menace_control_tab,  # Commented - not active
@@ -201,9 +203,13 @@ def register_navigation_callbacks(app: dash.Dash) -> None:
                 content = content_generator(client)
             else:
                 content = content_generator()
-        except TypeError:
+        except TypeError as e:
             # Fallback if function doesn't accept client parameter
-            content = content_generator()
+            logger.warning(f"TypeError calling content_generator for {active_section}: {e}")
+            try:
+                content = content_generator()
+            except:
+                content = create_placeholder_content(f'Error loading {active_section}')
         
         # Update button classes to highlight active button
         button_classes = []

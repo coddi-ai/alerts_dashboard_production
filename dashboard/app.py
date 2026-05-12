@@ -54,6 +54,9 @@ import dashboard.callbacks.hot_sheet_callbacks
 # Import health index callbacks module
 from dashboard.callbacks.health_index_callbacks import register_health_index_callbacks
 
+# Import data freshness callbacks (uses @callback decorator, auto-registered on import)
+import dashboard.callbacks.data_freshness_callbacks
+
 
 def normalize_prefix(prefix: str | None) -> str:
     """

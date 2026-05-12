@@ -17,6 +17,7 @@ from dashboard.tabs.tab_alerts import create_layout as create_alerts_tab
 # from dashboard.tabs.tab_mantenciones_general import layout_mantenciones_general
 # from dashboard.tabs.tab_telemetry import create_layout as create_telemetry_tab
 from dashboard.tabs.tab_overview_general import create_layout as create_overview_general_tab
+from dashboard.tabs.tab_data_freshness import create_layout as create_data_freshness_tab
 from dashboard.tabs.tab_oil import create_layout as create_oil_tab
 # from dashboard.tabs.tab_health_index import create_layout as create_health_index_tab
 # from dashboard.tabs.tab_menace_control import create_layout as create_menace_control_tab
@@ -342,7 +343,8 @@ def create_main_dashboard(user_data: dict) -> html.Div:
             'label': 'Resumen',
             'icon': 'fas fa-tachometer-alt',
             'subsections': [
-                {'id': 'overview-general', 'label': 'General', 'tab': create_overview_general_tab}
+                {'id': 'overview-general', 'label': 'General', 'tab': create_overview_general_tab},
+                {'id': 'overview-data-freshness', 'label': 'Estado de Datos', 'tab': create_data_freshness_tab}
             ]
         },
         {
