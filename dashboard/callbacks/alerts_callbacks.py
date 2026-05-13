@@ -848,9 +848,9 @@ def create_telemetry_evidence_section(alert_row: pd.Series, client: str) -> html
                 ], md=12)
             ]),
             
-            # Row 2: KPIs (LEFT, 2x2 grid, 4 cols) + GPS Map (RIGHT, 8 cols) - SAME HEIGHT
+            # Row 2: KPIs (LEFT, 1 col x 4 rows, 4 cols) + GPS Map (RIGHT, 8 cols) - SAME HEIGHT
             dbc.Row([
-                # Left: KPIs (2x2 grid)
+                # Left: KPIs (vertical layout, 1 column x 4 rows)
                 dbc.Col([
                     dbc.Card([
                         dbc.CardHeader([

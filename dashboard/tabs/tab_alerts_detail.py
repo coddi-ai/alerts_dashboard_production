@@ -257,10 +257,10 @@ def create_alert_detail_content(
             ])
         )
         
-        # Row 2: KPIs (left, 2x2 grid) + GPS Map (right) - SAME HEIGHT
+        # Row 2: KPIs (left, 1 col x 4 rows) + GPS Map (right) - SAME HEIGHT
         sections.append(
             dbc.Row([
-                # Left: KPIs (2x2 grid)
+                # Left: KPIs (vertical layout, 1 column x 4 rows)
                 dbc.Col([
                     dbc.Card([
                         dbc.CardHeader([

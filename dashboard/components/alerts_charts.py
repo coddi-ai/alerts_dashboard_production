@@ -1270,9 +1270,9 @@ def create_context_kpis_cards_golden(
             rpm_value = alert_point['EngSpd_Value']
             engine_rpm = f"🏎️ {rpm_value:.0f} RPM"
         
-        # Create 4 KPI cards in 2x2 grid
+        # Create 4 KPI cards in vertical layout (1 column x 4 rows)
         return html.Div([
-            # First row: Elevación and Carga
+            # Row 1: Elevación
             dbc.Row([
                 dbc.Col([
                     dbc.Card([
@@ -1281,9 +1281,12 @@ def create_context_kpis_cards_golden(
                                    style={'fontSize': '0.85rem'}),
                             html.H5(elevation_status, className=f"text-{elevation_color} mb-0")
                         ])
-                    ], color=elevation_color, outline=True, className="text-center h-100")
-                ], md=6),
-                
+                    ], color=elevation_color, outline=True, className="text-center")
+                ], md=12)
+            ], className="mb-3"),
+            
+            # Row 2: Carga
+            dbc.Row([
                 dbc.Col([
                     dbc.Card([
                         dbc.CardBody([
@@ -1291,11 +1294,11 @@ def create_context_kpis_cards_golden(
                                    style={'fontSize': '0.85rem'}),
                             html.H5(payload_status, className=f"text-{payload_color} mb-0")
                         ])
-                    ], color=payload_color, outline=True, className="text-center h-100")
-                ], md=6)
-            ], className="g-3 mb-3"),
+                    ], color=payload_color, outline=True, className="text-center")
+                ], md=12)
+            ], className="mb-3"),
             
-            # Second row: Carga de Motor and Velocidad Motor
+            # Row 3: Carga de Motor
             dbc.Row([
                 dbc.Col([
                     dbc.Card([
@@ -1304,9 +1307,12 @@ def create_context_kpis_cards_golden(
                                    style={'fontSize': '0.85rem'}),
                             html.H5(engine_load, className=f"text-{load_color} mb-0")
                         ])
-                    ], color=load_color, outline=True, className="text-center h-100")
-                ], md=6),
-                
+                    ], color=load_color, outline=True, className="text-center")
+                ], md=12)
+            ], className="mb-3"),
+            
+            # Row 4: Velocidad Motor
+            dbc.Row([
                 dbc.Col([
                     dbc.Card([
                         dbc.CardBody([
@@ -1314,9 +1320,9 @@ def create_context_kpis_cards_golden(
                                    style={'fontSize': '0.85rem'}),
                             html.H5(engine_rpm, className=f"text-{rpm_color} mb-0")
                         ])
-                    ], color=rpm_color, outline=True, className="text-center h-100")
-                ], md=6)
-            ], className="g-3")
+                    ], color=rpm_color, outline=True, className="text-center")
+                ], md=12)
+            ])
         ])
     
     except Exception as e:

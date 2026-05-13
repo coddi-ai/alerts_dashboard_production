@@ -58,7 +58,7 @@ def parse_ia_message_sections(mensaje_ia: str) -> Dict[str, str]:
                 text = re.sub(r'^[:\-\s]+', '', text)
                 # Remove "DIRECTO" from diagnostico if present (case sensitive)
                 if key == 'diagnostico':
-                    text = text.replace('DIRECTO', '').strip()
+                    text = text.replace('DIRECTO:', '').strip()
                     # Clean up any extra spaces
                     text = re.sub(r'\s+', ' ', text)
                 sections[key] = text
