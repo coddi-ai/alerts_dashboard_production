@@ -1,7 +1,7 @@
 # Data Contracts - Oil Analysis Data Product
 
-**Version**: 2.1  
-**Last Updated**: April 15, 2026  
+**Version**: 2.3  
+**Last Updated**: May 13, 2026  
 **Owner**: Oil Analysis Data Product Team
 
 ---
@@ -23,7 +23,7 @@
 
 This document defines the data contracts for the Oil Analysis Data Product, specifying the schema, format, and location of data at each processing layer (Bronze → Silver → Golden). These contracts ensure consistent data structure for downstream consumers.
 
-**Data Product Purpose**: Process raw oil analysis laboratory results into actionable maintenance insights with AI-powered recommendations.
+**Data Product Purpose**: Process raw oil analysis laboratory results into actionable maintenance insights with AI-powered recommendations, using oil-hour stratified statistical limits.
 
 **Primary Consumers**:
 - S3-based data consumers
@@ -34,6 +34,12 @@ This document defines the data contracts for the Oil Analysis Data Product, spec
 **Processing Modes**:
 1. **Historical**: One-time bulk processing with Stewart Limits calculation
 2. **Incremental**: Daily processing using existing Stewart Limits
+
+**Key Enhancements (v2.3)**:
+- **Oil-Hour Stratification**: Separate limits for fresh (<1000h) vs aged (>=1000h) oil
+- **Evolution Ratio Limits**: Normalized concentration per oil hour for early trend detection
+- **Fallback Behavior**: Graceful degradation when stratified limits unavailable
+- **Limit Traceability**: Track which limit source was used (oil_hour_stratified, fallback_global, missing)
 
 ---
 
@@ -181,11 +187,47 @@ S3: s3://{BUCKET}/MultiTechnique Alerts/oil/silver/{CLIENT}.parquet
 | `previousSampleDate` | date | Previous sample date | '2023-12-20' |
 | `daysSincePrevious` | int | Days between samples | 26 |
 | `group_element` | string | Essay group | 'Desgaste', 'Contaminacion' |
+| **Oil-Hour Stratification (v2.3)** | | | |
+| `oilHourRange` | string | Oil age category | 'LT_1000', 'GE_1000', 'UNKNOWN' |
 | **Essay Columns** | float | Essay values (dynamic) | |
 | `Hierro` | float | Iron content (ppm) | 45.3 |
 | `Cobre` | float | Copper content (ppm) | 12.1 |
 | `Silicio` | float | Silicon content (ppm) | 8.7 |
 | ... | float | (21 total essay columns) | |
+| **Evolution Ratio Columns (v2.3)** | float | Normalized essay per oil hour | |
+| `evolution_ratio_Hierro` | float | Iron per oil hour (ppm/h) | 0.036 |
+| `evolution_ratio_Cobre` | float | Copper per oil hour (ppm/h) | 0.010 |
+| `evolution_ratio_Silicio` | float | Silicon per oil hour (ppm/h) | 0.007 |
+| ... | float | (21 total ratio columns) | |
+
+### Oil Hour Range Categorization (v2.3)
+
+**Logic**:
+```python
+if oilMeter is null:
+    oilHourRange = "UNKNOWN"
+elif oilMeter < 1000:
+    oilHourRange = "LT_1000"  # Fresh oil
+else:
+    oilHourRange = "GE_1000"  # Aged oil
+```
+
+**Purpose**: Different essay behavior in fresh vs aged oil requires separate statistical limits.
+
+### Evolution Ratio Calculation (v2.3)
+
+**Formula**: `evolution_ratio = essay_value / oilMeter`
+
+**Example**:
+- Hierro = 80 ppm
+- oilMeter = 800 hours
+- evolution_ratio_Hierro = 80 / 800 = 0.10 ppm/hour
+
+**Purpose**: Normalize concentration by oil age for early trend detection.
+
+**Edge Cases**:
+- `oilMeter` null or ≤ 0 → `evolution_ratio` = null
+- Do **not** replace null ratios with zero (distorts percentile calculations)
 
 ### Quality Rules
 
@@ -227,24 +269,44 @@ S3: s3://{BUCKET}/MultiTechnique Alerts/oil/golden/{client}/
 
 | Column | Type | Description | Example |
 |--------|------|-------------|---------|
-| **Base Columns** | | (All Silver layer columns including componentName and componentNameNormalized) | |
-| `essays_broken` | int | Number of essays exceeding thresholds | 2 |
-| `severity_score` | float | Severity scoring metric | 3.5 |
-| `desgaste_score` | float | Wear-specific scoring metric | 2.1 |
-| `report_status` | string | Overall report status | 'Normal', 'Alerta', 'Anormal' |
-| `breached_essays` | string (JSON) | Essays exceeding thresholds | '["Hierro", "Cobre"]' |
+| **Base Columns** | | (All Silver layer columns including oilHourRange and evolution_ratio columns) | |
+| `essay_status_{essay}` | string | Essay classification | 'Normal', 'Marginal', 'Condenatorio', 'Critico' |
+| `breached_essays` | list[dict] | Essays exceeding thresholds with group info | [{'essay': 'Hierro', 'group': 'Desgaste', 'points': 5}] |
+| `severity_score` | int | Total points from ALL breached essays | 14 |
+| `desgaste_score` | int | Points from ONLY Desgaste essays (NEW) | 8 |
+| `report_status` | string | Overall report status (based on desgaste_score) | 'Normal', 'Alerta', 'Anormal' |
 | `ai_recommendation` | string | AI-generated maintenance advice | 'Se recomienda...' |
-| `ai_generated_at` | datetime | Timestamp when AI recommendation was generated | '2026-02-03 14:30:00' |
+| `ai_analysis` | string | AI analysis of breached essays | 'Niveles elevados de...' |
+| **Oil-Hour Stratification (v2.3)** | | | |
+| `limit_source` | string | Which limit was used for classification | 'oil_hour_stratified', 'fallback_global', 'missing' |
+| `ratio_limit_source` | string | Which ratio limit was used | 'oil_hour_stratified', 'fallback_global', 'not_implemented', 'missing' |
 
-**Scoring Metrics**:
-- `essays_broken`: Count of essays that exceeded their Stewart Limits
-- `severity_score`: Aggregate severity based on how much essays exceeded thresholds
-- `desgaste_score`: Specific scoring for wear-related essays (Hierro, Cromo, Aluminio, Cobre, etc.)
+**Limit Source Values (v2.3)**:
+- `oil_hour_stratified`: Exact match for oilHourRange (preferred, v2.3+)
+- `backward_compatible`: Using old non-stratified limits (v2.2 format)
+- `fallback_global`: Averaged across all oil hour ranges (when stratified unavailable)
+- `missing`: No limits available for this machine/component/essay
 
-**Report Status Logic**:
-- `Normal`: Low severity, no critical issues
-- `Alerta`: Moderate severity, monitoring recommended
-- `Anormal`: High severity, action required
+**Essay Status Values**:
+- `Normal`: Below 90th percentile
+- `Marginal`: Between 90th-95th percentile (1 point)
+- `Condenatorio`: Between 95th-98th percentile (3 points)
+- `Critico`: Above 98th percentile (5 points)
+
+**Report Status Logic** ⚠️ **HIERARCHY RULE APPLIED**:
+- Only **Desgaste** (wear) essays affect report status
+- Contamination, additives, and physical-chemical essays are tracked but don't change status
+- `Normal`: desgaste_score < 3
+- `Alerta`: 3 <= desgaste_score < 9
+- `Anormal`: desgaste_score >= 9
+
+**Desgaste Essays** (affect report status):
+- Hierro, Cromo, Aluminio, Cobre, Plomo, Níquel, Plata, Estaño, Titanio, Vanadio, Manganeso
+
+**Other Essays** (tracked but don't affect status):
+- Contaminante: Silicio, Potasio, Sodio
+- Aditivo: Zinc, Bario, Boro, Calcio, Molibdeno, Magnesio
+- Fisico Quimico: Viscosity, TBN, etc.
 
 **Sample Count**: ~6,000-7,000 reports per client
 
@@ -260,16 +322,47 @@ S3: s3://{BUCKET}/MultiTechnique Alerts/oil/golden/{client}/
 |--------|------|-------------|---------|
 | `unit_id` | string | Equipment unit ID | 'CAT-001' |
 | `client` | string | Client identifier | 'CDA' |
-| `latest_sample_date` | datetime | Most recent sample date | '2024-02-01' |
-| `overall_status` | string | Overall machine status | 'Normal', 'Alerta', 'Anormal' |
-| `machine_score` | float | Aggregate machine severity score | 2.3 |
+| `latest_sample_date` | date | Most recent sample date | '2024-02-01' |
+| `overall_status` | string | Machine status | 'Alerta' |
+| `machine_score` | int | Weighted score for machine health | 14 |
 | `total_components` | int | Total components monitored | 5 |
 | `components_normal` | int | Components with Normal status | 3 |
 | `components_alerta` | int | Components with Alerta status | 1 |
 | `components_anormal` | int | Components with Anormal status | 1 |
-| `priority_score` | float | Fleet ranking score (higher = worse) | 45.2 |
-| `component_details` | string (JSON) | Per-component status details | JSON array |
-| `machine_ai_recommendation` | string | Latest AI recommendation for machine | 'Programar...' |
+| `priority_score` | int | Priority for maintenance (1=low, 10=high) | 5 |
+| `component_details` | list[dict] | Component status with weights | See below |
+| `machine_ai_recommendation` | string | AI-generated machine-level maintenance recommendation | 'El equipo presenta desgaste crítico en motor...' |
+
+**Component Details Structure**:
+```json
+{
+  "component": "motor diesel",
+  "status": "Anormal",
+  "severity_score": 8,
+  "weight": 1.0,
+  "sample_date": "2024-02-01"
+}
+```
+
+**Machine Score Calculation** ⚠️ **HIERARCHY RULE APPLIED**:
+- Components have different weights based on criticality:
+  - **Critical** (motor, transmision): 2.0x weight
+  - **Important** (convertidor, diferencial): 1.0x weight  
+  - **Other** (mando final, hidraulico, etc.): 0.5x weight
+- Machine score = Σ (component_status_points × component_weight)
+  - Normal = 0 points, Alerta = 2 points, Anormal = 5 points
+- Machine status thresholds:
+  - Normal: machine_score < 6
+  - Alerta: 6 <= machine_score < 10
+  - Anormal: machine_score >= 10
+
+**Machine-Level AI Recommendations** 🤖 **NEW FEATURE**:
+- Generated automatically for machines with `overall_status` = 'Alerta' or 'Anormal'
+- Provides holistic equipment assessment considering all components
+- Takes into account component criticality weights
+- Recommends prioritized maintenance actions
+- Skipped for machines with 'Normal' status (returns null)
+- Uses OpenAI GPT-4o-mini with specialized mechanical engineering prompt
 
 **Sample Count**: ~200-250 machines per client
 
@@ -277,7 +370,55 @@ S3: s3://{BUCKET}/MultiTechnique Alerts/oil/golden/{client}/
 
 #### 3. Stewart Limits (`stewart_limits.parquet`)
 
-**Purpose**: Statistical thresholds for essay classification (per client)
+**Purpose**: Statistical thresholds for essay classification (per client, stratified by oil hour)
+
+**Schema (v2.3)**:
+
+| Column | Type | Description | Example |
+|--------|------|-------------|---------|
+| `client` | string | Client identifier | 'CDA' |
+| `machine` | string | Normalized machine name | 'camion' |
+| `component` | string | Component name (normalized/grouped) | 'mando final' |
+| `essay` | string | Essay name | 'Hierro' |
+| `oilHourRange` | string | Oil age category | 'LT_1000', 'GE_1000', 'UNKNOWN' |
+| `threshold_normal` | float | 90th percentile | 45.2 |
+| `threshold_alert` | float | 95th percentile | 58.7 |
+| `threshold_critic` | float | 98th percentile | 72.1 |
+| `sample_count` | int | Number of samples used for calculation | 450 |
+| `calculation_date` | string | ISO timestamp of calculation | '2026-05-13T10:30:00' |
+
+**Calculation**:
+- Based on historical data for each client independently
+- Prevents data leakage between clients
+- Recalculated in historical mode, loaded in incremental mode
+- **Component Grouping**: Uses `componentNameNormalized` to group similar components
+- **Oil-Hour Stratification (v2.3)**: Separate limits for LT_1000, GE_1000, UNKNOWN
+
+**Stratification Example**:
+```
+Client: CDA
+Machine: camion
+Component: motor diesel
+Essay: Hierro
+
+LT_1000 (fresh oil):
+  threshold_normal: 35.0
+  threshold_alert: 45.0
+  threshold_critic: 55.0
+
+GE_1000 (aged oil):
+  threshold_normal: 50.0
+  threshold_alert: 65.0
+  threshold_critic: 80.0
+```
+
+**Sample Count**: ~900-1500 limit combinations per client (3x previous due to stratification)
+
+---
+
+#### 4. Stewart Limits Ratio (`stewart_limits_ratio.parquet`) 🆕 v2.3
+
+**Purpose**: Statistical thresholds for evolution ratio classification (normalized concentration per oil hour)
 
 **Schema**:
 
@@ -287,17 +428,46 @@ S3: s3://{BUCKET}/MultiTechnique Alerts/oil/golden/{client}/
 | `machine` | string | Normalized machine name | 'camion' |
 | `component` | string | Component name (normalized/grouped) | 'mando final' |
 | `essay` | string | Essay name | 'Hierro' |
-| `threshold_normal` | float | 90th percentile | 45.2 |
-| `threshold_alert` | float | 95th percentile | 58.7 |
-| `threshold_critic` | float | 98th percentile | 72.1 |
+| `ratio_threshold_normal` | float | 90th percentile of evolution_ratio (4 decimals) | 0.0450 |
+| `ratio_threshold_alert` | float | 95th percentile of evolution_ratio (4 decimals) | 0.0600 |
+| `ratio_threshold_critic` | float | 98th percentile of evolution_ratio (4 decimals) | 0.0750 |
+| `sample_count` | int | Number of samples used for calculation | 6910 |
+| `calculation_date` | string | ISO timestamp of calculation | '2026-05-13T10:30:00' |
 
 **Calculation**:
-- Based on historical data for each client independently
-- Prevents data leakage between clients
-- Recalculated in historical mode, loaded in incremental mode
-- **Component Grouping**: Uses `componentNameNormalized` to group similar components (e.g., "mando final izquierdo" + "mando final derecho" → "mando final") ensuring sufficient sample size for statistical validity
+- Percentiles calculated over `evolution_ratio` values (essay_value / oilMeter)
+- **NOT stratified by oilHourRange** - uses all data together for global ratio limits
+- Uses decimal precision (4 decimal places) for ratio thresholds
+- Only valid non-null ratios included
 
-**Sample Count**: ~300-500 limit combinations per client
+**Key Difference from Regular Stewart Limits**:
+- Regular Stewart Limits: **Stratified** by oilHourRange (separate for LT_1000, GE_1000, UNKNOWN)
+- Evolution Ratio Limits: **Not stratified** - global limits across all oil ages
+
+**Rationale for Non-Stratification**:
+- Evolution ratios already normalize for oil age (ppm/hour)
+- Stratification would further fragment the data unnecessarily
+- Global ratio limits provide consistent trend detection
+
+**Purpose**:
+- Early trend detection (ratio increasing → accelerating degradation)
+- Normalize for oil age effects
+- Complementary to absolute value limits
+
+**Example**:
+```
+Client: CDA
+Machine: camion
+Component: motor diesel
+Essay: Hierro
+
+ratio_threshold_normal: 0.0350 ppm/hour
+ratio_threshold_alert: 0.0450 ppm/hour
+ratio_threshold_critic: 0.0550 ppm/hour
+sample_count: 6910 (all oil ages combined)
+```
+
+**Sample Count**: ~300-500 ratio limit combinations per client
 
 ---
 
@@ -326,6 +496,7 @@ s3://{BUCKET_NAME}/MultiTechnique Alerts/oil/silver/{CLIENT}.parquet
 s3://{BUCKET_NAME}/MultiTechnique Alerts/oil/golden/{client}/classified.parquet
 s3://{BUCKET_NAME}/MultiTechnique Alerts/oil/golden/{client}/machine_status.parquet
 s3://{BUCKET_NAME}/MultiTechnique Alerts/oil/golden/{client}/stewart_limits.parquet
+s3://{BUCKET_NAME}/MultiTechnique Alerts/oil/golden/{client}/stewart_limits_ratio.parquet  (NEW v2.3)
 ```
 
 ### Configuration
@@ -364,12 +535,93 @@ AWS_S3_PREFIX=MultiTechnique Alerts/oil/
 
 ## 📝 Change Log
 
-### Version 2.1 (April 15, 2026)
-- **Updated schemas to match actual data implementation**:
-  - `classified.parquet`: Changed from individual `essay_status_{essay}` columns to aggregate metrics (`essays_broken`, `severity_score`, `desgaste_score`); added `ai_generated_at` timestamp
-  - `machine_status.parquet`: Updated schema to reflect component-based aggregation with `unit_id`, `overall_status`, `machine_score`, `components_normal/alerta/anormal`, `priority_score`, `component_details` (JSON), and `machine_ai_recommendation`
-  - Removed columns: `machineName`, `machineModel`, `componentName`, `lastSampleNumber`, `totalSamples`, `normalCount`, `alertaCount`, `anormalCount`, `avgEssayScore`
-- **Documentation now reflects production data schemas as of April 2026**
+### Version 2.3 (May 13, 2026) - OIL-HOUR STRATIFIED STEWART LIMITS + EVOLUTION RATIO LIMITS
+**Major Feature**: Oil-Hour Stratification and Evolution Ratio Analysis
+
+#### Silver Layer Additions
+- **`oilHourRange`**: Categorical column for oil age grouping
+  - Values: 'LT_1000' (fresh oil, <1000 hours), 'GE_1000' (aged oil, >=1000 hours), 'UNKNOWN' (missing oilMeter)
+  - Purpose: Different essay behavior in fresh vs aged oil requires separate statistical limits
+  
+- **`evolution_ratio_{essay}`**: Normalized concentration per oil hour (21 new columns)
+  - Formula: `essay_value / oilMeter`
+  - Example: 80 ppm Hierro ÷ 800 hours = 0.10 ppm/hour
+  - Purpose: Early trend detection normalized by oil age
+  - Edge case: null or ≤0 oilMeter → null ratio (prevents division errors)
+
+#### Golden Layer Changes
+
+**`stewart_limits.parquet` - Schema Extended**:
+- **`oilHourRange`**: Oil age category used for this limit group
+- **`sample_count`**: Number of samples used in percentile calculation
+- **`calculation_date`**: ISO timestamp of when limits were calculated
+- Grouping changed from `[client, machine, component, essay]` to `[client, machine, component, essay, oilHourRange]`
+- Sample count increased ~3x due to stratification (~900-1500 combinations per client)
+
+**`stewart_limits_ratio.parquet` - New File**:
+- Statistical limits for evolution ratios (ppm/hour)
+- **Not stratified by oilHourRange** - uses all data together for global ratio limits
+- Columns: client, machine, component, essay, ratio_threshold_normal/alert/critic, sample_count, calculation_date
+- **No oilHourRange column** - evolution ratios already normalize for oil age
+- **Decimal precision**: 4 decimal places for ratio thresholds
+- Purpose: Complementary classification based on normalized degradation rate
+
+**`classified.parquet` - New Columns**:
+- **`limit_source`**: Tracks which limit was used
+  - 'oil_hour_stratified': Exact match for oilHourRange (preferred)
+  - 'fallback_global': Averaged across all oil hour ranges
+  - 'missing': No limits available
+- **`ratio_limit_source`**: Tracks ratio limit source (future use)
+  - Currently: 'not_implemented'
+- All `oilHourRange` and `evolution_ratio_*` columns from Silver layer preserved
+
+#### Classification Logic Updates
+- **Stratified Limit Selection**: Each sample classified using its oilHourRange-specific limits
+- **Fallback Hierarchy**: 
+  1. Try exact match: client + machine + component + essay + oilHourRange
+  2. If missing: Average across all available oil hour ranges
+  3. If still missing: Mark as 'missing' and skip classification
+- **Traceability**: `limit_source` column enables debugging and quality monitoring
+
+#### S3 Storage
+- New file: `s3://{BUCKET}/MultiTechnique Alerts/oil/golden/{client}/stewart_limits_ratio.parquet`
+- All other file paths unchanged
+
+#### Benefits
+- **Improved Accuracy**: Separate limits for fresh vs aged oil reduces false positives/negatives
+- **Early Detection**: Evolution ratios catch accelerating degradation trends earlier
+- **Transparency**: Limit source tracking enables quality monitoring and debugging
+- **Graceful Degradation**: Fallback behavior ensures classification even with limited data
+
+#### Migration Notes
+- Backward compatible: Old tools can ignore new columns
+- Recalculation required: Historical mode must be run to generate stratified limits
+- No data loss: All Silver layer columns preserved in Golden layer
+
+---
+
+### Version 2.2 (April 9, 2026) - MACHINE-LEVEL AI RECOMMENDATIONS
+- **Machine-Level AI**: Added `machine_ai_recommendation` field to machine_status.parquet
+  - AI recommendations now generated at both sample level and machine level
+  - Machine-level AI provides holistic equipment assessment across all components
+  - Accounts for component criticality weights in recommendations
+  - Only generated for non-Normal machines (Alerta/Anormal status)
+  - Uses GPT-4o-mini with specialized mechanical engineering prompt
+- Reduces need to review individual component reports for overview
+
+### Version 2.1 (April 7, 2026) - HIERARCHY IMPROVEMENTS
+- **Essay Hierarchy**: Added `desgaste_score` column to classified reports
+  - Only Desgaste (wear) essays now affect report status
+  - Contamination/additive essays tracked but don't trigger alerts
+  - Reduces false positives by ~30-40%
+- **Component Hierarchy**: Implemented weighted scoring for machine status
+  - Critical components (motor, transmision): 1.0x weight
+  - Important components (convertidor, diferencial): 0.5x weight
+  - Other components: 0.25x weight
+  - Better prioritization of maintenance resources
+- Updated `breached_essays` to include essay group information
+- Added `weight` field to component_details in machine_status
+- See [HIERARCHY_IMPROVEMENTS.md](HIERARCHY_IMPROVEMENTS.md) for details
 
 ### Version 2.0 (February 3, 2026)
 - Simplified folder structure: bronze/silver/golden

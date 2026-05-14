@@ -1269,7 +1269,15 @@ def create_decision_summary(sample, limits, client, machine, component):
         dbc.Col([
             dbc.Card([
                 dbc.CardBody([
-                    html.H5("\ud83c\udfaf Resultado del Reporte", className="mb-3"),
+                    html.Div([
+                        html.H5("\ud83c\udfaf Resultado del Reporte", className="mb-2 d-inline-block"),
+                        html.Div([
+                            html.Small("ID Reporte: ", className="text-muted me-1"),
+                            html.Strong(str(sample.get('sampleNumber', 'N/A')), className="me-3"),
+                            html.Small("Horómetro Aceite: ", className="text-muted me-1"),
+                            html.Strong(f"{float(sample.get('oilMeter', 0)):.1f} hrs" if sample.get('oilMeter') is not None and not (isinstance(sample.get('oilMeter'), float) and pd.isna(sample.get('oilMeter'))) else 'N/A')
+                        ], className="d-inline-block float-end", style={'fontSize': '0.85rem'})
+                    ], className="mb-3 clearfix"),
                     dbc.Row([
                         dbc.Col([
                             html.Div([
