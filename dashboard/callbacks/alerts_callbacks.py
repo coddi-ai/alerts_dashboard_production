@@ -988,6 +988,49 @@ def create_oil_evidence_section(alert_row: pd.Series, client: str) -> html.Div:
         
         comp_limits = limits[client][machine][component_normalized]
         
+        # Get sample's oil hour range for v2.3 stratified limits
+        sample_oil_hour_range = oil_report.get('oilHourRange', 'UNKNOWN')
+        logger.info(f"Sample oilHourRange: {sample_oil_hour_range}")
+        
+        # Helper function to get stratified limits with fallback (v2.3)
+        def get_essay_limits(essay_name, oil_hour_range):
+            """
+            Get limits for an essay with oil-hour stratification fallback.
+            
+            Fallback hierarchy:
+            1. Exact match: essay + oilHourRange
+            2. Fallback: Average across all available oilHourRanges for this essay
+            3. Legacy: Single 'ALL' key (v2.2 compatibility)
+            
+            Returns: dict with threshold_normal, threshold_alert, threshold_critic or None
+            """
+            if essay_name not in comp_limits:
+                return None
+            
+            essay_limits = comp_limits[essay_name]
+            
+            # Try exact match (v2.3 preferred)
+            if oil_hour_range in essay_limits:
+                logger.debug(f"Essay {essay_name}: Using oil_hour_stratified limits ({oil_hour_range})")
+                return essay_limits[oil_hour_range]
+            
+            # Try legacy 'ALL' key (v2.2 compatibility)
+            if 'ALL' in essay_limits:
+                logger.debug(f"Essay {essay_name}: Using legacy non-stratified limits (v2.2)")
+                return essay_limits['ALL']
+            
+            # Fallback: Average across all available oil hour ranges
+            if len(essay_limits) > 0:
+                logger.debug(f"Essay {essay_name}: Using fallback_global (averaging {len(essay_limits)} ranges)")
+                avg_limits = {
+                    'threshold_normal': sum(v.get('threshold_normal', 0) for v in essay_limits.values()) / len(essay_limits),
+                    'threshold_alert': sum(v.get('threshold_alert', 0) for v in essay_limits.values()) / len(essay_limits),
+                    'threshold_critic': sum(v.get('threshold_critic', 0) for v in essay_limits.values()) / len(essay_limits)
+                }
+                return avg_limits
+            
+            return None
+        
         # Create charts and tables for each group
         charts_and_tables = []
         
@@ -995,7 +1038,12 @@ def create_oil_evidence_section(alert_row: pd.Series, client: str) -> html.Div:
             essays = group_mapping[group_name]
             
             # Filter essays that exist in sample and have limits
-            valid_essays = [e for e in essays if e in oil_report.index and pd.notna(oil_report[e]) and e in comp_limits]
+            valid_essays = []
+            for e in essays:
+                if e in oil_report.index and pd.notna(oil_report[e]):
+                    essay_lim = get_essay_limits(e, sample_oil_hour_range)
+                    if essay_lim is not None:
+                        valid_essays.append(e)
             
             if not valid_essays:
                 continue
@@ -1009,9 +1057,11 @@ def create_oil_evidence_section(alert_row: pd.Series, client: str) -> html.Div:
                 value = float(oil_report[essay])
                 actual_values.append(value)
                 
-                normal = comp_limits[essay].get('threshold_normal', 0)
-                alert = comp_limits[essay].get('threshold_alert', 0)
-                critic = comp_limits[essay].get('threshold_critic', 0)
+                # Get stratified limits
+                essay_limits = get_essay_limits(essay, sample_oil_hour_range)
+                normal = essay_limits.get('threshold_normal', 0)
+                alert = essay_limits.get('threshold_alert', 0)
+                critic = essay_limits.get('threshold_critic', 0)
                 
                 # Normalize value for radar chart (0-100 scale)
                 if value >= critic:
@@ -1223,6 +1273,24 @@ def create_oil_evidence_section(alert_row: pd.Series, client: str) -> html.Div:
         }
         status_color = status_colors.get(report_status, 'secondary')
         
+        # Get oil meter and oil hour range for display
+        oil_meter = oil_report.get('oilMeter', None)
+        oil_meter_display = f"{oil_meter:.1f}h" if pd.notna(oil_meter) else "N/A"
+        
+        # Oil hour range badge color and text
+        oil_hour_range_colors = {
+            'LT_1000': 'success',  # Fresh oil - green
+            'GE_1000': 'warning',  # Aged oil - orange
+            'UNKNOWN': 'secondary'  # Unknown - gray
+        }
+        oil_hour_range_labels = {
+            'LT_1000': 'Aceite Fresco (<1000h)',
+            'GE_1000': 'Aceite Envejecido (≥1000h)',
+            'UNKNOWN': 'Edad de Aceite Desconocida'
+        }
+        oil_hour_color = oil_hour_range_colors.get(sample_oil_hour_range, 'secondary')
+        oil_hour_label = oil_hour_range_labels.get(sample_oil_hour_range, sample_oil_hour_range)
+        
         return html.Div([
             dbc.Row([
                 dbc.Col([
@@ -1230,12 +1298,33 @@ def create_oil_evidence_section(alert_row: pd.Series, client: str) -> html.Div:
                         html.I(className="fas fa-flask me-2"),
                         "Evidencia de Tribología"
                     ], className="text-warning mb-2"),
-                    dbc.Badge(
-                        f"Estado: {report_status}",
-                        color=status_color,
-                        className="mb-3",
-                        style={'fontSize': '1rem'}
-                    )
+                    html.Div([
+                        dbc.Badge(
+                            f"Estado: {report_status}",
+                            color=status_color,
+                            className="me-2",
+                            style={'fontSize': '1rem'}
+                        ),
+                        dbc.Badge(
+                            f"ID Muestra: {tribology_id}",
+                            color="info",
+                            className="me-2",
+                            style={'fontSize': '1rem'}
+                        ),
+                        dbc.Badge(
+                            f"Horas Aceite: {oil_meter_display}",
+                            color="dark",
+                            className="me-2",
+                            style={'fontSize': '1rem'}
+                        ),
+                        dbc.Badge(
+                            oil_hour_label,
+                            color=oil_hour_color,
+                            className="mb-3",
+                            style={'fontSize': '1rem'},
+                            title="Límites estratificados v2.3 basados en edad del aceite"
+                        )
+                    ], className="mb-3")
                 ])
             ]),
             html.Div(charts_and_tables)

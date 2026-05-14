@@ -19,6 +19,55 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def get_essay_limits(comp_limits, essay, oil_hour_range):
+    """
+    Get essay limits with oil-hour stratification fallback logic (v2.3).
+    
+    Fallback hierarchy:
+    1. Try exact match: oilHourRange from sample
+    2. Try 'ALL' for v2.2 compatibility
+    3. Try averaging across all available oil hour ranges
+    4. Return None if essay not found
+    
+    Args:
+        comp_limits: Nested dict {essay: {oilHourRange: {threshold_normal, ...}}}
+        essay: Essay name
+        oil_hour_range: Oil hour range from sample ('LT_1000', 'GE_1000', 'UNKNOWN')
+    
+    Returns:
+        Dict with threshold_normal, threshold_alert, threshold_critic or None
+    """
+    if essay not in comp_limits:
+        return None
+    
+    essay_limits = comp_limits[essay]
+    
+    # If essay_limits is already a dict with thresholds (v2.2 format), return it
+    if 'threshold_normal' in essay_limits:
+        return essay_limits
+    
+    # v2.3 format: try exact oilHourRange match
+    if oil_hour_range in essay_limits:
+        return essay_limits[oil_hour_range]
+    
+    # Fallback: try 'ALL' for v2.2 compatibility
+    if 'ALL' in essay_limits:
+        return essay_limits['ALL']
+    
+    # Fallback: average across all available oil hour ranges
+    if essay_limits:
+        available_ranges = list(essay_limits.keys())
+        if available_ranges:
+            avg_limits = {
+                'threshold_normal': sum(essay_limits[r].get('threshold_normal', 0) for r in available_ranges) / len(available_ranges),
+                'threshold_alert': sum(essay_limits[r].get('threshold_alert', 0) for r in available_ranges) / len(available_ranges),
+                'threshold_critic': sum(essay_limits[r].get('threshold_critic', 0) for r in available_ranges) / len(available_ranges)
+            }
+            return avg_limits
+    
+    return None
+
+
 def calculate_breached_essays_from_data(sample, limits, client, machine, component):
     """
     Calculate breached essays dynamically from sample data and Stewart Limits.
@@ -52,6 +101,9 @@ def calculate_breached_essays_from_data(sample, limits, client, machine, compone
     
     comp_limits = limits[client][machine][component_normalized]
     
+    # Get oil hour range from sample (v2.3)
+    oil_hour_range = sample.get('oilHourRange', 'UNKNOWN')
+    
     # Metadata columns to exclude
     metadata_cols = {
         'client', 'sampleNumber', 'sampleDate', 'unitId', 'machineName',
@@ -63,14 +115,17 @@ def calculate_breached_essays_from_data(sample, limits, client, machine, compone
         'severity_score', 'desgaste_score',
         'breached_essays', 'ai_recommendation', 'ai_analysis', 'ai_generated_at',
         'unitId_generated', 'componentName_generated', 'sampleDate_generated',
-        'client_generated', 'sampleDate_str'
+        'client_generated', 'sampleDate_str', 'oilHourRange', 'limit_source'
     }
+    
+    # Add evolution_ratio columns to metadata (v2.3)
+    metadata_cols.update({col for col in sample.index if col.startswith('evolution_ratio_')})
     
     breached = []
     
     # Check each essay
     for col in sample.index:
-        if col in metadata_cols or col not in comp_limits:
+        if col in metadata_cols:
             continue
         
         try:
@@ -78,8 +133,12 @@ def calculate_breached_essays_from_data(sample, limits, client, machine, compone
             if value is None:
                 continue
             
-            # Get thresholds
-            normal_threshold = comp_limits[col].get('threshold_normal', float('inf'))
+            # Get thresholds with oil-hour stratification (v2.3)
+            essay_limits = get_essay_limits(comp_limits, col, oil_hour_range)
+            if not essay_limits:
+                continue
+            
+            normal_threshold = essay_limits.get('threshold_normal', float('inf'))
             
             # Essay is breached if it exceeds the Normal threshold
             if value >= normal_threshold:
@@ -478,8 +537,11 @@ def register_reports_callbacks(app):
                 # Use componentNameNormalized if available, fallback to componentName
                 component_normalized = history.iloc[0].get('componentNameNormalized', component)
                 comp_limits = limits.get(client, {}).get(familia, {}).get(component_normalized, {})
+                # Get oil hour range from most recent sample for threshold lines (v2.3)
+                oil_hour_range = history.iloc[-1].get('oilHourRange', 'UNKNOWN')
             else:
                 comp_limits = {}
+                oil_hour_range = 'UNKNOWN'
             
             # Add trace for each essay
             for idx, essay in enumerate(essays, 1):
@@ -502,15 +564,14 @@ def register_reports_callbacks(app):
                 )
                 
                 # Add threshold lines if available
-                if essay in comp_limits:
-                    thresholds = comp_limits[essay]
-                    
+                essay_limits = get_essay_limits(comp_limits, essay, oil_hour_range)
+                if essay_limits:
                     # Normal threshold
-                    if 'threshold_normal' in thresholds:
+                    if 'threshold_normal' in essay_limits:
                         fig.add_trace(
                             go.Scatter(
                                 x=essay_dates,
-                                y=[thresholds['threshold_normal']] * len(essay_dates),
+                                y=[essay_limits['threshold_normal']] * len(essay_dates),
                                 mode='lines',
                                 name='Normal',
                                 line=dict(color='green', dash='dash', width=1),
@@ -520,11 +581,11 @@ def register_reports_callbacks(app):
                         )
                     
                     # Alert threshold
-                    if 'threshold_alert' in thresholds:
+                    if 'threshold_alert' in essay_limits:
                         fig.add_trace(
                             go.Scatter(
                                 x=essay_dates,
-                                y=[thresholds['threshold_alert']] * len(essay_dates),
+                                y=[essay_limits['threshold_alert']] * len(essay_dates),
                                 mode='lines',
                                 name='Alerta',
                                 line=dict(color='orange', dash='dash', width=1),
@@ -534,11 +595,11 @@ def register_reports_callbacks(app):
                         )
                     
                     # Critic threshold
-                    if 'threshold_critic' in thresholds:
+                    if 'threshold_critic' in essay_limits:
                         fig.add_trace(
                             go.Scatter(
                                 x=essay_dates,
-                                y=[thresholds['threshold_critic']] * len(essay_dates),
+                                y=[essay_limits['threshold_critic']] * len(essay_dates),
                                 mode='lines',
                                 name='Crítico',
                                 line=dict(color='red', dash='dash', width=1),
@@ -645,6 +706,9 @@ def normalize_value(value, normal, alert, critic):
     
     # Above critic - scale from 90 to 100
     else:
+        # Handle zero critic to avoid division by zero
+        if critic == 0:
+            return 100
         return 90 + min((value - critic) / critic * 10, 10)
 
 
@@ -690,6 +754,9 @@ def create_radar_charts_by_group(sample, limits, df):
         else:
             return html.P("No hay límites disponibles para gráficos radiales", className="text-muted")
         
+        # Get oil hour range from sample (v2.3)
+        oil_hour_range = sample.get('oilHourRange', 'UNKNOWN')
+        
         # Create radar charts
         charts = []
         
@@ -698,7 +765,12 @@ def create_radar_charts_by_group(sample, limits, df):
             essays = group_mapping[group_name]
             
             # Filter essays that exist in sample and have limits
-            valid_essays = [e for e in essays if e in sample.index and pd.notna(sample[e]) and e in comp_limits]
+            valid_essays = []
+            for e in essays:
+                if e in sample.index and pd.notna(sample[e]):
+                    essay_limits = get_essay_limits(comp_limits, e, oil_hour_range)
+                    if essay_limits:
+                        valid_essays.append(e)
             
             if not valid_essays:
                 continue
@@ -711,9 +783,10 @@ def create_radar_charts_by_group(sample, limits, df):
                 value = float(sample[essay])
                 actual_values.append(value)
                 
-                normal = comp_limits[essay].get('threshold_normal', 0)
-                alert = comp_limits[essay].get('threshold_alert', 0)
-                critic = comp_limits[essay].get('threshold_critic', 0)
+                essay_limits = get_essay_limits(comp_limits, essay, oil_hour_range)
+                normal = essay_limits.get('threshold_normal', 0)
+                alert = essay_limits.get('threshold_alert', 0)
+                critic = essay_limits.get('threshold_critic', 0)
                 
                 norm_value = normalize_value(value, normal, alert, critic)
                 normalized_values.append(norm_value)
@@ -806,9 +879,10 @@ def create_radar_charts_by_group(sample, limits, df):
             group_table_data = []
             for i, essay in enumerate(valid_essays):
                 value = actual_values[i]
-                normal = comp_limits[essay].get('threshold_normal', 0)
-                alert = comp_limits[essay].get('threshold_alert', 0)
-                critic = comp_limits[essay].get('threshold_critic', 0)
+                essay_limits = get_essay_limits(comp_limits, essay, oil_hour_range)
+                normal = essay_limits.get('threshold_normal', 0) if essay_limits else 0
+                alert = essay_limits.get('threshold_alert', 0) if essay_limits else 0
+                critic = essay_limits.get('threshold_critic', 0) if essay_limits else 0
                 
                 # Determine status
                 if value >= critic:
@@ -913,6 +987,9 @@ def create_value_analysis_table(sample, limits):
     
     comp_limits = limits[client][machine][component]
     
+    # Get oil hour range from sample (v2.3)
+    oil_hour_range = sample.get('oilHourRange', 'UNKNOWN')
+    
     # Get metadata columns to exclude
     metadata_cols = {'client', 'sampleNumber', 'sampleDate', 'unitId', 'machineName', 
                     'machineModel', 'machineBrand', 'machineHours', 'machineSerialNumber',
@@ -922,18 +999,25 @@ def create_value_analysis_table(sample, limits):
                     'group_element', 'essay_score', 'report_status',
                     'breached_essays', 'ai_recommendation', 'ai_analysis',
                     'unitId_generated', 'componentName_generated', 'sampleDate_generated', 
-                    'client_generated', 'sampleDate_str'}
+                    'client_generated', 'sampleDate_str', 'oilHourRange', 'limit_source'}
+    
+    # Add evolution_ratio columns to metadata (v2.3)
+    metadata_cols.update({col for col in sample.index if col.startswith('evolution_ratio_')})
     
     # Build comparison data
     analysis_data = []
     
     for col in sample.index:
-        if col not in metadata_cols and pd.notna(sample[col]) and col in comp_limits:
+        if col not in metadata_cols and pd.notna(sample[col]):
+            essay_limits = get_essay_limits(comp_limits, col, oil_hour_range)
+            if not essay_limits:
+                continue
+            
             try:
                 value = float(sample[col])
-                normal = comp_limits[col].get('threshold_normal', 0)
-                alert = comp_limits[col].get('threshold_alert', 0)
-                critic = comp_limits[col].get('threshold_critic', 0)
+                normal = essay_limits.get('threshold_normal', 0)
+                alert = essay_limits.get('threshold_alert', 0)
+                critic = essay_limits.get('threshold_critic', 0)
                 
                 # Determine status
                 if value >= critic:
@@ -1382,6 +1466,9 @@ def create_evidence_tables(sample, limits, df):
         
         comp_limits = limits[client][machine][component_normalized]
         
+        # Get oil hour range from sample (v2.3)
+        oil_hour_range = sample.get('oilHourRange', 'UNKNOWN')
+        
         # Parse breached essays
         breached_essays = []
         breached_value = sample.get('breached_essays')
@@ -1398,7 +1485,12 @@ def create_evidence_tables(sample, limits, df):
             essays = group_mapping[group_name]
             
             # Filter essays that exist in sample and have limits
-            valid_essays = [e for e in essays if e in sample.index and pd.notna(sample[e]) and e in comp_limits]
+            valid_essays = []
+            for e in essays:
+                if e in sample.index and pd.notna(sample[e]):
+                    essay_limits = get_essay_limits(comp_limits, e, oil_hour_range)
+                    if essay_limits:
+                        valid_essays.append(e)
             
             if not valid_essays:
                 continue
@@ -1407,9 +1499,10 @@ def create_evidence_tables(sample, limits, df):
             table_data = []
             for essay in valid_essays:
                 value = float(sample[essay])
-                normal = comp_limits[essay].get('threshold_normal', 0)
-                alert = comp_limits[essay].get('threshold_alert', 0)
-                critic = comp_limits[essay].get('threshold_critic', 0)
+                essay_limits = get_essay_limits(comp_limits, essay, oil_hour_range)
+                normal = essay_limits.get('threshold_normal', 0)
+                alert = essay_limits.get('threshold_alert', 0)
+                critic = essay_limits.get('threshold_critic', 0)
                 
                 # Determine status
                 if value >= critic:
@@ -1536,6 +1629,9 @@ def create_evidence_tables_and_radar(sample, limits, df):
         
         comp_limits = limits[client][machine][component_normalized]
         
+        # Get oil hour range from sample (v2.3)
+        oil_hour_range = sample.get('oilHourRange', 'UNKNOWN')
+        
         # Parse breached essays
         breached_essays = []
         breached_value = sample.get('breached_essays')
@@ -1552,7 +1648,12 @@ def create_evidence_tables_and_radar(sample, limits, df):
             essays = group_mapping[group_name]
             
             # Filter essays that exist in sample and have limits
-            valid_essays = [e for e in essays if e in sample.index and pd.notna(sample[e]) and e in comp_limits]
+            valid_essays = []
+            for e in essays:
+                if e in sample.index and pd.notna(sample[e]):
+                    essay_limits = get_essay_limits(comp_limits, e, oil_hour_range)
+                    if essay_limits:
+                        valid_essays.append(e)
             
             if not valid_essays:
                 continue
@@ -1563,9 +1664,10 @@ def create_evidence_tables_and_radar(sample, limits, df):
             table_data = []
             for essay in valid_essays:
                 value = float(sample[essay])
-                normal = comp_limits[essay].get('threshold_normal', 0)
-                alert = comp_limits[essay].get('threshold_alert', 0)
-                critic = comp_limits[essay].get('threshold_critic', 0)
+                essay_limits = get_essay_limits(comp_limits, essay, oil_hour_range)
+                normal = essay_limits.get('threshold_normal', 0)
+                alert = essay_limits.get('threshold_alert', 0)
+                critic = essay_limits.get('threshold_critic', 0)
                 
                 # Determine status
                 if value >= critic:
@@ -1642,9 +1744,10 @@ def create_evidence_tables_and_radar(sample, limits, df):
                 value = float(sample[essay])
                 actual_values.append(value)
                 
-                normal = comp_limits[essay].get('threshold_normal', 0)
-                alert = comp_limits[essay].get('threshold_alert', 0)
-                critic = comp_limits[essay].get('threshold_critic', 0)
+                essay_limits = get_essay_limits(comp_limits, essay, oil_hour_range)
+                normal = essay_limits.get('threshold_normal', 0)
+                alert = essay_limits.get('threshold_alert', 0)
+                critic = essay_limits.get('threshold_critic', 0)
                 
                 norm_value = normalize_value(value, normal, alert, critic)
                 normalized_values.append(norm_value)

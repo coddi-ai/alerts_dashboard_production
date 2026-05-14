@@ -110,12 +110,16 @@ def load_emin_data(file_path: str | Path) -> pd.DataFrame:
 def load_stewart_limits(file_path: str | Path) -> Dict:
     """
     Load pre-computed Stewart Limits from Parquet file.
+    Supports both v2.2 (non-stratified) and v2.3 (oil-hour stratified) formats.
     
     Args:
         file_path: Path to stewart_limits.parquet
     
     Returns:
-        Dictionary with limits structure: {client: {machine: {component: {essay: {threshold_normal, threshold_alert, threshold_critic}}}}}
+        Dictionary with limits structure: 
+        {client: {machine: {component: {essay: {oilHourRange: {threshold_normal, threshold_alert, threshold_critic}}}}}}
+        
+        For v2.2 compatibility, oilHourRange key is 'ALL' when column doesn't exist.
     """
     file_path = Path(file_path)
     logger.info(f"Loading Stewart Limits from {file_path}")
@@ -131,6 +135,10 @@ def load_stewart_limits(file_path: str | Path) -> Dict:
         logger.warning("Stewart Limits dataframe is empty")
         return {}
     
+    # Check if oilHourRange column exists (v2.3) or not (v2.2)
+    has_oil_hour_range = 'oilHourRange' in df.columns
+    logger.info(f"Stewart Limits format: {'v2.3 (stratified)' if has_oil_hour_range else 'v2.2 (non-stratified)'}")
+    
     # Convert dataframe to nested dictionary structure
     limits = {}
     for _, row in df.iterrows():
@@ -138,6 +146,7 @@ def load_stewart_limits(file_path: str | Path) -> Dict:
         machine = row['machine']
         component = row['component']
         essay = row['essay']
+        oil_hour_range = row.get('oilHourRange', 'ALL') if has_oil_hour_range else 'ALL'
         
         if client not in limits:
             limits[client] = {}
@@ -145,8 +154,10 @@ def load_stewart_limits(file_path: str | Path) -> Dict:
             limits[client][machine] = {}
         if component not in limits[client][machine]:
             limits[client][machine][component] = {}
+        if essay not in limits[client][machine][component]:
+            limits[client][machine][component][essay] = {}
         
-        limits[client][machine][component][essay] = {
+        limits[client][machine][component][essay][oil_hour_range] = {
             'threshold_normal': row.get('threshold_normal', 0),
             'threshold_alert': row.get('threshold_alert', 0),
             'threshold_critic': row.get('threshold_critic', 0),
