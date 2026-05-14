@@ -764,15 +764,17 @@ def create_telemetry_evidence_section(alert_row: pd.Series, client: str) -> html
         
         logger.info(f"Processing telemetry alert: Unit={unit_id}, Time={alert_time}, Trigger={trigger}")
         
-        # Load feature names mapping for Spanish titles
-        feature_name_map = load_feature_names(client)
+        # Load feature names mapping for Spanish titles (use FEATURE_NAMES_ES from alerts_charts)
+        from dashboard.components.alerts_charts import FEATURE_NAMES_ES
+        feature_name_map = FEATURE_NAMES_ES
         
         # Identify features to plot (columns ending with _Value)
         value_cols = [col for col in alert_data_clean.columns if col.endswith('_Value')]
         feature_names = [col.replace('_Value', '') for col in value_cols]
         
-        # Filter out Payload and EngSpd (always excluded from charts)
-        excluded_features = ['Payload', 'EngSpd']
+        # Filter out features from CHART DISPLAY ONLY (data still available for KPIs)
+        # Note: Payload, EngSpd, GroundSpd, EngLoad are excluded from charts but remain in alert_data_clean
+        excluded_features = ['Payload', 'EngSpd', 'GroundSpd', 'EngLoad']
         feature_names = [f for f in feature_names if f not in excluded_features]
         
         if not feature_names:
@@ -806,20 +808,22 @@ def create_telemetry_evidence_section(alert_row: pd.Series, client: str) -> html
             trigger=trigger
         )
         
-        # Build section
+        # Build section with NEW LAYOUT: [Trends full] then [KPIs 4 | GPS 8]
         return html.Div([
+            # Section header
             dbc.Row([
                 dbc.Col([
                     html.H4([
-                        html.I(className="fas fa-satellite-dish me-2"),
+                        html.I(className="fas fa-signal me-2"),
                         "Evidencia de Telemetría"
-                    ], className="text-info mb-3")
+                    ], className="text-primary mb-3 mt-4 pb-2 border-bottom"),
+                    html.P("Análisis de datos de sensores y ubicación GPS durante el evento", 
+                           className="text-muted mb-3")
                 ])
             ]),
             
-            # TimeSeries | GPS (side by side)
+            # Row 1: Sensor Trends (FULL WIDTH)
             dbc.Row([
-                # Sensor Trends (left side - 6 columns)
                 dbc.Col([
                     dbc.Card([
                         dbc.CardHeader([
@@ -827,7 +831,7 @@ def create_telemetry_evidence_section(alert_row: pd.Series, client: str) -> html
                                 html.I(className="fas fa-chart-line me-2"),
                                 "Tendencias de Sensores"
                             ], className="mb-0")
-                        ]),
+                        ], className="bg-light"),
                         dbc.CardBody([
                             dcc.Loading(
                                 id="loading-sensor-trends-callback",
@@ -841,17 +845,39 @@ def create_telemetry_evidence_section(alert_row: pd.Series, client: str) -> html
                             )
                         ])
                     ], className="shadow-sm mb-4")
-                ], md=6),
+                ], md=12)
+            ]),
+            
+            # Row 2: KPIs (LEFT, 1 col x 4 rows, 4 cols) + GPS Map (RIGHT, 8 cols) - SAME HEIGHT
+            dbc.Row([
+                # Left: KPIs (vertical layout, 1 column x 4 rows)
+                dbc.Col([
+                    dbc.Card([
+                        dbc.CardHeader([
+                            html.H5([
+                                html.I(className="fas fa-tachometer-alt me-2"),
+                                "Indicadores de Contexto"
+                            ], className="mb-0")
+                        ], className="bg-light"),
+                        dbc.CardBody([
+                            dcc.Loading(
+                                id="loading-context-kpis-callback",
+                                type="circle",
+                                children=[context_kpis]
+                            )
+                        ], className="p-3")
+                    ], className="shadow-sm mb-4 h-100")  # h-100 for full height
+                ], md=4),
                 
-                # GPS Map (right side - 6 columns)
+                # Right: GPS Map
                 dbc.Col([
                     dbc.Card([
                         dbc.CardHeader([
                             html.H5([
                                 html.I(className="fas fa-map-marked-alt me-2"),
-                                "Ruta GPS"
+                                "Ubicación y Ruta GPS"
                             ], className="mb-0")
-                        ]),
+                        ], className="bg-light"),
                         dbc.CardBody([
                             dcc.Loading(
                                 id="loading-gps-map-callback",
@@ -860,37 +886,14 @@ def create_telemetry_evidence_section(alert_row: pd.Series, client: str) -> html
                                     dcc.Graph(
                                         figure=gps_map_fig,
                                         config={'displayModeBar': True},
-                                        style={'height': '600px'}
+                                        style={'height': '500px'}
                                     )
                                 ]
                             )
-                        ])
-                    ], className="shadow-sm mb-4")
-                ], md=6)
-            ]),
-            
-            # Context KPIs (full width)
-            dbc.Row([
-                dbc.Col([
-                    dbc.Card([
-                        dbc.CardHeader([
-                            html.H5([
-                                html.I(className="fas fa-tachometer-alt me-2"),
-                                "Indicadores de Contexto"
-                            ], className="mb-0")
-                        ]),
-                        dbc.CardBody([
-                            dcc.Loading(
-                                id="loading-context-kpis-callback",
-                                type="circle",
-                                children=[
-                                    context_kpis
-                                ]
-                            )
-                        ])
-                    ], className="shadow-sm mb-4")
-                ], md=12)
-            ])
+                        ], className="p-2")
+                    ], className="shadow-sm mb-4 h-100")  # h-100 for full height
+                ], md=8)
+            ], className="gx-3")  # Horizontal spacing between columns
         ], className="mb-5")
     
     except Exception as e:

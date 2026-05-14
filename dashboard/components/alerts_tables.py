@@ -5,13 +5,86 @@ Functions to create Dash DataTables for alerts listings.
 """
 
 import pandas as pd
+import re
 from dash import dash_table, html
 import dash_bootstrap_components as dbc
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def parse_ia_message_sections(mensaje_ia: str) -> Dict[str, str]:
+    """
+    Separa el mensaje de IA en 4 secciones principales usando regex.
+    
+    Args:
+        mensaje_ia: Texto completo generado por la IA
+        
+    Returns:
+        dict con las secciones: {
+            'diagnostico': str,
+            'causa_probable': str,
+            'riesgo': str,
+            'nivel_riesgo': str,  # BAJO/MEDIO/ALTO
+            'acciones': str
+        }
+    """
+    sections = {
+        'diagnostico': '',
+        'causa_probable': '',
+        'riesgo': '',
+        'nivel_riesgo': 'MEDIO',  # Default
+        'acciones': ''
+    }
+    
+    if not mensaje_ia or pd.isna(mensaje_ia):
+        return sections
+    
+    # Patrones para identificar secciones (case insensitive)
+    patterns = {
+        'diagnostico': r'(?:DIAGNÓSTICO|DIAGNOSTICO)[:\s](.+?)(?=(?:CAUSA|RIESGO|ACCIONES|$))',
+        'causa_probable': r'(?:CAUSA PROBABLE|CAUSA)[:\s](.+?)(?=(?:RIESGO|ACCIONES|$))',
+        'riesgo': r'(?:RIESGO OPERACIONAL|RIESGO)[:\s](.+?)(?=(?:ACCIONES|$))',
+        'acciones': r'(?:ACCIONES CLARAS|ACCIONES RECOMENDADAS|ACCIONES)[:\s](.+?)$'
+    }
+    
+    try:
+        for key, pattern in patterns.items():
+            match = re.search(pattern, mensaje_ia, re.IGNORECASE | re.DOTALL)
+            if match:
+                text = match.group(1).strip()
+                text = re.sub(r'^[:\-\s]+', '', text)
+                # Remove "DIRECTO" from diagnostico if present (case sensitive)
+                if key == 'diagnostico':
+                    text = text.replace('DIRECTO:', '').strip()
+                    # Clean up any extra spaces
+                    text = re.sub(r'\s+', ' ', text)
+                sections[key] = text
+        
+        # Extraer nivel de riesgo (BAJO/MEDIO/ALTO)
+        riesgo_match = re.search(r'(BAJO|MEDIO|ALTO)', sections['riesgo'], re.IGNORECASE)
+        if riesgo_match:
+            sections['nivel_riesgo'] = riesgo_match.group(1).upper()
+        
+        # Fallback: dividir por párrafos si no se encontraron secciones
+        if not any([sections['diagnostico'], sections['causa_probable'], sections['acciones']]):
+            paragraphs = [p.strip() for p in mensaje_ia.split('\n\n') if p.strip()]
+            if len(paragraphs) >= 1:
+                sections['diagnostico'] = paragraphs[0]
+            if len(paragraphs) >= 2:
+                sections['causa_probable'] = paragraphs[1]
+            if len(paragraphs) >= 3:
+                sections['riesgo'] = paragraphs[2]
+            if len(paragraphs) >= 4:
+                sections['acciones'] = '\n'.join(paragraphs[3:])
+    
+    except Exception as e:
+        logger.warning(f"Error parseando mensaje IA: {e}")
+        sections['diagnostico'] = mensaje_ia
+    
+    return sections
 
 
 def create_alerts_datatable(alerts_df: pd.DataFrame) -> dash_table.DataTable:
@@ -135,21 +208,9 @@ def create_alert_detail_card(alert_row: pd.Series) -> dbc.Card:
         return dbc.Alert("No se ha seleccionado ninguna alerta", color="warning")
     
     try:
-        # Parse AI diagnosis into structured sections (if formatted)
-        # Expected format: sections separated by newlines or keywords
+        # Parse AI diagnosis into structured sections
         ai_message = alert_row['mensaje_ia']
-        
-        # Try to parse structured diagnosis (basic implementation)
-        # This assumes the AI message might contain keywords or is a single paragraph
-        diagnosis_sections = {
-            'diagnosis': ai_message,  # Default: full message as diagnosis
-            'cause': None,
-            'risk': None,
-            'actions': None
-        }
-        
-        # TODO: Enhance this parsing logic if AI messages have consistent structure
-        # For now, display as unified diagnosis with improved formatting
+        diagnosis_sections = parse_ia_message_sections(ai_message)
         
         card_content = dbc.Card([
             dbc.CardHeader([
@@ -223,64 +284,38 @@ def create_alert_detail_card(alert_row: pd.Series) -> dbc.Card:
                     ])
                 ], className="mb-4"),
                 
-                # AI Diagnosis Section - Structured
+                # AI Diagnosis Section - Only Diagnóstico and Recomendaciones
                 html.Div([
                     html.H5([
                         html.I(className="fas fa-brain me-2"),
                         "Análisis Inteligente"
                     ], className="text-primary mb-3 pb-2 border-bottom"),
                     
-                    # Diagnosis subsection
+                    # Diagnóstico subsection
                     html.Div([
                         html.H6([
-                            html.I(className="fas fa-stethoscope me-2 text-danger"),
+                            html.Span("🔬", className="me-2"),
                             "Diagnóstico"
                         ], className="text-dark mb-2"),
                         html.P(
-                            diagnosis_sections['diagnosis'],
+                            diagnosis_sections['diagnostico'] or "No disponible",
                             className="text-muted ps-4",
                             style={'whiteSpace': 'pre-wrap', 'lineHeight': '1.6'}
                         )
                     ], className="mb-3 p-3 bg-light rounded"),
                     
-                    # Note: If AI messages are structured in the future, uncomment these sections
-                    # and implement proper parsing logic above
-                    
-                    # # Probable Cause subsection
-                    # html.Div([
-                    #     html.H6([
-                    #         html.I(className="fas fa-search me-2 text-warning"),
-                    #         "Causa Probable"
-                    #     ], className="text-dark mb-2"),
-                    #     html.P(
-                    #         diagnosis_sections['cause'] or "Análisis en progreso...",
-                    #         className="text-muted ps-4"
-                    #     )
-                    # ], className="mb-3 p-3 bg-light rounded"),
-                    
-                    # # Operational Risk subsection
-                    # html.Div([
-                    #     html.H6([
-                    #         html.I(className="fas fa-exclamation-triangle me-2 text-danger"),
-                    #         "Riesgo Operacional"
-                    #     ], className="text-dark mb-2"),
-                    #     html.P(
-                    #         diagnosis_sections['risk'] or "Evaluación pendiente...",
-                    #         className="text-muted ps-4"
-                    #     )
-                    # ], className="mb-3 p-3 bg-light rounded"),
-                    
-                    # # Recommended Actions subsection
-                    # html.Div([
-                    #     html.H6([
-                    #         html.I(className="fas fa-tasks me-2 text-success"),
-                    #         "Acciones Recomendadas"
-                    #     ], className="text-dark mb-2"),
-                    #     html.P(
-                    #         diagnosis_sections['actions'] or "Recomendaciones en desarrollo...",
-                    #         className="text-muted ps-4"
-                    #     )
-                    # ], className="mb-3 p-3 bg-light rounded")
+                    # Recomendaciones subsection
+                    html.Div([
+                        html.H6([
+                            html.Span("✅", className="me-2"),
+                            "Recomendaciones"
+                        ], className="text-dark mb-2"),
+                        html.P(
+                            diagnosis_sections['acciones'] or "No disponible",
+                            className="text-muted ps-4",
+                            style={'whiteSpace': 'pre-wrap', 'lineHeight': '1.6'}
+                        )
+                    ], className="mb-3 p-3 bg-light rounded")
                 ])
             ])
         ], className="shadow-sm mb-4 border-0")

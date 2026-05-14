@@ -1423,9 +1423,9 @@ def create_evidence_tables(sample, limits, df):
                 table_data.append({
                     'essay': essay,
                     'value': round(value, 2),
-                    'threshold_band': f"{round(normal, 1)} / {round(alert, 1)} / {round(critic, 1)}",
+                    'limite_marginal': round(alert, 1),
+                    'limite_condenatorio': round(critic, 1),
                     'status': status,
-                    'breached': '⚠️ Sí' if is_breached else 'No',
                     '_color': color
                 })
             
@@ -1438,9 +1438,9 @@ def create_evidence_tables(sample, limits, df):
                 columns=[
                     {'name': 'Ensayo', 'id': 'essay'},
                     {'name': 'Valor Actual (ppm)', 'id': 'value', 'type': 'numeric'},
-                    {'name': 'Umbrales (N/A/C)', 'id': 'threshold_band'},
-                    {'name': 'Estado', 'id': 'status'},
-                    {'name': '¿Crítico?', 'id': 'breached'}
+                    {'name': 'Límite Marginal', 'id': 'limite_marginal', 'type': 'numeric'},
+                    {'name': 'Límite Condenatorio', 'id': 'limite_condenatorio', 'type': 'numeric'},
+                    {'name': 'Estado', 'id': 'status'}
                 ],
                 data=[{k: v for k, v in item.items() if k != '_color'} for item in table_data],
                 style_cell={
@@ -1462,13 +1462,6 @@ def create_evidence_tables(sample, limits, df):
                         'fontWeight': 'bold'
                     }
                     for i, item in enumerate(table_data)
-                ] + [
-                    {
-                        'if': {'row_index': i, 'column_id': 'breached'},
-                        'fontWeight': 'bold',
-                        'color': '#dc3545'
-                    }
-                    for i, item in enumerate(table_data) if item['breached'] == '⚠️ Yes'
                 ],
                 page_size=15,
                 style_table={'overflowX': 'auto'}
@@ -1586,9 +1579,9 @@ def create_evidence_tables_and_radar(sample, limits, df):
                 table_data.append({
                     'essay': essay,
                     'value': round(value, 2),
-                    'threshold_band': f"{round(normal, 1)} / {round(alert, 1)} / {round(critic, 1)}",
+                    'limite_marginal': round(alert, 1),
+                    'limite_condenatorio': round(critic, 1),
                     'status': status,
-                    'breached': '⚠️ Sí' if is_breached else 'No',
                     '_color': color
                 })
             
@@ -1601,9 +1594,9 @@ def create_evidence_tables_and_radar(sample, limits, df):
                 columns=[
                     {'name': 'Ensayo', 'id': 'essay'},
                     {'name': 'Valor (ppm)', 'id': 'value', 'type': 'numeric'},
-                    {'name': 'Umbrales (N/A/C)', 'id': 'threshold_band'},
-                    {'name': 'Estado', 'id': 'status'},
-                    {'name': '\u00bfCr\u00edtico?', 'id': 'breached'}
+                    {'name': 'Límite Marginal', 'id': 'limite_marginal', 'type': 'numeric'},
+                    {'name': 'Límite Condenatorio', 'id': 'limite_condenatorio', 'type': 'numeric'},
+                    {'name': 'Estado', 'id': 'status'}
                 ],
                 data=[{k: v for k, v in item.items() if k != '_color'} for item in table_data],
                 style_cell={
@@ -1625,13 +1618,6 @@ def create_evidence_tables_and_radar(sample, limits, df):
                         'fontWeight': 'bold'
                     }
                     for i, item in enumerate(table_data)
-                ] + [
-                    {
-                        'if': {'row_index': i, 'column_id': 'breached'},
-                        'fontWeight': 'bold',
-                        'color': '#dc3545'
-                    }
-                    for i, item in enumerate(table_data) if item['breached'] == '⚠️ Yes'
                 ],
                 page_size=10,
                 style_table={'overflowX': 'auto'}

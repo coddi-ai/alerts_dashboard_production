@@ -215,7 +215,7 @@ def create_alert_detail_content(
         ])
     )
     
-    # 2. Telemetry Evidence: TimeSeries | GPS Route (conditional)
+    # 2. Telemetry Evidence: Stacked layout (Signals → GPS → KPIs)
     if show_telemetry:
         # Section header for telemetry evidence
         sections.append(
@@ -229,9 +229,9 @@ def create_alert_detail_content(
             ])
         )
         
+        # Row 1: Sensor Trends (full width)
         sections.append(
             dbc.Row([
-                # Sensor Trends (left side - 7 columns)
                 dbc.Col([
                     dbc.Card([
                         dbc.CardHeader([
@@ -253,15 +253,39 @@ def create_alert_detail_content(
                             )
                         ])
                     ], className="shadow-sm mb-4")
-                ], md=7),
+                ], md=12)
+            ])
+        )
+        
+        # Row 2: KPIs (left, 1 col x 4 rows) + GPS Map (right) - SAME HEIGHT
+        sections.append(
+            dbc.Row([
+                # Left: KPIs (vertical layout, 1 column x 4 rows)
+                dbc.Col([
+                    dbc.Card([
+                        dbc.CardHeader([
+                            html.H5([
+                                html.I(className="fas fa-tachometer-alt me-2"),
+                                "Indicadores de Contexto"
+                            ], className="mb-0")
+                        ], className="bg-light"),
+                        dbc.CardBody([
+                            dcc.Loading(
+                                id="loading-context-kpis",
+                                type="circle",
+                                children=[html.Div(id='context-kpis-container')]
+                            )
+                        ], className="p-3")
+                    ], className="shadow-sm mb-4 h-100")  # Added h-100 for full height
+                ], md=4),
                 
-                # GPS Map (right side - 5 columns)
+                # Right: GPS Map
                 dbc.Col([
                     dbc.Card([
                         dbc.CardHeader([
                             html.H5([
                                 html.I(className="fas fa-map-marked-alt me-2"),
-                                "Ubicación y Ruta"
+                                "Ubicación y Ruta GPS"
                             ], className="mb-0")
                         ], className="bg-light"),
                         dbc.CardBody([
@@ -276,37 +300,10 @@ def create_alert_detail_content(
                                     )
                                 ]
                             )
-                        ])
-                    ], className="shadow-sm mb-4")
-                ], md=5)
-            ])
-        )
-        
-        # 3. KPIs Row (full width: 3 KPIs side by side)
-        sections.append(
-            html.Div([
-                html.H5([
-                    html.I(className="fas fa-tachometer-alt me-2"),
-                    "Contexto Operacional"
-                ], className="text-secondary mb-3")
-            ])
-        )
-        sections.append(
-            dbc.Row([
-                dbc.Col([
-                    dbc.Card([
-                        dbc.CardBody([
-                            dcc.Loading(
-                                id="loading-context-kpis",
-                                type="circle",
-                                children=[
-                                    dbc.Row(id='context-kpis-container', className="g-3")
-                                ]
-                            )
-                        ], className="p-2")
-                    ], className="shadow-sm mb-4 border-0")
-                ], md=12)
-            ])
+                        ], className="p-2")  # Reduced padding for consistency
+                    ], className="shadow-sm mb-4 h-100")  # Added h-100 for full height
+                ], md=8)
+            ], className="gx-3")  # Added horizontal spacing between columns
         )
     
     # 4. Oil Evidence: Radar Chart (conditional - full width)
