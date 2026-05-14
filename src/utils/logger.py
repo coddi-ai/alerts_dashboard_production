@@ -5,6 +5,7 @@ Provides easy access to configured loggers throughout the application.
 """
 
 import logging
+import os
 from config.logging_config import get_logger as _get_logger
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
