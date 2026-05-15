@@ -73,7 +73,7 @@ def register_navigation_callbacks(app: dash.Dash) -> None:
     
     def get_alerts_content(client: str):
         """
-        Get alerts content or 'In Progress' placeholder based on data availability.
+        Get alerts content for any client.
         
         Args:
             client: Client identifier (not used directly, alerts tabs get client from callbacks)
@@ -82,12 +82,6 @@ def register_navigation_callbacks(app: dash.Dash) -> None:
             Dashboard content (unified alerts tab with internal tabs)
         """
         logger.info(f"Getting alerts content for client={client}")
-        
-        # Alerts subsystem is CDA-only
-        if client.lower() != 'cda':
-            logger.warning(f"Alerts subsystem is only available for CDA client, requested: {client}")
-            return create_placeholder_content('Alertas (Solo disponible para CDA)')
-        
         logger.info("Creating unified alerts tab with internal tabs")
         return create_alerts_tab()
     

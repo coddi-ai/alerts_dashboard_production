@@ -36,17 +36,6 @@ def create_layout() -> html.Div:
             ])
         ], className="mb-4"),
         
-        # Client restriction notice
-        html.Div(
-            id='alerts-client-notice',
-            children=[
-                dbc.Alert([
-                    html.I(className="fas fa-info-circle me-2"),
-                    "Este módulo está disponible únicamente para el cliente CDA"
-                ], color="info", className="mb-4")
-            ]
-        ),
-        
         # Internal Tabs
         dcc.Tabs(
             id='alerts-internal-tabs',
