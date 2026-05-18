@@ -92,6 +92,7 @@ MAPBOX_TOKEN=pk.your.mapbox.token.here
 # Create a .mapbox_token file in the project root
 cp .mapbox_token.example .mapbox_token
 
+
 # Edit and paste your token
 echo "pk.your.mapbox.token.here" > .mapbox_token
 ```
