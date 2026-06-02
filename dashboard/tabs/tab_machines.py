@@ -28,20 +28,20 @@ def create_machines_tab() -> dbc.Container:
         Bootstrap container with tab layout
     """
     return dbc.Container([
-        html.H3("Machines Overview", className="mt-4 mb-3"),
+        html.H3("Resumen de Máquinas", className="mt-4 mb-3"),
         html.Hr(),
         
         # ========================================
         # SECTION 1: Fleet Status KPIs (Redesigned June 2026)
         # ========================================
-        html.H4("📊 Fleet Status Summary", className="mt-4 mb-3"),
+        html.H4("📊 Resumen de Estado de Flota", className="mt-4 mb-3"),
         
         # KPI Cards Row (Clickable for filtering - June 2026)
         dbc.Row([
             dbc.Col([
                 dbc.Card([
                     dbc.CardBody([
-                        html.H6("Total Machines", className="text-muted mb-2"),
+                        html.H6("Total Máquinas", className="text-muted mb-2"),
                         html.H2(id='kpi-total-machines', children="0", className="mb-0 text-primary"),
                     ])
                 ], className="text-center shadow-sm")
@@ -115,7 +115,7 @@ def create_machines_tab() -> dbc.Container:
         # Persistent machine selection indicator
         dbc.Alert(
             id='machine-selection-indicator',
-            children="No machine selected",
+            children="Ninguna máquina seleccionada",
             color="light",
             className="mb-3"
         ),
@@ -123,10 +123,10 @@ def create_machines_tab() -> dbc.Container:
         # Machine selector (alternative to table selection)
         dbc.Row([
             dbc.Col([
-                html.Label("Or select machine manually:", className="fw-bold"),
+                html.Label("O seleccione máquina manualmente:", className="fw-bold"),
                 dcc.Dropdown(
                     id='machine-detail-selector',
-                    placeholder='Select a machine...',
+                    placeholder='Seleccionar máquina...',
                     className="mb-3"
                 )
             ], width=6)

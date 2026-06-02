@@ -109,13 +109,13 @@ def register_machines_callbacks(app):
         Redesigned June 2026: Click on KPI cards to filter table by status.
         """
         if not client:
-            return "Please select a client", ""
+            return "Por favor seleccione un cliente", ""
         
         settings = get_settings()
         machine_file = settings.get_machine_status_path(client.lower())
         
         if not machine_file.exists():
-            return "No machine data available", ""
+            return "No hay datos de máquinas disponibles", ""
         
         try:
             df = safe_read_parquet(machine_file)
@@ -128,13 +128,13 @@ def register_machines_callbacks(app):
             
             if triggered == 'kpi-normal-card' and normal_clicks:
                 status_filter = 'Normal'
-                filter_badge = dbc.Badge("Filtered: Normal", color="success", className="ms-2")
+                filter_badge = dbc.Badge("Filtrado: Normal", color="success", className="ms-2")
             elif triggered == 'kpi-alerta-card' and alerta_clicks:
                 status_filter = 'Alerta'
-                filter_badge = dbc.Badge("Filtered: Alerta", color="warning", className="ms-2")
+                filter_badge = dbc.Badge("Filtrado: Alerta", color="warning", className="ms-2")
             elif triggered == 'kpi-anormal-card' and anormal_clicks:
                 status_filter = 'Anormal'
-                filter_badge = dbc.Badge("Filtered: Anormal", color="danger", className="ms-2")
+                filter_badge = dbc.Badge("Filtrado: Anormal", color="danger", className="ms-2")
             
             # Create priority table with filter
             priority_table = create_priority_table(df, status_filter)
@@ -166,7 +166,7 @@ def register_machines_callbacks(app):
         Implements OIL-M-03 (persistent master-detail), OIL-M-04 (condition-focused).
         """
         if not client:
-            return "No machine selected", "light", "Select a client to view machine details"
+            return "Ninguna máquina seleccionada", "light", "Seleccione un cliente para ver los detalles de la máquina"
         
         # Determine which machine to show
         unit_id = None
@@ -183,7 +183,7 @@ def register_machines_callbacks(app):
             selection_source = "dropdown"
         
         if not unit_id:
-            return "No machine selected", "light", "Select a machine from the priority table or dropdown above"
+            return "Ninguna máquina seleccionada", "light", "Seleccione una máquina de la tabla de prioridad o del menú desplegable"
         
         # Load data
         settings = get_settings()
@@ -192,7 +192,7 @@ def register_machines_callbacks(app):
         logger.info(f"Looking for unit_id: {unit_id} in classified reports")
         
         if not reports_file.exists():
-            return "No machine selected", "light", "No reports data available"
+            return "Ninguna máquina seleccionada", "light", "No hay datos de reportes disponibles"
         
         try:
             df = safe_read_parquet(reports_file)
@@ -200,7 +200,7 @@ def register_machines_callbacks(app):
             
             if machine_df.empty:
                 logger.warning(f"No data found for unit_id: {unit_id}")
-                return f"Machine {unit_id} selected", "warning", f"No data found for machine {unit_id}"
+                return f"Máquina {unit_id} seleccionada", "warning", f"No se encontraron datos para la máquina {unit_id}"
             
             # Get latest sample for each component
             latest_samples = machine_df.loc[machine_df.groupby('componentName')['sampleDate'].idxmax()]
@@ -230,12 +230,12 @@ def register_machines_callbacks(app):
             indicator = html.Div([
                 html.H5([
                     html.Span("📍 ", style={'fontSize': '1.2em'}),
-                    f"Selected: {unit_id}",
+                    f"Seleccionada: {unit_id}",
                     html.Span(f" ({machine_type})", className="text-muted ms-2")
                 ], className="mb-2"),
                 html.Div([
                     html.Span([
-                        html.Strong("Components: "),
+                        html.Strong("Componentes: "),
                         f"{len(display_df)} total"
                     ], className="me-3"),
                     html.Span([
@@ -253,7 +253,7 @@ def register_machines_callbacks(app):
             
         except Exception as e:
             logger.error(f"Error updating machine detail for {unit_id}: {str(e)}")
-            return f"Error loading machine {unit_id}", "danger", f"Error: {str(e)}"
+            return f"Error al cargar máquina {unit_id}", "danger", f"Error: {str(e)}"
     
     
     # ========================================

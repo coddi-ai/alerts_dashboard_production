@@ -115,14 +115,14 @@ def create_priority_table(df: pd.DataFrame, status_filter: Optional[str] = None)
     # The data uses format like 'T_10', 'T_11', etc.
     
     if display_df.empty:
-        return html.Div("No machines match the selected filter", className="text-info p-3")
+        return html.Div("Ninguna máquina coincide con el filtro seleccionado", className="text-info p-3")
     
     return dash_table.DataTable(
         id='priority-table',
         columns=[
-            {'name': 'Unit', 'id': 'unit_id'},
-            {'name': 'Status', 'id': 'overall_status'},
-            {'name': 'AI Recommendation', 'id': 'ai_recommendation'}
+            {'name': 'Unidad', 'id': 'unit_id'},
+            {'name': 'Estado', 'id': 'overall_status'},
+            {'name': 'Recomendación IA', 'id': 'ai_recommendation'}
         ],
         data=display_df.to_dict('records'),
         style_table={'overflowX': 'auto'},
@@ -202,7 +202,7 @@ def create_machine_detail_table(df: pd.DataFrame) -> dash_table.DataTable:
         Dash DataTable
     """
     if df.empty:
-        return html.Div("Select a machine to view details", className="text-muted p-3")
+        return html.Div("Seleccione una máquina para ver los detalles", className="text-muted p-3")
     
     df = df.copy()
     
@@ -264,11 +264,11 @@ def create_machine_detail_table(df: pd.DataFrame) -> dash_table.DataTable:
     
     # Define columns: Component, Status, Sample Date, Essays Broken, AI Recommendation
     columns = [
-        {'name': 'Component', 'id': 'componentName'},
-        {'name': 'Status', 'id': 'report_status'},
-        {'name': 'Sample Date', 'id': 'sampleDate'},
-        {'name': 'Essays Broken', 'id': 'essays_broken_names'},
-        {'name': 'AI Recommendation', 'id': 'ai_text'}
+        {'name': 'Componente', 'id': 'componentName'},
+        {'name': 'Estado', 'id': 'report_status'},
+        {'name': 'Fecha Muestra', 'id': 'sampleDate'},
+        {'name': 'Ensayos Anormales', 'id': 'essays_broken_names'},
+        {'name': 'Recomendación IA', 'id': 'ai_text'}
     ]
     
     return dash_table.DataTable(

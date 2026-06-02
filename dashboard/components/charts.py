@@ -209,7 +209,10 @@ def create_component_stacked_bar_chart(
             text=title,
             font=dict(size=16)
         ),
-        xaxis_title="Number of Components",
+        xaxis=dict(
+            title="Number of Components",
+            tickangle=-90
+        ),
         yaxis_title="Component",
         barmode='stack',
         showlegend=True,
