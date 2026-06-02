@@ -32,32 +32,77 @@ def create_machines_tab() -> dbc.Container:
         html.Hr(),
         
         # ========================================
-        # SECTION 1: Fleet Status Summary (OIL-M-01)
+        # SECTION 1: Fleet Status KPIs (Redesigned June 2026)
         # ========================================
         html.H4("📊 Fleet Status Summary", className="mt-4 mb-3"),
-        html.P("Haga clic en un segmento del gráfico de dona para filtrar la tabla de prioridad por estado.", className="text-muted"),
         
+        # KPI Cards Row (Clickable for filtering - June 2026)
         dbc.Row([
-            # Left: Status Donut (interactive)
             dbc.Col([
                 dbc.Card([
-                    dbc.CardHeader("Distribución de Estado de Máquinas", className="fw-bold"),
                     dbc.CardBody([
-                        dcc.Graph(id='status-donut-chart'),
-                        html.Div(id='status-filter-indicator', className="mt-2 text-center")
+                        html.H6("Total Machines", className="text-muted mb-2"),
+                        html.H2(id='kpi-total-machines', children="0", className="mb-0 text-primary"),
                     ])
-                ])
-            ], width=5),
-            
-            # Right: Priority Table (OIL-M-02)
+                ], className="text-center shadow-sm")
+            ], width=3),
+            dbc.Col([
+                html.Div(
+                    dbc.Card([
+                        dbc.CardBody([
+                            html.H6("Normal", className="text-muted mb-2"),
+                            html.H2(id='kpi-normal-machines', children="0", className="mb-0", 
+                                    style={'color': '#28a745'}),
+                        ])
+                    ], className="text-center shadow-sm"),
+                    id='kpi-normal-card',
+                    n_clicks=0,
+                    style={'cursor': 'pointer'}
+                )
+            ], width=3),
+            dbc.Col([
+                html.Div(
+                    dbc.Card([
+                        dbc.CardBody([
+                            html.H6("Alerta", className="text-muted mb-2"),
+                            html.H2(id='kpi-alerta-machines', children="0", className="mb-0",
+                                    style={'color': '#ffc107'}),
+                        ])
+                    ], className="text-center shadow-sm"),
+                    id='kpi-alerta-card',
+                    n_clicks=0,
+                    style={'cursor': 'pointer'}
+                )
+            ], width=3),
+            dbc.Col([
+                html.Div(
+                    dbc.Card([
+                        dbc.CardBody([
+                            html.H6("Anormal", className="text-muted mb-2"),
+                            html.H2(id='kpi-anormal-machines', children="0", className="mb-0",
+                                    style={'color': '#dc3545'}),
+                        ])
+                    ], className="text-center shadow-sm"),
+                    id='kpi-anormal-card',
+                    n_clicks=0,
+                    style={'cursor': 'pointer'}
+                )
+            ], width=3),
+        ], className="mb-4"),
+        
+        # Priority Table - Full Width (Redesigned June 2026)
+        dbc.Row([
             dbc.Col([
                 dbc.Card([
-                    dbc.CardHeader("Máquinas Prioritarias", className="fw-bold"),
+                    dbc.CardHeader([
+                        html.Span("Máquinas Prioritarias", className="fw-bold"),
+                        html.Span(id='table-filter-badge', className="ms-2")
+                    ]),
                     dbc.CardBody(
                         html.Div(id='priority-table-container')
                     )
                 ])
-            ], width=7)
+            ], width=12)
         ], className="mb-4"),
         
         # ========================================

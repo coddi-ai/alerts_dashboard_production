@@ -40,67 +40,73 @@ def register_machines_callbacks(app):
     """
     
     # ========================================
-    # SECTION 1: Fleet Status Overview
+    # SECTION 1: Fleet Status KPIs (Redesigned June 2026)
     # ========================================
     
     @app.callback(
-        [Output('status-donut-chart', 'figure'),
+        [Output('kpi-total-machines', 'children'),
+         Output('kpi-normal-machines', 'children'),
+         Output('kpi-alerta-machines', 'children'),
+         Output('kpi-anormal-machines', 'children'),
          Output('machine-detail-selector', 'options'),
          Output('nav-equipment-selector', 'options')],
         [Input('client-selector', 'value')]
     )
-    def update_fleet_status(client):
+    def update_fleet_kpis(client):
         """
-        Update fleet status donut chart and machine options.
+        Update fleet status KPI cards and machine options.
         
-        Implements OIL-M-01, GR-02 (donut chart with total in center).
+        Redesigned June 2026: Replaced donut chart with KPIs for better data density.
         """
-        logger.info(f"Fleet status callback triggered: client={client}")
+        logger.info(f"Fleet KPIs callback triggered: client={client}")
         
         if not client:
-            from plotly.graph_objects import Figure
             logger.warning("No client selected")
-            return Figure(), [], []
+            return "0", "0", "0", "0", [], []
         
         settings = get_settings()
         machine_file = settings.get_machine_status_path(client.lower())
         logger.info(f"Looking for machine file at: {machine_file}")
         
         if not machine_file.exists():
-            from plotly.graph_objects import Figure
             logger.error(f"Machine file not found: {machine_file}")
-            return Figure(), [], []
+            return "0", "0", "0", "0", [], []
         
         try:
             df = safe_read_parquet(machine_file)
             
-            # Create donut chart (OIL-M-01, GR-02)
-            donut_chart = create_machine_status_donut(df)
+            # Calculate status counts
+            status_counts = df['overall_status'].value_counts()
+            total = len(df)
+            normal = status_counts.get('Normal', 0)
+            alerta = status_counts.get('Alerta', 0)
+            anormal = status_counts.get('Anormal', 0)
             
             # Machine options for selectors
-            # Keep unit_id in original format (T_10, T_11, etc.) for proper matching
             machines = sorted(df['unit_id'].unique().tolist())
             machine_options = [{'label': m, 'value': m} for m in machines]
             
-            return donut_chart, machine_options, machine_options
+            return str(total), str(normal), str(alerta), str(anormal), machine_options, machine_options
             
         except Exception as e:
-            from plotly.graph_objects import Figure
-            logger.error(f"Error loading fleet status: {str(e)}")
-            return Figure(), [], []
+            logger.error(f"Error loading fleet KPIs: {str(e)}")
+            return "0", "0", "0", "0", [], []
     
     
     @app.callback(
         [Output('priority-table-container', 'children'),
-         Output('status-filter-indicator', 'children')],
-        [Input('status-donut-chart', 'clickData'),
-         Input('client-selector', 'value')]
+         Output('table-filter-badge', 'children')],
+        [Input('kpi-normal-card', 'n_clicks'),
+         Input('kpi-alerta-card', 'n_clicks'),
+         Input('kpi-anormal-card', 'n_clicks'),
+         Input('client-selector', 'value')],
+        prevent_initial_call=False
     )
-    def update_priority_table(click_data, client):
+    def update_priority_table(normal_clicks, alerta_clicks, anormal_clicks, client):
         """
-        Update priority table with optional filter from donut click.
+        Update priority table with optional filter from KPI card clicks.
         
-        Implements OIL-M-01 (clickable donut segments), OIL-M-02 (diagnostic columns).
+        Redesigned June 2026: Click on KPI cards to filter table by status.
         """
         if not client:
             return "Please select a client", ""
@@ -109,29 +115,31 @@ def register_machines_callbacks(app):
         machine_file = settings.get_machine_status_path(client.lower())
         
         if not machine_file.exists():
-            return "No hay datos de máquinas disponibles", ""
+            return "No machine data available", ""
         
         try:
             df = safe_read_parquet(machine_file)
             
-            # Determine status filter from donut click
+            # Determine status filter from clicked KPI
             status_filter = None
-            filter_indicator = ""
+            filter_badge = ""
             
-            if click_data and 'points' in click_data and len(click_data['points']) > 0:
-                clicked_label = click_data['points'][0]['label']
-                status_filter = clicked_label
-                
-                # Show removable filter indicator (OIL-M-01)
-                filter_indicator = dbc.Alert([
-                    html.Span(f"Filtered by: {clicked_label} ", className="fw-bold"),
-                    html.Span("(Click chart again to clear)", className="text-muted small")
-                ], color="info", dismissable=False, className="mb-0 py-2")
+            triggered = ctx.triggered_id if ctx.triggered else None
             
-            # Create priority table with filter (OIL-M-02)
+            if triggered == 'kpi-normal-card' and normal_clicks:
+                status_filter = 'Normal'
+                filter_badge = dbc.Badge("Filtered: Normal", color="success", className="ms-2")
+            elif triggered == 'kpi-alerta-card' and alerta_clicks:
+                status_filter = 'Alerta'
+                filter_badge = dbc.Badge("Filtered: Alerta", color="warning", className="ms-2")
+            elif triggered == 'kpi-anormal-card' and anormal_clicks:
+                status_filter = 'Anormal'
+                filter_badge = dbc.Badge("Filtered: Anormal", color="danger", className="ms-2")
+            
+            # Create priority table with filter
             priority_table = create_priority_table(df, status_filter)
             
-            return priority_table, filter_indicator
+            return priority_table, filter_badge
             
         except Exception as e:
             logger.error(f"Error updating priority table: {str(e)}")
@@ -158,7 +166,7 @@ def register_machines_callbacks(app):
         Implements OIL-M-03 (persistent master-detail), OIL-M-04 (condition-focused).
         """
         if not client:
-            return "Ninguna máquina seleccionada", "light", "Seleccione un cliente para ver detalles de la máquina"
+            return "No machine selected", "light", "Select a client to view machine details"
         
         # Determine which machine to show
         unit_id = None
@@ -175,7 +183,7 @@ def register_machines_callbacks(app):
             selection_source = "dropdown"
         
         if not unit_id:
-            return "Ninguna máquina seleccionada", "light", "Seleccione una máquina de la tabla de prioridad o del menú desplegable"
+            return "No machine selected", "light", "Select a machine from the priority table or dropdown above"
         
         # Load data
         settings = get_settings()
@@ -184,7 +192,7 @@ def register_machines_callbacks(app):
         logger.info(f"Looking for unit_id: {unit_id} in classified reports")
         
         if not reports_file.exists():
-            return "Ninguna máquina seleccionada", "light", "No hay datos de reportes disponibles"
+            return "No machine selected", "light", "No reports data available"
         
         try:
             df = safe_read_parquet(reports_file)
@@ -245,7 +253,7 @@ def register_machines_callbacks(app):
             
         except Exception as e:
             logger.error(f"Error updating machine detail for {unit_id}: {str(e)}")
-            return f"Error al cargar máquina {unit_id}", "danger", f"Error: {str(e)}"
+            return f"Error loading machine {unit_id}", "danger", f"Error: {str(e)}"
     
     
     # ========================================

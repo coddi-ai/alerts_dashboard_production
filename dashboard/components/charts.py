@@ -109,11 +109,14 @@ def create_component_stacked_bar_chart(
     """
     Create stacked horizontal bar chart for component status distribution (OIL-M-06).
     
+    Enhanced June 2026: Hover shows which units belong to each component-status combination.
+    
     Replaces donut chart with scalable categorical comparison.
     - Each bar = component
     - Stacks = Normal, Alerta, Anormal
     - Sorted by highest abnormal burden first
     - Toggle between original and normalized component names
+    - Hover shows unit IDs for traceability
     
     Args:
         df: DataFrame with classified reports (component-level data)
@@ -121,7 +124,7 @@ def create_component_stacked_bar_chart(
         title: Chart title
     
     Returns:
-        Plotly figure
+        Plotly figure with interactive hover showing unit details
     """
     if df.empty:
         return go.Figure()
@@ -132,41 +135,73 @@ def create_component_stacked_bar_chart(
     # Get latest sample for each unit-component
     latest_components = df.loc[df.groupby(['unitId', component_col])['sampleDate'].idxmax()]
     
-    # Count status by component
-    status_by_component = latest_components.groupby([component_col, 'report_status']).size().unstack(fill_value=0)
+    # Count status by component AND collect unit IDs
+    status_by_component = {}
+    unit_lists = {}  # Store which units are in each component-status combination
+    
+    for component in latest_components[component_col].unique():
+        component_df = latest_components[latest_components[component_col] == component]
+        status_counts = component_df['report_status'].value_counts()
+        status_by_component[component] = status_counts.to_dict()
+        
+        # Collect unit IDs for each status
+        unit_lists[component] = {}
+        for status in ['Normal', 'Alerta', 'Anormal']:
+            units = component_df[component_df['report_status'] == status]['unitId'].tolist()
+            unit_lists[component][status] = units
+    
+    # Convert to DataFrame for easier manipulation
+    status_df = pd.DataFrame(status_by_component).T.fillna(0)
     
     # Ensure all status columns exist
     for status in ['Normal', 'Alerta', 'Anormal']:
-        if status not in status_by_component.columns:
-            status_by_component[status] = 0
+        if status not in status_df.columns:
+            status_df[status] = 0
     
     # Calculate abnormal burden for sorting (Anormal > Alerta > Normal)
-    status_by_component['burden'] = (
-        status_by_component.get('Anormal', 0) * 100 + 
-        status_by_component.get('Alerta', 0) * 10
+    status_df['burden'] = (
+        status_df.get('Anormal', 0) * 100 + 
+        status_df.get('Alerta', 0) * 10
     )
     
     # Sort by burden descending
-    status_by_component = status_by_component.sort_values('burden', ascending=True)  # True for horizontal bars (bottom to top)
-    status_by_component = status_by_component.drop('burden', axis=1)
+    status_df = status_df.sort_values('burden', ascending=True)  # True for horizontal bars (bottom to top)
+    status_df = status_df.drop('burden', axis=1)
     
     # Title-case component names for display
-    status_by_component.index = [str(c).title() for c in status_by_component.index]
+    component_names = [str(c).title() for c in status_df.index]
     
     # Create stacked horizontal bar chart
     fig = go.Figure()
     
     for status in ['Normal', 'Alerta', 'Anormal']:
-        if status in status_by_component.columns:
+        if status in status_df.columns:
+            # Build custom hover text with unit lists
+            hover_texts = []
+            for component in status_df.index:
+                units = unit_lists.get(component, {}).get(status, [])
+                count = len(units)
+                if count > 0:
+                    # Show first 10 units, indicate if there are more
+                    units_display = ', '.join(units[:10])
+                    if count > 10:
+                        units_display += f'... (+{count-10} more)'
+                    hover_text = f"<b>{status}</b><br>Count: {count}<br>Units: {units_display}"
+                else:
+                    hover_text = f"<b>{status}</b><br>Count: 0"
+                hover_texts.append(hover_text)
+            
             fig.add_trace(go.Bar(
                 name=status,
-                y=status_by_component.index,
-                x=status_by_component[status],
+                y=component_names,
+                x=status_df[status],
                 orientation='h',
                 marker=dict(color=STATUS_COLORS[status]),
-                text=status_by_component[status],
+                text=status_df[status].astype(int),
                 textposition='inside',
-                hovertemplate=f'<b>{status}</b><br>Count: %{{x}}<extra></extra>'
+                hovertemplate='%{hovertext}<extra></extra>',
+                hovertext=hover_texts,
+                customdata=[[unit_lists.get(comp, {}).get(status, [])] for comp in status_df.index]
             ))
     
     fig.update_layout(
@@ -185,8 +220,13 @@ def create_component_stacked_bar_chart(
             xanchor="right",
             x=1
         ),
-        height=max(400, len(status_by_component) * 25),  # Scale height with number of components
-        margin=dict(l=150, r=20, t=80, b=60)
+        height=max(400, len(status_df) * 25),  # Scale height with number of components
+        margin=dict(l=150, r=20, t=80, b=60),
+        hoverlabel=dict(
+            bgcolor="white",
+            font_size=12,
+            font_family="Arial"
+        )
     )
     
     return fig
