@@ -9,6 +9,8 @@ Custom CSS for navigation and layout styling is automatically loaded from:
 
 from dash import dcc, html
 import dash_bootstrap_components as dbc
+import os
+from pathlib import Path
 # Commented tabs - not currently active in navigation
 # from dashboard.tabs.tab_limits import create_limits_tab
 # from dashboard.tabs.tab_machines import create_machines_tab
@@ -22,6 +24,23 @@ from dashboard.tabs.tab_oil import create_layout as create_oil_tab
 # from dashboard.tabs.tab_health_index import create_layout as create_health_index_tab
 # from dashboard.tabs.tab_menace_control import create_layout as create_menace_control_tab
 # from dashboard.tabs.tab_hot_sheet import create_layout as create_hot_sheet_tab
+from config.settings import get_settings
+
+
+# Component icon map for predictive nav sections
+PREDICTIVE_COMPONENT_ICONS = {
+    "motor": "fas fa-cog",
+    "transmision": "fas fa-exchange-alt",
+}
+
+
+def _discover_predictive_components(client: str) -> list:
+    """Discover available predictive component CSVs for a client."""
+    settings = get_settings()
+    data_dir = Path(settings.data_root) / "predictive" / "golden" / client
+    if not data_dir.exists():
+        return []
+    return sorted([f.replace(".csv", "") for f in os.listdir(data_dir) if f.endswith(".csv")])
 
 
 def create_login_page() -> dbc.Container:
@@ -336,6 +355,15 @@ def create_main_dashboard(user_data: dict) -> html.Div:
     # Get clients user has access to
     available_clients = user_data.get('clients', [])
     
+    # Get client for discovering predictive components
+    if available_clients:
+        discovery_client = available_clients[0].lower()
+    else:
+        settings = get_settings()
+        discovery_client = settings.clients[0].lower() if settings.clients else 'cda'
+
+    predictive_components = _discover_predictive_components(discovery_client)
+
     # Define navigation structure
     navigation_items = [
         {
@@ -361,14 +389,15 @@ def create_main_dashboard(user_data: dict) -> html.Div:
                 {'id': 'monitoring-oil', 'label': 'Aceite', 'tab': create_oil_tab}
             ]
         },
-        # {
-        #     'section': 'limits',
-        #     'label': 'Límites',
-        #     'icon': 'fas fa-sliders-h',
-        #     'subsections': [
-        #         {'id': 'limits-oil', 'label': 'Aceite', 'tab': create_limits_tab}
-        #     ]
-        # }
+        {
+            'section': 'predictive',
+            'label': 'Predictivo',
+            'icon': 'fas fa-brain',
+            'subsections': [
+                {'id': f'predictive-{comp}', 'label': comp.title()}
+                for comp in predictive_components
+            ]
+        },
     ]
     
     # Build left menu with improved styling

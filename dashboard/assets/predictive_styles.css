@@ -1,0 +1,301 @@
+/* ============================================================
+   Predictive Dashboard Styles
+   ERS Design System Classes for Predictive Tabs
+   ============================================================ */
+
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&family=DM+Mono:wght@400;500&display=swap');
+
+/* ── Tokens (scoped to predictive) ────────────────────────── */
+
+:root {
+  --bg: #F0F1F3;
+  --surface: #FFFFFF;
+  --surface-2: #F7F8FA;
+  --text-default: #0F1117;
+  --text-muted: #6c757d;
+  --text-light: #A0A8B4;
+  --border: rgba(0,0,0,0.08);
+  --border-strong: rgba(0,0,0,0.14);
+  --blue: #2563EB;
+  --blue-light: #EFF4FF;
+  --blue-text: #1D4ED8;
+  --green-light: #ECFDF5;
+  --green-text: #065F46;
+  --amber-light: #FFFBEB;
+  --amber-text: #92400E;
+  --red-light: #FEF2F2;
+  --red-text: #991B1B;
+  --radius-sm: 8px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --shadow-xs: 0 1px 2px rgba(0,0,0,0.05);
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.06), 0 4px 12px rgba(0,0,0,0.04);
+  --shadow-md: 0 4px 16px rgba(0,0,0,0.08), 0 1px 3px rgba(0,0,0,0.05);
+  --danger-bg: #fff5f5;
+  --success-bg: #f0fff4;
+  --warning-bg: #fffcf0;
+  --info-bg: #f0f8ff;
+}
+
+/* ── Overview Container ───────────────────────────────────── */
+
+.overview-container {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+/* ── Page Header ──────────────────────────────────────────── */
+
+.page-title {
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--text-default);
+  letter-spacing: -0.02em;
+}
+
+.page-subtitle {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+/* ── KPI Cards ────────────────────────────────────────────── */
+
+.kpi-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.kpi-card {
+  background: var(--surface);
+  padding: 16px 18px 16px 22px;
+  border-radius: var(--radius-lg);
+  border: 0.5px solid var(--border);
+  box-shadow: var(--shadow-sm);
+  position: relative;
+  overflow: hidden;
+  transition: box-shadow 0.15s;
+}
+
+.kpi-card:hover { box-shadow: var(--shadow-md); }
+
+.kpi-accent {
+  position: absolute;
+  top: 0; left: 0;
+  width: 3px;
+  height: 100%;
+}
+
+.kpi-title {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 5px;
+}
+
+.kpi-value {
+  font-size: 30px;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: -0.03em;
+  color: var(--text-default);
+}
+
+.kpi-sub {
+  font-size: 11px;
+  color: var(--text-light);
+  margin-top: 5px;
+}
+
+/* Enhanced KPI cards */
+.kpi-card-enhanced {
+  background: var(--surface);
+  padding: 20px;
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  border: none;
+  text-align: center;
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.kpi-card-enhanced:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-md);
+}
+
+.kpi-card-danger { background-color: var(--danger-bg); }
+.kpi-card-info { background-color: var(--info-bg); }
+.kpi-card-success { background-color: var(--success-bg); }
+.kpi-card-warning { background-color: var(--warning-bg); }
+
+.kpi-icon-large { font-size: 2rem; margin-bottom: 0.5rem; }
+
+.kpi-label-small {
+  font-size: 0.85rem;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  margin-bottom: 0.5rem;
+  font-weight: 600;
+}
+
+.kpi-value-large {
+  font-size: 2rem;
+  font-weight: 700;
+  line-height: 1;
+  margin-bottom: 0;
+}
+
+/* ── Priority Grid & Cards ────────────────────────────────── */
+
+.priority-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px;
+}
+
+.priority-card {
+  background: var(--surface);
+  padding: 16px;
+  border-radius: var(--radius-lg);
+  border: 0.5px solid var(--border);
+  border-left-width: 3px;
+  border-left-style: solid;
+  box-shadow: var(--shadow-sm);
+  transition: transform 0.12s, box-shadow 0.12s;
+}
+
+.priority-card:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-md);
+}
+
+.pc-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 10px;
+}
+
+.pc-unit { font-size: 14px; font-weight: 600; color: var(--text-default); }
+.pc-score-row { display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px; }
+.pc-score { font-size: 36px; font-weight: 600; line-height: 1; letter-spacing: -0.04em; }
+.pc-acum { font-size: 11px; color: var(--text-light); margin-bottom: 12px; }
+
+/* Delta badges */
+.delta-badge { font-size: 11px; font-weight: 600; padding: 2px 7px; border-radius: 6px; }
+.delta-pos { background: var(--red-light); color: var(--red-text); }
+.delta-neg { background: var(--green-light); color: var(--green-text); }
+.delta-neu { background: var(--surface-2); color: var(--text-muted); }
+
+/* Drivers */
+.drivers-label {
+  font-size: 9px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.09em; color: var(--text-light); margin-bottom: 7px;
+}
+
+.driver-row { display: flex; align-items: center; gap: 7px; }
+.driver-name { font-size: 11px; color: var(--text-muted); min-width: 72px; }
+.driver-bg { flex: 1; height: 3px; background: var(--surface-2); border-radius: 99px; overflow: hidden; }
+.driver-fill { height: 100%; border-radius: 99px; }
+.driver-val {
+  font-size: 10px; color: var(--text-light); min-width: 22px; text-align: right;
+  font-family: 'DM Mono', monospace;
+}
+
+/* ── Status Badge ─────────────────────────────────────────── */
+
+.status-badge {
+  padding: 3px 9px;
+  border-radius: 99px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+}
+
+/* ── Failure Mode Table ───────────────────────────────────── */
+
+.fm-table-wrapper { overflow-x: auto; border-radius: var(--radius-md); }
+
+.fm-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+
+.fm-th {
+  padding: 9px 12px; text-align: left; font-size: 10px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.07em; color: var(--text-muted);
+  border-bottom: 1px solid var(--border-strong); white-space: nowrap;
+}
+
+.fm-th-active { color: var(--blue) !important; background: var(--blue-light) !important; }
+.fm-th-unit { min-width: 80px; }
+.fm-th-ranking { min-width: 80px; }
+
+.fm-tr { transition: background 0.1s; }
+.fm-tr:hover td { background: var(--surface-2) !important; }
+.fm-tr:last-child td { border-bottom: none; }
+
+.fm-td {
+  padding: 9px 12px; border-bottom: 0.5px solid var(--border);
+  color: var(--text-default); white-space: nowrap;
+}
+
+.fm-td-unit { font-weight: 600; font-size: 12px; }
+.fm-td-ranking { font-family: 'DM Mono', monospace; font-size: 12px; font-weight: 500; }
+.fm-td-score { font-family: 'DM Mono', monospace; font-size: 12px; text-align: center; }
+.fm-td-active { outline: 1px solid rgba(0,0,0,0.08); outline-offset: -1px; }
+
+/* ── Evidence Page ────────────────────────────────────────── */
+
+.ev-page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 16px;
+}
+
+.ev-unit-selector { display: flex; align-items: center; gap: 10px; }
+.ev-unit-dropdown { min-width: 160px; font-size: 13px; }
+
+.ev-two-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+@media (max-width: 900px) {
+  .ev-two-col { grid-template-columns: 1fr; }
+  .ev-page-header { flex-direction: column; gap: 12px; }
+  .kpi-row { grid-template-columns: repeat(2, 1fr); }
+  .priority-grid { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 480px) {
+  .kpi-row { grid-template-columns: 1fr; }
+}
+
+/* ── Card utilities ───────────────────────────────────────── */
+
+.card {
+  background: var(--surface);
+  padding: 20px 24px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-sm);
+  margin-bottom: 20px;
+}
+
+.card-subtitle {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-default);
+  display: block;
+}
+
+/* ── Typography utilities ─────────────────────────────────── */
+
+.fw-500 { font-weight: 500 !important; }

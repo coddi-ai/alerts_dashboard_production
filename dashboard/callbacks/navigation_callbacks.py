@@ -117,8 +117,23 @@ def register_navigation_callbacks(app: dash.Dash) -> None:
         # 'monitoring-health-index': create_health_index_tab,  # Commented - not active
         # 'monitoring-mantentions': lambda client: layout_mantenciones_general(),  # Commented - not active
         'monitoring-oil': create_oil_tab,
+        # Predictive sections are handled dynamically below
         # 'limits-oil': create_limits_tab,  # Commented - not active
     }
+
+    def _get_predictive_content(active_section, client):
+        """
+        Handle dynamic predictive section IDs: predictive-{component}.
+        Returns content or None if not a predictive section.
+        """
+        import re
+        match = re.match(r'^predictive-(.+)$', active_section)
+        if not match:
+            return None
+        component = match.group(1)
+
+        from dashboard.tabs.tab_predictive_component import layout as predictive_component_layout
+        return predictive_component_layout(client, component)
     
     # Callback 1: Handle button clicks and update store
     @app.callback(
@@ -181,29 +196,34 @@ def register_navigation_callbacks(app: dash.Dash) -> None:
         
         logger.info(f"Updating section content: section={active_section}, client={client}")
         
-        # Get content for active section
-        content_generator = SECTION_CONTENT_MAP.get(
-            active_section,
-            lambda c: create_placeholder_content('Unknown Section')
-        )
-        
-        # Call content generator with client parameter
-        # Some generators need client, others don't
-        try:
-            if active_section in ['overview-general',
-                                 'monitoring-alerts', 
-                                 'monitoring-telemetry', 
-                                 'monitoring-mantentions']:
-                content = content_generator(client)
-            else:
-                content = content_generator()
-        except TypeError as e:
-            # Fallback if function doesn't accept client parameter
-            logger.warning(f"TypeError calling content_generator for {active_section}: {e}")
+        # Check if this is a dynamic predictive section first
+        predictive_content = _get_predictive_content(active_section, client)
+        if predictive_content is not None:
+            content = predictive_content
+        else:
+            # Get content for active section from static map
+            content_generator = SECTION_CONTENT_MAP.get(
+                active_section,
+                lambda c: create_placeholder_content('Unknown Section')
+            )
+            
+            # Call content generator with client parameter
+            # Some generators need client, others don't
             try:
-                content = content_generator()
-            except:
-                content = create_placeholder_content(f'Error loading {active_section}')
+                if active_section in ['overview-general',
+                                     'monitoring-alerts', 
+                                     'monitoring-telemetry', 
+                                     'monitoring-mantentions']:
+                    content = content_generator(client)
+                else:
+                    content = content_generator()
+            except TypeError as e:
+                # Fallback if function doesn't accept client parameter
+                logger.warning(f"TypeError calling content_generator for {active_section}: {e}")
+                try:
+                    content = content_generator()
+                except:
+                    content = create_placeholder_content(f'Error loading {active_section}')
         
         # Update button classes to highlight active button
         button_classes = []

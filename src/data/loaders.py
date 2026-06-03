@@ -323,7 +323,7 @@ def load_silver_data(file_path: str | Path) -> pd.DataFrame:
 
 
 # ========================================
-# ALERTS DASHBOARD LOADERS
+# ALERTS DASHBOARD LOADERS (CDA ONLY)
 # ========================================
 
 def load_alerts_data(client: str) -> pd.DataFrame:
@@ -331,11 +331,18 @@ def load_alerts_data(client: str) -> pd.DataFrame:
     Load consolidated alerts data for a specific client.
     
     Args:
-        client: Client identifier (e.g., 'cda', 'emin', 'enex')
+        client: Client identifier (e.g., 'cda')
     
     Returns:
         DataFrame with alerts data including derived columns (has_telemetry, has_tribology, Month)
+    
+    Note:
+        This feature is currently only available for CDA client.
     """
+    # CDA-only check
+    if client.lower() != 'cda':
+        logger.warning(f"Alerts dashboard is only available for CDA client. Requested: {client}")
+        return pd.DataFrame()
     
     file_path = Path(f"data/alerts/golden/{client.lower()}/consolidated_alerts.csv")
     logger.info(f"Loading alerts data from {file_path}")
