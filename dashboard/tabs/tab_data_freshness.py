@@ -12,7 +12,7 @@ from src.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
-def create_layout() -> html.Div:
+def create_layout(client: str = "cda") -> html.Div:
     """
     Create layout for Data Freshness monitoring tab.
     
@@ -34,12 +34,12 @@ def create_layout() -> html.Div:
                     className="text-muted mb-2"
                 ),
                 html.Div([
-                    html.Span("🟢 Actualizado: ", style={'fontWeight': 'bold', 'color': '#28a745'}),
-                    html.Span("Telemetría <1h, Tribología <1 semana", style={'fontSize': '0.9rem', 'marginRight': '20px'}),
-                    html.Span("🟡 Atención Requerida: ", style={'fontWeight': 'bold', 'color': '#ffc107'}),
-                    html.Span("Telemetría <4h, Tribología <2 semanas", style={'fontSize': '0.9rem', 'marginRight': '20px'}),
-                    html.Span("🔴 Crítico: ", style={'fontWeight': 'bold', 'color': '#dc3545'}),
-                    html.Span("Telemetría >4h, Tribología >2 semanas", style={'fontSize': '0.9rem'})
+                    html.Span("🟢 Ok: ", style={'fontWeight': 'bold', 'color': '#28a745'}),
+                    html.Span("Telemetría <4h, Tribología <1 semana", style={'fontSize': '0.9rem', 'marginRight': '20px'}),
+                    html.Span("🟡 Atención: ", style={'fontWeight': 'bold', 'color': '#ffc107'}),
+                    html.Span("Telemetría <8h, Tribología <2 semanas", style={'fontSize': '0.9rem', 'marginRight': '20px'}),
+                    html.Span("🔴 Preocupante: ", style={'fontWeight': 'bold', 'color': '#dc3545'}),
+                    html.Span("Telemetría >12h, Tribología >4 semanas", style={'fontSize': '0.9rem'})
                 ], className="text-muted", style={'fontSize': '0.85rem'})
             ])
         ], className="mb-4"),

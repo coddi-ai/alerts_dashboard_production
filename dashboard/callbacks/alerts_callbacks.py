@@ -169,10 +169,12 @@ def update_filters_from_clicks(unit_click, month_click, system_click, current_fi
     ],
     [
         Input('client-selector', 'value'),
-        Input('alerts-filter-store', 'data')
+        Input('alerts-filter-store', 'data'),
+        Input('alerts-date-range-picker', 'start_date'),
+        Input('alerts-date-range-picker', 'end_date')
     ]
 )
-def update_general_tab(client: str, filters: dict):
+def update_general_tab(client: str, filters: dict, start_date: str, end_date: str):
     """
     Update all components in the General Tab when client changes or filters are applied.
     
@@ -202,6 +204,16 @@ def update_general_tab(client: str, filters: dict):
     try:
         # Apply filters if present
         filtered_df = alerts_df.copy()
+        
+        # Apply date range filter
+        if start_date or end_date:
+            if 'Timestamp' in filtered_df.columns:
+                filtered_df['Timestamp'] = pd.to_datetime(filtered_df['Timestamp'])
+                if start_date:
+                    filtered_df = filtered_df[filtered_df['Timestamp'] >= pd.to_datetime(start_date)]
+                if end_date:
+                    filtered_df = filtered_df[filtered_df['Timestamp'] <= pd.to_datetime(end_date) + pd.Timedelta(days=1)]
+                logger.info(f"After date range filter ({start_date} to {end_date}): {len(filtered_df)} rows")
         
         if filters:
             if 'unit' in filters and filters['unit']:
@@ -247,6 +259,17 @@ def update_general_tab(client: str, filters: dict):
         error_fig = {'data': [], 'layout': {'title': f'Error: {str(e)}'}}
         error_alert = dbc.Alert(f"Error al cargar datos: {str(e)}", color="danger")
         return error_fig, error_fig, error_fig, error_alert, error_alert
+
+
+@callback(
+    [Output('alerts-date-range-picker', 'start_date'),
+     Output('alerts-date-range-picker', 'end_date')],
+    [Input('alerts-date-range-clear', 'n_clicks')],
+    prevent_initial_call=True
+)
+def clear_date_range(_):
+    """Clear the date range picker."""
+    return None, None
 
 
 @callback(
