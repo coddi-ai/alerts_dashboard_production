@@ -16,15 +16,18 @@ from src.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
-def load_data_freshness() -> pd.DataFrame:
+def load_data_freshness(client: str = "cda") -> pd.DataFrame:
     """
     Load data freshness information from Data_Date_Last_Update.csv
+    
+    Args:
+        client: Client identifier (e.g., 'cda')
     
     Returns:
         DataFrame with data freshness information
     """
     try:
-        file_path = Path("data/auxiliar/cda/Data_Date_Last_Update.csv")
+        file_path = Path(f"data/auxiliar/{client.lower()}/Data_Date_Last_Update.csv")
         
         if not file_path.exists():
             logger.error(f"Data freshness file not found: {file_path}")
@@ -76,9 +79,32 @@ def convert_utc_to_chile(utc_datetime):
     return chile_datetime
 
 
+# ========================================
+# FRESHNESS CRITERIA CONFIGURATION
+# ========================================
+# Modular criteria for data freshness status.
+# Each data type defines thresholds and labels.
+# Format: list of (max_timedelta, label, color) in order of priority (best to worst).
+# The last entry is the fallback (worst status).
+
+FRESHNESS_CRITERIA = {
+    'Telemetria': [
+        (timedelta(hours=2),  'Ok',          '#28a745'),  # Green
+        (timedelta(hours=24), 'Atención',    '#ffc107'),  # Yellow
+        (timedelta(hours=24), 'Preocupante', '#dc3545'),  # Red (>24h)
+    ],
+    'Tribologia': [
+        (timedelta(days=20),  'Ok',          '#28a745'),  # Green
+        (timedelta(days=40),  'Atención',    '#ffc107'),  # Yellow
+        (timedelta(days=40),  'Preocupante', '#dc3545'),  # Red (>40d)
+    ],
+}
+
+
 def calculate_freshness_status(last_update, data_type, current_time_chile):
     """
     Calculate freshness status based on time elapsed since last update.
+    Uses modular criteria defined in FRESHNESS_CRITERIA.
     
     Args:
         last_update: datetime of last update (in Chile timezone)
@@ -87,8 +113,6 @@ def calculate_freshness_status(last_update, data_type, current_time_chile):
         
     Returns:
         tuple: (status, color, time_diff_str)
-        status: 'Actualizado', 'Atención Requerida', 'Crítico'
-        color: color code for styling
     """
     if pd.isna(last_update):
         return 'Sin Datos', '#808080', 'N/A'
@@ -110,30 +134,19 @@ def calculate_freshness_status(last_update, data_type, current_time_chile):
         else:
             time_diff_str = f"{minutes}m"
     
-    # Determine status based on data type
-    if data_type == 'Telemetria':
-        # Green: < 1 hour
-        if time_diff < timedelta(hours=1):
-            return 'Actualizado', '#28a745', time_diff_str
-        # Yellow: < 4 hours
-        elif time_diff < timedelta(hours=4):
-            return 'Atención Requerida', '#ffc107', time_diff_str
-        # Red: >= 4 hours
-        else:
-            return 'Crítico', '#dc3545', time_diff_str
+    # Look up criteria for this data type
+    criteria = FRESHNESS_CRITERIA.get(data_type)
+    if not criteria:
+        return 'Desconocido', '#808080', time_diff_str
     
-    elif data_type == 'Tribologia':
-        # Green: < 1 week
-        if time_diff < timedelta(weeks=1):
-            return 'Actualizado', '#28a745', time_diff_str
-        # Yellow: < 2 weeks
-        elif time_diff < timedelta(weeks=2):
-            return 'Atención Requerida', '#ffc107', time_diff_str
-        # Red: >= 2 weeks
-        else:
-            return 'Crítico', '#dc3545', time_diff_str
+    # Evaluate thresholds in order
+    for threshold, label, color in criteria:
+        if time_diff < threshold:
+            return label, color, time_diff_str
     
-    return 'Desconocido', '#808080', time_diff_str
+    # Exceeded all thresholds → return worst status
+    _, worst_label, worst_color = criteria[-1]
+    return worst_label, worst_color, time_diff_str
 
 
 def process_freshness_data(df: pd.DataFrame) -> pd.DataFrame:
@@ -214,24 +227,40 @@ def process_freshness_data(df: pd.DataFrame) -> pd.DataFrame:
 
 @callback(
     Output('data-freshness-table', 'children'),
-    Input('data-freshness-table', 'id')  # Trigger when component is mounted
+    Input('data-freshness-table', 'id'),
+    Input('client-selector', 'value')
 )
-def update_data_freshness(_):
+def update_data_freshness(_, selected_client):
     """
     Update data freshness table.
     
     Args:
         _: Dummy input to trigger callback
+        selected_client: Currently selected client from dropdown
         
     Returns:
         DataTable with freshness information
     """
     try:
+        # Get client from selector
+        client = (selected_client or 'cda').lower()
+        
         # Load and process data
-        df_raw = load_data_freshness()
+        df_raw = load_data_freshness(client)
         
         if df_raw.empty:
-            return html.Div("No hay datos disponibles", className="text-center text-muted p-4")
+            return html.Div([
+                html.I(className="fas fa-info-circle fa-3x text-muted mb-3"),
+                html.H4("Datos no disponibles", className="text-muted"),
+                html.P(
+                    f"No se encontraron datos de estado de actualización para el cliente '{client.upper()}'.",
+                    className="text-muted"
+                ),
+                html.P(
+                    "Esta funcionalidad estará disponible próximamente.",
+                    className="text-muted small"
+                )
+            ], className="text-center p-5")
         
         df_processed = process_freshness_data(df_raw)
         
@@ -265,7 +294,7 @@ def update_data_freshness(_):
                 # Telemetría styling - based on Status
                 {
                     'if': {
-                        'filter_query': '{Telemetría_Status} = "Actualizado"',
+                        'filter_query': '{Telemetría_Status} = "Ok"',
                         'column_id': 'Telemetría'
                     },
                     'backgroundColor': '#d4edda',
@@ -274,7 +303,7 @@ def update_data_freshness(_):
                 },
                 {
                     'if': {
-                        'filter_query': '{Telemetría_Status} = "Atención Requerida"',
+                        'filter_query': '{Telemetría_Status} = "Atención"',
                         'column_id': 'Telemetría'
                     },
                     'backgroundColor': '#fff3cd',
@@ -283,7 +312,7 @@ def update_data_freshness(_):
                 },
                 {
                     'if': {
-                        'filter_query': '{Telemetría_Status} = "Crítico"',
+                        'filter_query': '{Telemetría_Status} = "Preocupante"',
                         'column_id': 'Telemetría'
                     },
                     'backgroundColor': '#f8d7da',
@@ -302,7 +331,7 @@ def update_data_freshness(_):
                 # Tribología styling - based on Status
                 {
                     'if': {
-                        'filter_query': '{Tribología_Status} = "Actualizado"',
+                        'filter_query': '{Tribología_Status} = "Ok"',
                         'column_id': 'Tribología'
                     },
                     'backgroundColor': '#d4edda',
@@ -311,7 +340,7 @@ def update_data_freshness(_):
                 },
                 {
                     'if': {
-                        'filter_query': '{Tribología_Status} = "Atención Requerida"',
+                        'filter_query': '{Tribología_Status} = "Atención"',
                         'column_id': 'Tribología'
                     },
                     'backgroundColor': '#fff3cd',
@@ -320,7 +349,7 @@ def update_data_freshness(_):
                 },
                 {
                     'if': {
-                        'filter_query': '{Tribología_Status} = "Crítico"',
+                        'filter_query': '{Tribología_Status} = "Preocupante"',
                         'column_id': 'Tribología'
                     },
                     'backgroundColor': '#f8d7da',
@@ -345,8 +374,6 @@ def update_data_freshness(_):
             page_size=20,
             sort_action='native',
             filter_action='native',
-            export_format='xlsx',
-            export_headers='display'
         )
         
         return table

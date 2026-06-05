@@ -28,6 +28,40 @@ def create_layout() -> html.Div:
         # Summary stats at the top
         html.Div(id='alerts-summary-stats', className="mb-3"),
         
+        # Date Range Filter
+        dbc.Row([
+            dbc.Col([
+                dbc.Card([
+                    dbc.CardBody([
+                        dbc.Row([
+                            dbc.Col([
+                                html.Div([
+                                    html.I(className="fas fa-filter me-2"),
+                                    html.Span("Filtro Temporal", style={'fontWeight': 'bold'}),
+                                ], className="d-flex align-items-center mb-2"),
+                            ], width="auto"),
+                            dbc.Col([
+                                dcc.DatePickerRange(
+                                    id='alerts-date-range-picker',
+                                    display_format='DD/MM/YYYY',
+                                    start_date_placeholder_text='Fecha inicio',
+                                    end_date_placeholder_text='Fecha fin',
+                                    clearable=True,
+                                    className="w-100"
+                                ),
+                            ], width="auto"),
+                            dbc.Col([
+                                dbc.Button([
+                                    html.I(className="fas fa-times me-1"),
+                                    "Limpiar"
+                                ], id='alerts-date-range-clear', color="outline-secondary", size="sm")
+                            ], width="auto"),
+                        ], align="center", className="g-2"),
+                    ], className="py-2 px-3")
+                ], className="shadow-sm mb-3")
+            ])
+        ]),
+        
         # Analytics Section Header
         html.Div([
             html.H4([

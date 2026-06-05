@@ -211,6 +211,7 @@ def register_navigation_callbacks(app: dash.Dash) -> None:
             # Some generators need client, others don't
             try:
                 if active_section in ['overview-general',
+                                     'overview-data-freshness',
                                      'monitoring-alerts', 
                                      'monitoring-telemetry', 
                                      'monitoring-mantentions']:
