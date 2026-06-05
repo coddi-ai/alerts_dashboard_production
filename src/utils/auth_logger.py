@@ -23,20 +23,12 @@ S3_KEY = "MultiTechnique Alerts/auxiliar/authentication_register.parquet"
 def log_authentication(username: str, success: bool) -> None:
     """
     Append an authentication record to the parquet log file and upload to S3.
-    Only runs when DEPLOY_STATUS is 'poc'.
 
     Args:
         username: The username that attempted login.
         success: Whether the login was successful.
     """
     try:
-        project_root = Path(__file__).parent.parent.parent
-        load_dotenv(project_root / ".env")
-
-        deploy_status = os.getenv("DEPLOY_STATUS", "").lower()
-        if deploy_status != "poc":
-            return
-
         ip_address = _get_client_ip()
 
         new_record = pd.DataFrame([{
@@ -44,6 +36,7 @@ def log_authentication(username: str, success: bool) -> None:
             "timestamp": datetime.now(),
             "success": success,
             "ip_address": ip_address,
+            "deploy_status": os.getenv("DEPLOY_STATUS", "unknown"),
         }])
 
         AUTH_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
