@@ -76,14 +76,27 @@ def create_layout() -> html.Div:
             dbc.Col([
                 dbc.Card([
                     dbc.CardHeader([
-                        html.H5([
-                            html.I(className="fas fa-table me-2"),
-                            "Estado por Unidad"
-                        ], className="mb-0 d-inline"),
-                        html.Small(
-                            " (pase el mouse sobre cada estado para ver detalles)",
-                            className="text-muted"
-                        )
+                        dbc.Row([
+                            dbc.Col([
+                                html.H5([
+                                    html.I(className="fas fa-table me-2"),
+                                    "Estado por Unidad"
+                                ], className="mb-0 d-inline"),
+                                html.Small(
+                                    " (pase el mouse sobre cada estado para ver detalles)",
+                                    className="text-muted"
+                                )
+                            ], md=8, className="d-flex align-items-center"),
+                            dbc.Col([
+                                dcc.Dropdown(
+                                    id='overview-component-filter',
+                                    placeholder="Todos los componentes",
+                                    clearable=True,
+                                    searchable=True,
+                                    style={'fontSize': '13px'}
+                                )
+                            ], md=4),
+                        ], align="center"),
                     ], className="bg-light"),
                     dbc.CardBody([
                         dcc.Loading(

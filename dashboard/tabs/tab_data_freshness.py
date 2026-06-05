@@ -8,8 +8,59 @@ showing telemetry and tribology data freshness with color-coded indicators.
 from dash import html, dcc
 import dash_bootstrap_components as dbc
 from src.utils.logger import get_logger
+from dashboard.callbacks.data_freshness_callbacks import FRESHNESS_CRITERIA
 
 logger = get_logger(__name__)
+
+
+def _format_timedelta(td):
+    """Format timedelta to human-readable Spanish string."""
+    total_seconds = int(td.total_seconds())
+    days = td.days
+    hours = total_seconds // 3600
+    if days > 0:
+        return f"{days} días" if days != 1 else "1 día"
+    return f"{hours}h" if hours != 1 else "1h"
+
+
+def _build_legend():
+    """Build legend spans dynamically from FRESHNESS_CRITERIA."""
+    telem = FRESHNESS_CRITERIA.get('Telemetria', [])
+    tribo = FRESHNESS_CRITERIA.get('Tribologia', [])
+    
+    # Map label → (telem_threshold, tribo_threshold) for display
+    # Criteria are ordered: Ok (< t1), Atención (< t2), Preocupante (>= t2)
+    legend_items = []
+    icons = {'Ok': '🟢', 'Atención': '🟡', 'Preocupante': '🔴'}
+    colors = {'Ok': '#28a745', 'Atención': '#ffc107', 'Preocupante': '#dc3545'}
+    
+    for i, (_, label, _) in enumerate(telem):
+        icon = icons.get(label, '⚪')
+        color = colors.get(label, '#6c757d')
+        
+        # Telemetry description
+        if i < len(telem) - 1:
+            t_desc = f"Telemetría <{_format_timedelta(telem[i][0])}"
+        else:
+            t_desc = f"Telemetría >{_format_timedelta(telem[i][0])}"
+        
+        # Tribology description  
+        if i < len(tribo):
+            if i < len(tribo) - 1:
+                tr_desc = f"Tribología <{_format_timedelta(tribo[i][0])}"
+            else:
+                tr_desc = f"Tribología >{_format_timedelta(tribo[i][0])}"
+        else:
+            tr_desc = ""
+        
+        legend_items.append(
+            html.Span(f"{icon} {label}: ", style={'fontWeight': 'bold', 'color': color})
+        )
+        legend_items.append(
+            html.Span(f"{t_desc}, {tr_desc}", style={'fontSize': '0.9rem', 'marginRight': '20px'})
+        )
+    
+    return html.Div(legend_items, className="text-muted", style={'fontSize': '0.85rem'})
 
 
 def create_layout(client: str = "cda") -> html.Div:
@@ -33,14 +84,7 @@ def create_layout(client: str = "cda") -> html.Div:
                     "Monitoreo en tiempo real de la frescura de los datos de telemetría y tribología por unidad",
                     className="text-muted mb-2"
                 ),
-                html.Div([
-                    html.Span("🟢 Ok: ", style={'fontWeight': 'bold', 'color': '#28a745'}),
-                    html.Span("Telemetría <4h, Tribología <1 semana", style={'fontSize': '0.9rem', 'marginRight': '20px'}),
-                    html.Span("🟡 Atención: ", style={'fontWeight': 'bold', 'color': '#ffc107'}),
-                    html.Span("Telemetría <8h, Tribología <2 semanas", style={'fontSize': '0.9rem', 'marginRight': '20px'}),
-                    html.Span("🔴 Preocupante: ", style={'fontWeight': 'bold', 'color': '#dc3545'}),
-                    html.Span("Telemetría >12h, Tribología >4 semanas", style={'fontSize': '0.9rem'})
-                ], className="text-muted", style={'fontSize': '0.85rem'})
+                _build_legend()
             ])
         ], className="mb-4"),
         

@@ -13,9 +13,9 @@ from pathlib import Path
 import logging
 
 from src.utils.file_utils import safe_read_parquet
-from src.data.loaders import load_telemetry_machine_status, load_alerts_data, load_oil_classified
+from src.data.loaders import load_telemetry_machine_status, load_alerts_data
 from src.data.maintenance_repository import get_repository
-from dashboard.callbacks.hot_sheet_callbacks import calculate_tribology_status
+from dashboard.callbacks.data_freshness_callbacks import load_data_freshness
 
 logger = logging.getLogger(__name__)
 
@@ -296,16 +296,17 @@ def create_oil_pie_chart(df_oil: pd.DataFrame) -> go.Figure:
 def create_critical_equipment_summary_table(df_telemetry: pd.DataFrame, df_oil: pd.DataFrame, 
                                             df_alerts: pd.DataFrame, df_maintenance: pd.DataFrame,
                                             df_freshness: pd.DataFrame = None,
-                                            df_oil_classified: pd.DataFrame = None) -> html.Div:
+                                            component_filter: str = None) -> html.Div:
     """
     Create summary table showing ALL equipment status across technical areas.
     Includes tooltip on hover with reason for each status.
     
-    Data sources:
-      - Telemetría: from telemetry machine_status (overall_status column) + data freshness
-      - Tribología: from oil machine_status.parquet (overall_status column) — MUST match Oil tab exactly
-      - Alertas: calculated criticality score from consolidated_alerts
-      - Mantenciones: from maintenance repository (SANO/DETENIDO)
+    When component_filter is set:
+      - Telemetría: only counts alerts for that specific component
+      - Tribología: uses component_details to get status for that component
+    When component_filter is None:
+      - Telemetría: overall alert score across all components
+      - Tribología: overall_status from machine_status.parquet
     
     Returns:
         html.Div with a table using colored badges with tooltips
@@ -324,14 +325,16 @@ def create_critical_equipment_summary_table(df_telemetry: pd.DataFrame, df_oil: 
             equipos.update(df_alerts['UnitId'].unique())
         if not df_maintenance.empty and 'machine_code' in df_maintenance.columns:
             equipos.update(df_maintenance['machine_code'].unique())
-        if df_oil_classified is not None and not df_oil_classified.empty and 'unitId' in df_oil_classified.columns:
-            equipos.update(df_oil_classified['unitId'].unique())
         
         if not equipos:
             return html.Div(html.P("No hay equipos disponibles", className="text-muted text-center p-2 mb-0", style={'fontSize': '12px'}))
         
         # ── Pre-compute alert scores ──
-        alert_scores = calculate_alert_criticality_score(df_alerts, 30) if not df_alerts.empty else pd.DataFrame()
+        # When filtering by component, only count alerts for that component
+        df_alerts_filtered = df_alerts
+        if component_filter and not df_alerts.empty and 'componente' in df_alerts.columns:
+            df_alerts_filtered = df_alerts[df_alerts['componente'].str.upper() == component_filter.upper()].copy()
+        alert_scores = calculate_alert_criticality_score(df_alerts_filtered, 30) if not df_alerts_filtered.empty else pd.DataFrame()
         
         # ── Pre-compute data freshness per unit (telemetry) ──
         freshness_by_unit = {}
@@ -346,6 +349,8 @@ def create_critical_equipment_summary_table(df_telemetry: pd.DataFrame, df_oil: 
                 unit_id = row.get('Unit_Id', '')
                 last_update = row.get('Ultima Fecha de Actualizacion')
                 if pd.notna(last_update):
+                    # Ensure datetime (may be string after JSON serialization from store)
+                    last_update = pd.to_datetime(last_update)
                     last_update_chile = convert_utc_to_chile(last_update)
                     status, color, time_str = calculate_freshness_status(last_update_chile, 'Telemetria', current_time_chile)
                     freshness_by_unit[unit_id] = {'status': status, 'time_str': time_str}
@@ -419,37 +424,73 @@ def create_critical_equipment_summary_table(df_telemetry: pd.DataFrame, df_oil: 
                     telem_status = 'Alerta'
                     telem_reason += ' [Datos con retraso]'
             
-            # --- Tribología (from machine_status.parquet overall_status) ---
+            # --- Tribología (from machine_status.parquet) ---
             oil_status = 'N/A'
             oil_reason = 'Sin datos de tribología'
             if not df_oil.empty and 'equipo' in df_oil.columns:
                 equipo_oil = df_oil[df_oil['equipo'] == equipo]
                 if not equipo_oil.empty:
-                    oil_status = equipo_oil['estado'].iloc[0]
                     row = equipo_oil.iloc[0]
-                    # Build detailed tooltip
-                    n_normal = row.get('components_normal', 0) if 'components_normal' in equipo_oil.columns else 0
-                    n_alerta = row.get('components_alerta', 0) if 'components_alerta' in equipo_oil.columns else 0
-                    n_anormal = row.get('components_anormal', 0) if 'components_anormal' in equipo_oil.columns else 0
-                    oil_reason = f"Estado: {oil_status} | Comp: {n_normal} normal, {n_alerta} alerta, {n_anormal} anormal"
-                    # Add latest sample date
-                    if 'latest_sample_date' in equipo_oil.columns:
-                        sample_date = row.get('latest_sample_date')
-                        if pd.notna(sample_date):
-                            oil_reason += f" | Última muestra: {pd.Timestamp(sample_date).strftime('%Y-%m-%d')}"
-                    # Add AI recommendation (truncated)
-                    if 'machine_ai_recommendation' in equipo_oil.columns:
-                        rec = row.get('machine_ai_recommendation')
-                        if pd.notna(rec) and str(rec).strip():
-                            oil_reason += f" | Rec: {str(rec)[:100]}"
+                    
+                    if component_filter:
+                        # ── Component-level: search inside component_details ──
+                        comp_details = row.get('component_details', [])
+                        if isinstance(comp_details, (list, np.ndarray)):
+                            match = None
+                            for d in comp_details:
+                                if isinstance(d, dict) and d.get('component', '').upper() == component_filter.upper():
+                                    match = d
+                                    break
+                            if match:
+                                oil_status = match.get('status', 'N/A')
+                                sev = match.get('severity_score', 0)
+                                oil_reason = f"Componente: {component_filter.title()} | Estado: {oil_status} (severidad: {sev})"
+                                sdate = match.get('sample_date')
+                                if sdate:
+                                    try:
+                                        oil_reason += f" | Muestra: {pd.Timestamp(sdate).strftime('%Y-%m-%d')}"
+                                    except Exception:
+                                        pass
+                                rec = match.get('ai_recommendation')
+                                if rec and str(rec).strip() and str(rec) != 'None':
+                                    oil_reason += f" | Rec: {str(rec)[:100]}"
+                            else:
+                                oil_status = 'N/A'
+                                oil_reason = f"Sin datos de tribología para {component_filter.title()}"
+                    else:
+                        # ── Overall machine-level status ──
+                        oil_status = equipo_oil['estado'].iloc[0]
+                        n_normal = row.get('components_normal', 0) if 'components_normal' in equipo_oil.columns else 0
+                        n_alerta = row.get('components_alerta', 0) if 'components_alerta' in equipo_oil.columns else 0
+                        n_anormal = row.get('components_anormal', 0) if 'components_anormal' in equipo_oil.columns else 0
+                        oil_reason = f"Estado: {oil_status} | Comp: {n_normal} normal, {n_alerta} alerta, {n_anormal} anormal"
+                        if 'latest_sample_date' in equipo_oil.columns:
+                            sample_date = row.get('latest_sample_date')
+                            if pd.notna(sample_date):
+                                oil_reason += f" | Última muestra: {pd.Timestamp(sample_date).strftime('%Y-%m-%d')}"
+                        if 'machine_ai_recommendation' in equipo_oil.columns:
+                            rec = row.get('machine_ai_recommendation')
+                            if pd.notna(rec) and str(rec).strip():
+                                oil_reason += f" | Rec: {str(rec)[:100]}"
             
-            table_rows.append(html.Tr([
-                html.Td(equipo, style={'fontWeight': 'bold', 'fontSize': '13px', 'padding': '6px 12px'}),
-                html.Td(make_badge(telem_status, telem_reason)),
-                html.Td(make_badge(oil_status, oil_reason)),
-            ]))
+            table_rows.append({
+                'equipo': equipo,
+                'priority': max(STATUS_PRIORITY.get(telem_status, 0), STATUS_PRIORITY.get(oil_status, 0)),
+                'row': html.Tr([
+                    html.Td(equipo, style={'fontWeight': 'bold', 'fontSize': '13px', 'padding': '6px 12px'}),
+                    html.Td(make_badge(telem_status, telem_reason)),
+                    html.Td(make_badge(oil_status, oil_reason)),
+                ])
+            })
+        
+        # ── Sort rows: most critical first, then alphabetical ──
+        table_rows.sort(key=lambda r: (-r['priority'], r['equipo']))
+        sorted_rows = [r['row'] for r in table_rows]
         
         # ── Build HTML table ──
+        col_telemetria = f"Telemetría ({component_filter.title()})" if component_filter else "Telemetría"
+        col_tribologia = f"Tribología ({component_filter.title()})" if component_filter else "Tribología"
+        
         table = html.Table([
             html.Thead(html.Tr([
                 html.Th(col, style={
@@ -457,9 +498,9 @@ def create_critical_equipment_summary_table(df_telemetry: pd.DataFrame, df_oil: 
                     'textAlign': 'center', 'fontSize': '12px', 'padding': '8px',
                     'borderBottom': '2px solid #dee2e6', 'position': 'sticky', 'top': '0', 'zIndex': '1'
                 })
-                for col in ['Unidad', 'Telemetría', 'Tribología']
+                for col in ['Unidad', col_telemetria, col_tribologia]
             ])),
-            html.Tbody(table_rows)
+            html.Tbody(sorted_rows)
         ], style={
             'width': '100%', 'borderCollapse': 'collapse',
             'fontSize': '13px'
@@ -792,15 +833,14 @@ def register_overview_general_callbacks(app):
                         oil_latest = latest_date.strftime("%Y-%m-%d")
                 logger.info(f"Oil Analysis: Loaded {len(df_oil)} machines from machine_status.parquet")
             
-            # Load Oil classified data (same source as Hot Sheet for tribology consistency)
-            df_oil_classified = load_oil_classified(client)
-            logger.info(f"Oil Classified: Loaded {len(df_oil_classified)} records for tribology status")
-            
             # Load Alerts data using proper loader (load all recent alerts, filtering happens in visualizations)
             df_alerts = load_alerts_data(client)
             alerts_period = "Últimos 90 días (por defecto)"  # Default period shown
             if not df_alerts.empty:
                 logger.info(f"Alerts: Loaded {len(df_alerts)} alerts (will be filtered by visualization)")
+            
+            # Load data freshness (lightweight CSV, ~22 rows)
+            df_freshness = load_data_freshness(client)
             
             # Serialize to JSON with metadata about data freshness
             # Clean numpy types before serialization
@@ -809,8 +849,8 @@ def register_overview_general_callbacks(app):
                 "maintenance_status": clean_numpy_types(df_status.to_dict("records")) if not df_status.empty else [],
                 "maintenance_downtime": clean_numpy_types(df_downtime.to_dict("records")) if not df_downtime.empty else [],
                 "oil": clean_numpy_types(df_oil.to_dict("records")) if not df_oil.empty else [],
-                "oil_classified": clean_numpy_types(df_oil_classified.to_dict("records")) if not df_oil_classified.empty else [],
                 "alerts": clean_numpy_types(df_alerts.to_dict("records")) if not df_alerts.empty else [],
+                "freshness": clean_numpy_types(df_freshness.to_dict("records")) if not df_freshness.empty else [],
                 "metadata": {
                     "telemetry_latest": telemetry_latest,
                     "oil_latest": oil_latest,
@@ -926,57 +966,67 @@ def register_overview_general_callbacks(app):
         [Input("store-overview-data", "data")]
     )
     def update_telemetry_chart(data):
-        """Update telemetry fleet status chart."""
-        if not data or not data.get("telemetry"):
-            return create_empty_figure("No hay datos de telemetría disponibles")
-        
-        try:
-            df_telemetry = pd.DataFrame(data["telemetry"])
-            return create_telemetry_pie_chart(df_telemetry)
-        except Exception as e:
-            logger.error(f"Error updating telemetry chart: {e}")
-            return create_empty_figure("Error al cargar gráfico")
+        """Telemetry chart is hidden — return empty figure immediately."""
+        return create_empty_figure("")
     
     @callback(
         Output("overview-maintenance-chart", "figure"),
         [Input("store-overview-data", "data")]
     )
     def update_maintenance_chart(data):
-        """Update maintenance operational status chart."""
-        if not data:
-            return create_empty_figure("No hay datos de mantenciones disponibles")
-        
-        try:
-            df_status = pd.DataFrame(data.get("maintenance_status", []))
-            df_downtime = pd.DataFrame(data.get("maintenance_downtime", []))
-            return create_maintenance_pie_chart(df_status, df_downtime)
-        except Exception as e:
-            logger.error(f"Error updating maintenance chart: {e}")
-            return create_empty_figure("Error al cargar gráfico")
+        """Maintenance chart is hidden — return empty figure immediately."""
+        return create_empty_figure("")
     
     @callback(
         Output("overview-oil-chart", "figure"),
         [Input("store-overview-data", "data")]
     )
     def update_oil_chart(data):
-        """Update oil analysis pie chart."""
-        if not data or not data.get("oil"):
-            return create_empty_figure("No hay datos de análisis de aceite")
+        """Oil chart is hidden — return empty figure immediately."""
+        return create_empty_figure("")
+    
+    @callback(
+        Output("overview-component-filter", "options"),
+        [Input("store-overview-data", "data")]
+    )
+    def populate_component_filter(data):
+        """Populate component filter dropdown from alerts + tribology data."""
+        if not data:
+            return []
         
-        try:
-            df_oil = pd.DataFrame(data["oil"])
-            return create_oil_pie_chart(df_oil)
-        except Exception as e:
-            logger.error(f"Error updating oil chart: {e}")
-            return create_empty_figure("Error al cargar gráfico")
+        components = set()
+        
+        # From alerts (uppercase)
+        alerts = data.get("alerts", [])
+        for row in alerts:
+            comp = row.get("componente", "")
+            if comp and comp != "Desconocido":
+                components.add(comp.upper())
+        
+        # From oil component_details (lowercase → uppercase)
+        oil = data.get("oil", [])
+        for row in oil:
+            details = row.get("component_details", [])
+            if isinstance(details, list):
+                for d in details:
+                    if isinstance(d, dict):
+                        comp = d.get("component", "")
+                        if comp:
+                            components.add(comp.upper())
+        
+        if not components:
+            return []
+        
+        # Title-case for display
+        return [{"label": c.title(), "value": c} for c in sorted(components)]
     
     @callback(
         Output("overview-oil-ranking-table", "children"),
-        [Input("store-overview-data", "data")],
-        [State("client-selector", "value")]
+        [Input("store-overview-data", "data"),
+         Input("overview-component-filter", "value")]
     )
-    def update_critical_equipment_table(data, client):
-        """Update critical equipment summary table with data freshness."""
+    def update_critical_equipment_table(data, selected_component):
+        """Update critical equipment summary table with data freshness from store."""
         if not data:
             return html.P("No hay datos disponibles", className="text-muted text-center p-3")
         
@@ -985,14 +1035,11 @@ def register_overview_general_callbacks(app):
             df_oil = pd.DataFrame(data.get("oil", []))
             df_alerts = pd.DataFrame(data.get("alerts", []))
             df_maintenance = pd.DataFrame(data.get("maintenance_status", []))
-            df_oil_classified = pd.DataFrame(data.get("oil_classified", []))
-            
-            # Load data freshness for telemetry criterion
-            from dashboard.callbacks.data_freshness_callbacks import load_data_freshness
-            df_freshness = load_data_freshness(client) if client else pd.DataFrame()
+            df_freshness = pd.DataFrame(data.get("freshness", []))
             
             return create_critical_equipment_summary_table(
-                df_telemetry, df_oil, df_alerts, df_maintenance, df_freshness, df_oil_classified
+                df_telemetry, df_oil, df_alerts, df_maintenance, df_freshness,
+                component_filter=selected_component
             )
         except Exception as e:
             logger.error(f"Error updating critical equipment table: {e}")
@@ -1006,16 +1053,8 @@ def register_overview_general_callbacks(app):
         ]
     )
     def update_alerts_chart(data, days):
-        """Update alerts critical equipment chart."""
-        if not data or not data.get("alerts"):
-            return create_empty_figure("No hay datos de alertas disponibles")
-        
-        try:
-            df_alerts = pd.DataFrame(data["alerts"])
-            return create_alerts_pie_chart(df_alerts, days)
-        except Exception as e:
-            logger.error(f"Error updating alerts chart: {e}")
-            return create_empty_figure("Error al cargar gráfico")
+        """Alerts chart is hidden — return empty figure immediately."""
+        return create_empty_figure("")
     
     @callback(
         Output("overview-summary-table", "children"),
