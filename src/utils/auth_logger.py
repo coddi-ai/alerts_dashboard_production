@@ -16,8 +16,8 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-AUTH_LOG_PATH = Path("data/auxiliar/authentication_register.parquet")
-S3_KEY = "MultiTechnique Alerts/auxiliar/authentication_register.parquet"
+AUTH_LOG_PATH = Path("data/auxiliar/authentication_register.csv")
+S3_KEY = "MultiTechnique Alerts/auxiliar/authentication_register.csv"
 
 
 def log_authentication(username: str, success: bool) -> None:
@@ -42,12 +42,12 @@ def log_authentication(username: str, success: bool) -> None:
         AUTH_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
         if AUTH_LOG_PATH.exists():
-            existing = pd.read_parquet(AUTH_LOG_PATH)
+            existing = pd.read_csv(AUTH_LOG_PATH)
             df = pd.concat([existing, new_record], ignore_index=True)
         else:
             df = new_record
 
-        df.to_parquet(AUTH_LOG_PATH, index=False)
+        df.to_csv(AUTH_LOG_PATH, index=False)
         _upload_to_s3()
     except Exception as e:
         logger.error(f"Failed to log authentication event: {e}")
