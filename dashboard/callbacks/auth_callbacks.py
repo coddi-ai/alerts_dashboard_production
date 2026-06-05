@@ -6,6 +6,7 @@ from dash import Input, Output, State, html
 from dash.exceptions import PreventUpdate
 import dash_bootstrap_components as dbc
 from dashboard.auth import authenticate_user
+from src.utils.auth_logger import log_authentication
 import logging
 
 logger = logging.getLogger(__name__)
@@ -46,9 +47,11 @@ def register_auth_callbacks(app):
         
         if user:
             logger.info(f"Login successful for user: {username}")
+            log_authentication(username, success=True)
             return user, "", False
         else:
             logger.warning(f"Login failed for user: {username}")
+            log_authentication(username, success=False)
             return None, "Usuario o contraseña inválidos", True
     
     
