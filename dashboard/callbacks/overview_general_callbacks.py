@@ -13,7 +13,7 @@ from pathlib import Path
 import logging
 
 from src.utils.file_utils import safe_read_parquet
-from src.data.loaders import load_telemetry_machine_status, load_alerts_data
+from src.data.loaders import load_telemetry_unit_health, load_alerts_data
 from src.data.maintenance_repository import get_repository
 from dashboard.callbacks.data_freshness_callbacks import load_data_freshness
 
@@ -134,7 +134,7 @@ def create_telemetry_pie_chart(df_telemetry: pd.DataFrame) -> go.Figure:
     if df_telemetry.empty:
         return create_empty_figure("No hay datos")
     
-    # Use correct column name from load_telemetry_machine_status
+    # Use correct column name from load_telemetry_unit_health
     if 'overall_status' not in df_telemetry.columns:
         logger.warning(f"Column 'overall_status' not found. Available: {df_telemetry.columns.tolist()}")
         return create_empty_figure("Datos incompletos")
@@ -794,18 +794,13 @@ def register_overview_general_callbacks(app):
             alerts_period = "N/A"
             
             # Load Telemetry data using proper loader (most recent week/year available)
-            df_telemetry = load_telemetry_machine_status(client)
+            df_telemetry = load_telemetry_unit_health(client)
             if not df_telemetry.empty:
-                # Get most recent week/year combination using correct column names
-                if 'evaluation_week' in df_telemetry.columns and 'evaluation_year' in df_telemetry.columns:
-                    most_recent = df_telemetry.sort_values(['evaluation_year', 'evaluation_week'], ascending=False).iloc[0]
-                    latest_year = most_recent['evaluation_year']
-                    latest_week = most_recent['evaluation_week']
-                    df_telemetry = df_telemetry[
-                        (df_telemetry['evaluation_year'] == latest_year) & 
-                        (df_telemetry['evaluation_week'] == latest_week)
-                    ]
-                    telemetry_latest = f"Semana {latest_week}, Año {latest_year}"
+                # Get most recent evaluation timestamp
+                if 'evaluation_timestamp' in df_telemetry.columns:
+                    df_telemetry['evaluation_timestamp'] = pd.to_datetime(df_telemetry['evaluation_timestamp'])
+                    latest_ts = df_telemetry['evaluation_timestamp'].max()
+                    telemetry_latest = latest_ts.strftime("Semana %W, Año %Y")
                     logger.info(f"Telemetry: Using most recent data - {telemetry_latest}")
             
             # Load Maintenance data (already filtered by MTD) - MUST pass client parameter

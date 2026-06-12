@@ -39,7 +39,7 @@ from dashboard.callbacks.overview_general_callbacks import register_overview_gen
 # Import alerts callbacks (uses @callback decorator, auto-registered on import)
 import dashboard.callbacks.alerts_callbacks
 
-# Import telemetry callbacks (uses @callback decorator, auto-registered on import)
+# Import telemetry health callbacks (uses @callback decorator, auto-registered on import)
 import dashboard.callbacks.telemetry_callbacks
 
 # Import oil callbacks (uses @callback decorator, auto-registered on import)
@@ -115,7 +115,7 @@ register_predictive_callbacks(app)
 if __name__ == '__main__':
     # Get host and port from environment or use defaults
     host = os.getenv('DASHBOARD_HOST', '0.0.0.0')
-    port = int(os.getenv('DASHBOARD_PORT', '8051'))
+    port = int(os.getenv('DASHBOARD_PORT', '8080'))
     debug = os.getenv('DEBUG', 'False').lower() == 'true'
     
     # Check if data folder exists, sync from S3 if needed

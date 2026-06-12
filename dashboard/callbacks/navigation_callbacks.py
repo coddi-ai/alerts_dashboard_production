@@ -14,13 +14,13 @@ from dashboard.tabs.tab_alerts import create_layout as create_alerts_tab
 from dashboard.tabs.tab_overview_general import create_layout as create_overview_general_tab
 from dashboard.tabs.tab_data_freshness import create_layout as create_data_freshness_tab
 from dashboard.tabs.tab_oil import create_layout as create_oil_tab
+from dashboard.tabs.tab_telemetry import create_layout as create_telemetry_tab
 
 # Commented tabs - not currently active
 # from dashboard.tabs.tab_limits import create_limits_tab
 # from dashboard.tabs.tab_machines import create_machines_tab
 # from dashboard.tabs.tab_reports import create_reports_tab
 # from dashboard.tabs.tab_mantenciones_general import layout_mantenciones_general
-# from dashboard.tabs.tab_telemetry import create_layout as create_telemetry_tab
 # from dashboard.tabs.tab_health_index import create_layout as create_health_index_tab
 # from dashboard.tabs.tab_menace_control import create_layout as create_menace_control_tab
 # from dashboard.tabs.tab_hot_sheet import create_layout as create_hot_sheet_tab
@@ -85,27 +85,6 @@ def register_navigation_callbacks(app: dash.Dash) -> None:
         logger.info("Creating unified alerts tab with internal tabs")
         return create_alerts_tab()
     
-    # Commented - telemetry tab not currently active
-    # def get_telemetry_content(client: str):
-    #     """
-    #     Get telemetry content based on client.
-    #     
-    #     Args:
-    #         client: Client identifier
-    #         
-    #     Returns:
-    #         Telemetry dashboard content
-    #     """
-    #     logger.info(f"Getting telemetry content for client={client}")
-    #     
-    #     # Telemetry subsystem is CDA-only for now
-    #     if client.lower() != 'cda':
-    #         logger.warning(f"Telemetry subsystem is only available for CDA client, requested: {client}")
-    #         return create_placeholder_content('Telemetry (Solo disponible para CDA)')
-    #     
-    #     logger.info("Creating unified telemetry tab with internal tabs")
-    #     return create_telemetry_tab()
-    
     # Map subsection IDs to their content generators
     SECTION_CONTENT_MAP = {
         'overview-general': create_overview_general_tab,
@@ -113,7 +92,7 @@ def register_navigation_callbacks(app: dash.Dash) -> None:
         # 'monitoring-hot-sheet': create_hot_sheet_tab,  # Commented - moved to overview-general
         'monitoring-alerts': lambda client: get_alerts_content(client),
         # 'monitoring-menace-control': create_menace_control_tab,  # Commented - not active
-        # 'monitoring-telemetry': lambda client: get_telemetry_content(client),  # Commented - not active
+        'monitoring-telemetry': lambda client: create_telemetry_tab(client),
         # 'monitoring-health-index': create_health_index_tab,  # Commented - not active
         # 'monitoring-mantentions': lambda client: layout_mantenciones_general(),  # Commented - not active
         'monitoring-oil': create_oil_tab,
