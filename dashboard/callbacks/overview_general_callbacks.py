@@ -473,6 +473,67 @@ def create_critical_equipment_summary_table(df_telemetry: pd.DataFrame, df_oil: 
                             if pd.notna(rec) and str(rec).strip():
                                 oil_reason += f" | Rec: {str(rec)[:100]}"
             
+            # ── Build human-readable description explaining status colors ──
+            desc_parts = []
+
+            # Telemetry description
+            if telem_status in ('Anormal', 'Crítico'):
+                if freshness_info and freshness_info.get('status') == 'Preocupante':
+                    desc_parts.append(f"no llega data de telemetría hace {freshness_info['time_str']}")
+                if not alert_scores.empty:
+                    eq_a = alert_scores[alert_scores['equipo'] == equipo]
+                    if not eq_a.empty:
+                        _na = int(eq_a['alert_count'].iloc[0])
+                        _nc = int(eq_a['component_count'].iloc[0])
+                        desc_parts.append(f"presenta {_na} alerta(s) en {_nc} componente(s)")
+                if not desc_parts:
+                    desc_parts.append("telemetría en estado crítico")
+            elif telem_status in ('Alerta', 'Atención'):
+                sub = []
+                if not alert_scores.empty:
+                    eq_a = alert_scores[alert_scores['equipo'] == equipo]
+                    if not eq_a.empty:
+                        _na = int(eq_a['alert_count'].iloc[0])
+                        sub.append(f"{_na} alerta(s) activa(s)")
+                if freshness_info and freshness_info.get('status') == 'Atención':
+                    sub.append(f"datos con retraso ({freshness_info['time_str']})")
+                if sub:
+                    desc_parts.extend(sub)
+
+            # Tribology description
+            if oil_status in ('Anormal', 'Crítico'):
+                if component_filter:
+                    desc_parts.append(f"muestra de {component_filter.lower()} anormal")
+                elif not df_oil.empty and 'equipo' in df_oil.columns:
+                    eq_o = df_oil[df_oil['equipo'] == equipo]
+                    if not eq_o.empty:
+                        _r = eq_o.iloc[0]
+                        _n_an = int(_r.get('components_anormal', 0)) if 'components_anormal' in eq_o.columns else 0
+                        _n_al = int(_r.get('components_alerta', 0)) if 'components_alerta' in eq_o.columns else 0
+                        if _n_an > 0:
+                            desc_parts.append(f"{_n_an} componente(s) con aceite anormal")
+                        elif _n_al > 0:
+                            desc_parts.append(f"{_n_al} componente(s) con aceite en alerta")
+                        else:
+                            desc_parts.append("muestras de aceite fuera de rango")
+            elif oil_status in ('Alerta', 'Atención'):
+                if component_filter:
+                    desc_parts.append(f"muestra de {component_filter.lower()} en alerta")
+                elif not df_oil.empty and 'equipo' in df_oil.columns:
+                    eq_o = df_oil[df_oil['equipo'] == equipo]
+                    if not eq_o.empty:
+                        _n_al = int(eq_o.iloc[0].get('components_alerta', 0)) if 'components_alerta' in eq_o.columns else 0
+                        if _n_al > 0:
+                            desc_parts.append(f"{_n_al} componente(s) con aceite en alerta")
+            elif oil_status == 'N/A':
+                desc_parts.append("sin datos de tribología")
+
+            if desc_parts:
+                description = "; ".join(desc_parts)
+                description = description[0].upper() + description[1:]
+            else:
+                description = "Operación normal; sin hallazgos destacables"
+
             table_rows.append({
                 'equipo': equipo,
                 'priority': max(STATUS_PRIORITY.get(telem_status, 0), STATUS_PRIORITY.get(oil_status, 0)),
@@ -480,6 +541,11 @@ def create_critical_equipment_summary_table(df_telemetry: pd.DataFrame, df_oil: 
                     html.Td(equipo, style={'fontWeight': 'bold', 'fontSize': '13px', 'padding': '6px 12px'}),
                     html.Td(make_badge(telem_status, telem_reason)),
                     html.Td(make_badge(oil_status, oil_reason)),
+                    html.Td(description, style={
+                        'fontSize': '11px', 'padding': '6px 12px',
+                        'color': '#495057', 'lineHeight': '1.4',
+                        'maxWidth': '400px',
+                    }),
                 ])
             })
         
@@ -498,7 +564,7 @@ def create_critical_equipment_summary_table(df_telemetry: pd.DataFrame, df_oil: 
                     'textAlign': 'center', 'fontSize': '12px', 'padding': '8px',
                     'borderBottom': '2px solid #dee2e6', 'position': 'sticky', 'top': '0', 'zIndex': '1'
                 })
-                for col in ['Unidad', col_telemetria, col_tribologia]
+                for col in ['Unidad', col_telemetria, col_tribologia, 'Descripción']
             ])),
             html.Tbody(sorted_rows)
         ], style={

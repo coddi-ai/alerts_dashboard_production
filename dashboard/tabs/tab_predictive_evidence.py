@@ -5,6 +5,7 @@ Supports multi-component model: auto-discovers component CSVs (motor, transmisio
 
 from dash import html, dcc
 import pandas as pd
+import re
 import os
 from pathlib import Path
 from config.settings import get_settings
@@ -12,6 +13,8 @@ from src.utils.logger import get_logger
 from dashboard.components.predictive_config import (
     get_failure_mode_options,
     get_failure_modes_dict,
+    get_failure_modes_for_component,
+    get_failure_mode_methodology,
     get_oil_variables_for_mode,
     get_telemetry_signals_for_mode,
     OIL_LABELS,
@@ -105,6 +108,356 @@ def _status_colors(status):
         "Alerta":    {"border": "#ef9f27", "bg": "#faeeda", "text": "#854f0b"},
         "Saludable": {"border": "#1d9e75", "bg": "#eaf3de", "text": "#3b6d11"},
     }.get(status, {"border": "#888", "bg": "#f0f0f0", "text": "#444"})
+
+
+# ── Insight generation (AI-style explanations) ────────────────────────────────
+
+def _parse_bold(text):
+    """Convert **bold** markers to html.Strong elements."""
+    parts = re.split(r'\*\*(.+?)\*\*', text)
+    return [html.Strong(p) if i % 2 else p for i, p in enumerate(parts) if p]
+
+
+def _analyze_oil_observations(df_unit, oil_vars, df_latest):
+    """Generate data-driven observations for oil variables."""
+    observations = []
+    if not oil_vars or df_unit.empty:
+        return observations
+
+    df_sorted = df_unit.sort_values("sampleDate")
+    last_sample = df_sorted.iloc[-1]
+    oil_range = last_sample.get("oilHourRange", "LT_1000")
+
+    # Deduplicate by sampleDate for trend analysis
+    df_oil = df_sorted.drop_duplicates(subset=["sampleDate"]).sort_values("sampleDate")
+
+    for var in oil_vars:
+        if var not in df_sorted.columns:
+            continue
+
+        current_val = last_sample.get(var)
+        if pd.isna(current_val):
+            continue
+        current_val = float(current_val)
+        label = OIL_LABELS.get(var, var)
+
+        # 1. Threshold check
+        if var in OIL_THRESHOLDS:
+            thresholds = OIL_THRESHOLDS[var].get(oil_range)
+            if thresholds:
+                normal, alert, critic = thresholds
+                if current_val > critic:
+                    observations.append({
+                        "type": "critical",
+                        "icon": "fas fa-exclamation-triangle",
+                        "text": f"{label} está en **{current_val:.1f}**, superando el umbral crítico ({critic:.0f})"
+                    })
+                elif current_val > alert:
+                    observations.append({
+                        "type": "warning",
+                        "icon": "fas fa-exclamation-circle",
+                        "text": f"{label} está en **{current_val:.1f}**, en zona de alerta (umbral: {alert:.0f})"
+                    })
+                elif current_val <= normal:
+                    observations.append({
+                        "type": "ok",
+                        "icon": "fas fa-check-circle",
+                        "text": f"{label} está en **{current_val:.1f}**, dentro de rango normal"
+                    })
+
+        # 2. Trend analysis (unique oil samples)
+        samples = df_oil[df_oil[var].notna()]
+        if len(samples) >= 3:
+            recent = samples.tail(5)
+            first_val = float(recent[var].iloc[0])
+            last_val = float(recent[var].iloc[-1])
+            n_samples = len(recent)
+            if first_val > 0.01:
+                change_pct = ((last_val - first_val) / first_val) * 100
+                if change_pct > 25:
+                    observations.append({
+                        "type": "warning",
+                        "icon": "fas fa-arrow-up",
+                        "text": f"{label} muestra tendencia al alza (**{change_pct:+.0f}%** en las últimas {n_samples} muestras)"
+                    })
+                elif change_pct < -25:
+                    observations.append({
+                        "type": "ok",
+                        "icon": "fas fa-arrow-down",
+                        "text": f"{label} muestra tendencia a la baja (**{change_pct:+.0f}%** en las últimas {n_samples} muestras)"
+                    })
+
+        # 3. Fleet comparison
+        if var in df_latest.columns:
+            fleet_avg = float(df_latest[var].mean())
+            if fleet_avg > 0.01:
+                ratio = (current_val / fleet_avg - 1) * 100
+                if ratio > 40:
+                    observations.append({
+                        "type": "warning",
+                        "icon": "fas fa-users",
+                        "text": f"{label} está un **{ratio:.0f}%** por encima del promedio de la flota ({fleet_avg:.1f})"
+                    })
+
+    return observations
+
+
+def _analyze_telemetry_observations(df_unit, telem_vars, days=90):
+    """Generate data-driven observations for telemetry signals."""
+    observations = []
+    if not telem_vars or df_unit.empty:
+        return observations
+
+    fecha_fin = df_unit["Fecha"].max()
+    fecha_inicio = fecha_fin - pd.Timedelta(days=days)
+    df_window = df_unit[df_unit["Fecha"] >= fecha_inicio]
+
+    if df_window.empty:
+        return observations
+
+    for signal in telem_vars:
+        signal_label = TELEMETRY_LABELS.get(signal, signal)
+        alert_cols = [c for c in df_window.columns if f"_{signal}_alert_rate" in c]
+        critic_cols = [c for c in df_window.columns if f"_{signal}_critic_rate" in c]
+
+        # Critic rate analysis
+        if critic_cols:
+            avg_critic = df_window[critic_cols].mean().mean()
+            if avg_critic > 0.15:
+                observations.append({
+                    "type": "critical",
+                    "icon": "fas fa-exclamation-triangle",
+                    "text": f"{signal_label} presenta tasa crítica promedio de **{avg_critic:.1%}** en los últimos {days} días"
+                })
+            elif avg_critic > 0.05:
+                observations.append({
+                    "type": "warning",
+                    "icon": "fas fa-exclamation-circle",
+                    "text": f"{signal_label} presenta tasa crítica de **{avg_critic:.1%}** en los últimos {days} días"
+                })
+
+            # Recent spike detection (last 7 days vs prior)
+            recent = df_window[df_window["Fecha"] >= fecha_fin - pd.Timedelta(days=7)]
+            prior = df_window[df_window["Fecha"] < fecha_fin - pd.Timedelta(days=7)]
+            if not recent.empty and not prior.empty:
+                recent_avg = recent[critic_cols].mean().mean()
+                prior_avg = prior[critic_cols].mean().mean()
+                if recent_avg > 0.1 and prior_avg > 0.001 and recent_avg / prior_avg > 2:
+                    observations.append({
+                        "type": "critical",
+                        "icon": "fas fa-bolt",
+                        "text": f"{signal_label} muestra un **aumento reciente** en tasa crítica (última semana vs promedio previo)"
+                    })
+
+        # Alert rate analysis
+        if alert_cols:
+            avg_alert = df_window[alert_cols].mean().mean()
+            if avg_alert > 0.20:
+                observations.append({
+                    "type": "warning",
+                    "icon": "fas fa-bell",
+                    "text": f"{signal_label} presenta tasa de alerta promedio de **{avg_alert:.1%}** en los últimos {days} días"
+                })
+
+        # If no alerts at all → positive observation
+        if alert_cols and critic_cols:
+            total_rate = df_window[alert_cols + critic_cols].mean().mean()
+            if total_rate < 0.02:
+                observations.append({
+                    "type": "ok",
+                    "icon": "fas fa-check-circle",
+                    "text": f"{signal_label} sin alertas significativas en los últimos {days} días"
+                })
+
+    return observations
+
+
+def _generate_insight_data(unit, df_unit, df_latest, failure_mode, component="motor"):
+    """Generate complete insight data for a failure mode and unit."""
+    modes = get_failure_modes_for_component(component)
+    mode_config = modes.get(failure_mode, {})
+    if not mode_config:
+        return None
+
+    label = mode_config["label"]
+    oil_vars = mode_config.get("oil_variables", [])
+    telem_vars = mode_config.get("telemetry_variables", [])
+    methodology = get_failure_mode_methodology(failure_mode, component)
+
+    # Score
+    row = df_latest[df_latest["Unit"] == unit]
+    if row.empty:
+        return None
+    row = row.iloc[0]
+    score = float(row[failure_mode]) if failure_mode in row.index and pd.notna(row[failure_mode]) else 0.0
+
+    # Variable names for display
+    var_names = []
+    if oil_vars:
+        var_names.extend([OIL_LABELS.get(v, v) for v in oil_vars])
+    if telem_vars:
+        var_names.extend([TELEMETRY_LABELS.get(v, v) for v in telem_vars])
+
+    # Collect observations
+    observations = []
+    observations.extend(_analyze_oil_observations(df_unit, oil_vars, df_latest))
+    observations.extend(_analyze_telemetry_observations(df_unit, telem_vars))
+
+    # Fleet comparison for the overall failure mode score
+    if failure_mode in df_latest.columns:
+        fleet_p80 = float(df_latest[failure_mode].quantile(0.80))
+        fleet_avg = float(df_latest[failure_mode].mean())
+        if score > fleet_p80 and score > 10:
+            observations.insert(0, {
+                "type": "warning",
+                "icon": "fas fa-chart-line",
+                "text": f"El puntaje de esta unidad (**{score:.0f}**) está por encima del percentil 80 de la flota ({fleet_p80:.0f})"
+            })
+    else:
+        fleet_avg = 0.0
+
+    # Sort: critical first, then warning, then ok
+    priority = {"critical": 0, "warning": 1, "info": 2, "ok": 3}
+    observations.sort(key=lambda x: priority.get(x["type"], 2))
+
+    # Observation window
+    n_days = 90
+    if not df_unit.empty:
+        fecha_fin = df_unit["Fecha"].max()
+        fecha_inicio = fecha_fin - pd.Timedelta(days=90)
+        n_days = (fecha_fin - fecha_inicio).days
+
+    return {
+        "unit": unit,
+        "score": score,
+        "label": label,
+        "var_names": var_names,
+        "methodology": methodology,
+        "observations": observations,
+        "n_days": n_days,
+        "fleet_avg": fleet_avg,
+    }
+
+
+def _build_insight_panel(insight):
+    """Build the AI insight panel UI component."""
+    if not insight:
+        return html.Div()
+
+    score = insight["score"]
+    unit = insight["unit"]
+    label = insight["label"]
+    var_names = insight["var_names"]
+    methodology = insight.get("methodology", "")
+    observations = insight.get("observations", [])
+    n_days = insight.get("n_days", 90)
+
+    # Score styling
+    if score >= 70:
+        score_color, score_level = "#e24b4a", "alto"
+    elif score >= 40:
+        score_color, score_level = "#ef9f27", "medio"
+    else:
+        score_color, score_level = "#1d9e75", "bajo"
+
+    vars_text = ", ".join(var_names) if var_names else "—"
+
+    # Build observation items
+    type_styles = {
+        "critical": {"bg": "#fcebeb", "border": "#e24b4a", "icon_color": "#a32d2d"},
+        "warning":  {"bg": "#faeeda", "border": "#ef9f27", "icon_color": "#854f0b"},
+        "ok":       {"bg": "#eaf3de", "border": "#1d9e75", "icon_color": "#3b6d11"},
+        "info":     {"bg": "#e8f4f8", "border": "#0891B2", "icon_color": "#155e75"},
+    }
+
+    obs_items = []
+    for obs in observations:
+        st = type_styles.get(obs["type"], type_styles["info"])
+        obs_items.append(html.Div([
+            html.I(className=f"{obs['icon']}", style={
+                "color": st["icon_color"], "fontSize": "12px", "marginTop": "2px", "flexShrink": "0"
+            }),
+            html.Span(_parse_bold(obs["text"]), style={"fontSize": "12px", "color": "#374151", "lineHeight": "1.5"}),
+        ], className="insight-obs-item", style={
+            "background": st["bg"],
+            "borderLeft": f"3px solid {st['border']}",
+        }))
+
+    if not obs_items:
+        obs_items = [html.Div([
+            html.I(className="fas fa-check-circle", style={
+                "color": "#3b6d11", "fontSize": "12px", "marginTop": "2px", "flexShrink": "0"
+            }),
+            html.Span("No se detectaron anomalías significativas para este modo de falla.",
+                       style={"fontSize": "12px", "color": "#374151"}),
+        ], className="insight-obs-item", style={
+            "background": "#eaf3de", "borderLeft": "3px solid #1d9e75",
+        })]
+
+    return html.Div([
+        # ── Header
+        html.Div([
+            html.Div([
+                html.I(className="fas fa-robot", style={"fontSize": "18px", "color": "#7C3AED"}),
+            ], className="insight-icon-wrapper"),
+            html.Div([
+                html.Span("Análisis Inteligente", style={
+                    "fontSize": "14px", "fontWeight": "600", "color": "#374151"
+                }),
+                html.Span(f" — {label}", style={
+                    "fontSize": "14px", "fontWeight": "400", "color": "#6B7280"
+                }),
+            ]),
+        ], className="insight-header"),
+
+        # ── Methodology: what is analyzed
+        html.Div([
+            html.Div([
+                html.I(className="fas fa-search", style={"color": "#7C3AED", "fontSize": "11px"}),
+                html.Span("¿Qué se analiza?", className="insight-section-label",
+                           style={"color": "#7C3AED"}),
+            ], style={"display": "flex", "alignItems": "center", "gap": "6px", "marginBottom": "6px"}),
+            html.P([
+                f"Este modo de falla se detecta monitoreando: ",
+                html.Strong(vars_text), "."
+            ], style={"fontSize": "12px", "color": "#4B5563", "lineHeight": "1.5", "margin": "0 0 4px 0"}),
+            html.P(methodology, style={
+                "fontSize": "12px", "color": "#6B7280", "lineHeight": "1.5",
+                "margin": "0", "fontStyle": "italic"
+            }) if methodology else None,
+        ], className="insight-section", style={
+            "background": "#F5F3FF", "borderLeft": "3px solid #7C3AED"
+        }),
+
+        # ── Score result
+        html.Div([
+            html.Div([
+                html.I(className="fas fa-gauge-high", style={"color": score_color, "fontSize": "11px"}),
+                html.Span("Resultado", className="insight-section-label",
+                           style={"color": score_color}),
+            ], style={"display": "flex", "alignItems": "center", "gap": "6px", "marginBottom": "6px"}),
+            html.P([
+                "La unidad ",
+                html.Strong(unit),
+                " tiene un puntaje de ",
+                html.Strong(f"{score:.1f}/100", style={"color": score_color}),
+                f" (riesgo {score_level}) para {label}."
+            ], style={"fontSize": "12px", "color": "#374151", "lineHeight": "1.5", "margin": "0"}),
+        ], className="insight-section", style={
+            "background": "#F9FAFB", "borderLeft": f"3px solid {score_color}"
+        }),
+
+        # ── Observations
+        html.Div([
+            html.Div([
+                html.I(className="fas fa-clipboard-list", style={"color": "#374151", "fontSize": "11px"}),
+                html.Span(f"Observaciones — últimos {n_days} días", className="insight-section-label",
+                           style={"color": "#374151"}),
+            ], style={"display": "flex", "alignItems": "center", "gap": "6px", "marginBottom": "10px"}),
+            html.Div(obs_items),
+        ]),
+
+    ], className="insight-panel")
 
 
 # ── Render functions (called by callbacks) ────────────────────────────────────
@@ -256,13 +609,12 @@ def render_detailed_evidence(unit, df, df_latest, failure_mode, component="motor
                               style={"color": "var(--text-muted)", "fontSize": "13px"})
         window_text = ""
 
+    # Generate AI insight
+    insight = _generate_insight_data(unit, df_unit, df_latest, failure_mode, component)
+
     return html.Div([
-        # Mode info header
-        html.Div([
-            html.H5([html.I(className="fas fa-cogs me-2"), f"Modo de Falla: {selected_label}"],
-                    className="mb-2 text-primary"),
-            html.P(f"Score: {fm_scores.get(failure_mode, 0.0):.1f}", className="text-muted mb-2", style={"fontSize": "12px"}),
-        ], className="card shadow-sm", style={"marginBottom": "1.5rem", "padding": "16px"}),
+        # AI Insight panel
+        _build_insight_panel(insight),
 
         # Oil evidence
         html.Div([

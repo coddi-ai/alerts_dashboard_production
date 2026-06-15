@@ -133,6 +133,97 @@ OIL_THRESHOLDS = {
     "Cromo":      {"LT_1000": (0.0, 0.5, 1.0), "GE_1000": (0.0, 0.5, 1.0)},
 }
 
+# ── Methodology: explains what the AI analyzes for each failure mode ──────
+FAILURE_MODE_METHODOLOGY = {
+    "motor": {
+        "abrasive_wear_risk": (
+            "Se evalúa la concentración de partículas metálicas (Hierro, Cromo) "
+            "y contaminantes abrasivos (Silicio) en el aceite. Incrementos en "
+            "Hierro y Cromo sugieren desgaste interno de componentes, mientras "
+            "que Silicio elevado indica ingreso de contaminantes externos."
+        ),
+        "combustion_risk": (
+            "Se analiza la calidad de combustión a través del Hollín y la "
+            "Viscosidad del aceite, junto con las temperaturas de escape "
+            "(izquierda, derecha y diferencial). Hollín elevado con cambios "
+            "de viscosidad y temperaturas anómalas indican combustión deficiente."
+        ),
+        "thermal_imbalance_risk": (
+            "Se monitorea el diferencial entre las temperaturas de escape "
+            "izquierda y derecha. Un delta elevado o sostenido puede indicar "
+            "problemas en inyectores, válvulas, turbo o distribución de aire "
+            "entre cilindros."
+        ),
+        "oil_degradation_risk": (
+            "Se evalúa la condición del aceite a través de su Viscosidad y "
+            "contenido de Hollín. Cambios fuera de los rangos esperados indican "
+            "degradación acelerada, comprometiendo la capacidad de lubricación "
+            "y protección del motor."
+        ),
+        "lubrication_failure_risk": (
+            "Se correlacionan los metales de cojinetes (Plomo, Cobre) con la "
+            "Presión de Aceite del motor. Metales elevados combinados con "
+            "presión baja son indicadores de falla en el sistema de lubricación."
+        ),
+        "bearing_wear_risk": (
+            "Se monitorea Plomo y Cobre (materiales de cojinetes) junto con "
+            "la Presión de Aceite. Un incremento sostenido de estos metales "
+            "indica desgaste progresivo de los cojinetes del motor."
+        ),
+        "blowby_risk": (
+            "Se correlaciona la Presión del Cárter (CnkcasePres) con el "
+            "contenido de Hollín en el aceite. Presión de cárter elevada "
+            "acompañada de hollín alto indica fuga de gases de combustión "
+            "al cárter (blow-by)."
+        ),
+    },
+    "transmision": {
+        "clutch_pack_risk": (
+            "Se evalúa el desgaste de los discos de embrague mediante Hierro, "
+            "Cobre y Aluminio en el aceite, correlacionado con deslizamientos "
+            "de lock-up y transmisión. Metales elevados con deslizamiento "
+            "anormal indican desgaste del clutch pack."
+        ),
+        "thermal_degradation_risk": (
+            "Se monitorea la degradación del aceite por temperatura excesiva, "
+            "evaluando Viscosidad y Agua junto con temperaturas de salida del "
+            "convertidor y aceite de transmisión."
+        ),
+        "planetary_gear_risk": (
+            "Se analiza Hierro, Silicio y Cobre provenientes del desgaste de "
+            "engranajes, correlacionado con desajustes de marcha y "
+            "deslizamiento de transmisión."
+        ),
+        "bearing_risk": (
+            "Se monitorean Hierro, Cobre, Plomo y Estaño (materiales de "
+            "rodamientos) junto con la temperatura del aceite de transmisión. "
+            "Incrementos sostenidos sugieren desgaste progresivo de rodamientos."
+        ),
+        "contamination_risk": (
+            "Se evalúa el ingreso de contaminantes externos al sistema mediante "
+            "Silicio, Agua, Sodio y Potasio. Estos elementos no son generados "
+            "por desgaste interno y su presencia indica contaminación del "
+            "circuito hidráulico."
+        ),
+        "torque_converter_risk": (
+            "Se analiza el desgaste del convertidor de torque mediante "
+            "Aluminio, Cobre y Hierro, correlacionado con deslizamiento de "
+            "lock-up y temperatura de salida del convertidor."
+        ),
+        "shift_quality_risk": (
+            "Se evalúa la calidad de los cambios de marcha mediante Viscosidad "
+            "y Hierro en aceite, correlacionado con deslizamientos, desajustes "
+            "de marcha y lock-up."
+        ),
+    },
+}
+
+
+def get_failure_mode_methodology(mode_key: str, component: str = "motor") -> str:
+    """Get the methodology description for a failure mode."""
+    component_key = component.lower() if component else "motor"
+    return FAILURE_MODE_METHODOLOGY.get(component_key, {}).get(mode_key, "")
+
 
 def get_failure_modes_for_component(component: str) -> dict:
     component_key = component.lower() if component else "motor"

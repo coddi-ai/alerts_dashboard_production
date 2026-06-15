@@ -101,3 +101,6 @@ dataDep/*
 ui_notes.md
 new_dashboard/*
 ai_docs/*
+
+# PDF files (local reference docs)
+*.pdf
