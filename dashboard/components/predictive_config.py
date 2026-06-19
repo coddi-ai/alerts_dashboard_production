@@ -17,7 +17,7 @@ FAILURE_MODE_CONFIG = {
             "description": "Problemas en el proceso de combustión"
         },
         "thermal_imbalance_risk": {
-            "label": "Diferencia de temperaturas de escape",
+            "label": "Δ T° Escape",
             "oil_variables": [],
             "telemetry_variables": ["LtExhTemp", "RtExhTemp", "DeltaExh"],
             "description": "Desequilibrio en temperaturas de escape"

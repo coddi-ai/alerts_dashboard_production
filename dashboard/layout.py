@@ -356,13 +356,15 @@ def create_main_dashboard(user_data: dict) -> html.Div:
     available_clients = user_data.get('clients', [])
     
     # Get client for discovering predictive components
-    if available_clients:
-        discovery_client = available_clients[0].lower()
-    else:
-        settings = get_settings()
-        discovery_client = settings.clients[0].lower() if settings.clients else 'cda'
+    # Predictive is restricted to specific clients (CDA for now)
+    settings = get_settings()
+    predictive_allowed = [c.upper() for c in settings.predictive_allowed_clients]
+    user_has_predictive_access = any(
+        c.upper() in predictive_allowed for c in available_clients
+    )
 
-    predictive_components = _discover_predictive_components(discovery_client)
+    # Use statically-known component list for navigation (data availability checked at runtime)
+    predictive_nav_components = list(PREDICTIVE_COMPONENT_ICONS.keys()) if user_has_predictive_access else []
 
     # Define navigation structure
     navigation_items = [
@@ -389,15 +391,23 @@ def create_main_dashboard(user_data: dict) -> html.Div:
                 {'id': 'monitoring-oil', 'label': 'Aceite', 'tab': create_oil_tab}
             ]
         },
-        {
+    ]
+
+    # Only add predictive section if user has access to a predictive-allowed client
+    # Show it even if no data exists (disclaimer will be shown in the content area)
+    if user_has_predictive_access:
+        navigation_items.append({
             'section': 'predictive',
             'label': 'Predictivo',
             'icon': 'fas fa-brain',
             'subsections': [
                 {'id': f'predictive-{comp}', 'label': comp.title()}
-                for comp in predictive_components
+                for comp in predictive_nav_components
             ]
-        },
+        })
+
+    # Additional sections (always visible)
+    navigation_items.extend([
         {
             'section': 'integration',
             'label': 'Integración',
@@ -422,7 +432,7 @@ def create_main_dashboard(user_data: dict) -> html.Div:
                 {'id': 'admin-main', 'label': 'Administración', 'tab': lambda: create_placeholder_content('Administración')}
             ]
         },
-    ]
+    ])
     
     # Build left menu with improved styling
     menu_items = []

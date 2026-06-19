@@ -108,12 +108,49 @@ def register_navigation_callbacks(app: dash.Dash) -> None:
         """
         Handle dynamic predictive section IDs: predictive-{component}.
         Returns content or None if not a predictive section.
+        Only serves content for clients in the predictive_allowed_clients list.
+        Shows disclaimer if client has no predictive data.
         """
         import re
         match = re.match(r'^predictive-(.+)$', active_section)
         if not match:
             return None
+
+        # Check if the current client is allowed to access predictive
+        settings = get_settings()
+        predictive_allowed = [c.lower() for c in settings.predictive_allowed_clients]
+        if client.lower() not in predictive_allowed:
+            logger.warning(
+                f"Predictive module accessed by non-allowed client: {client}. "
+                f"Allowed: {predictive_allowed}"
+            )
+            return create_placeholder_content(
+                'Predictivo (Solo disponible para CDA)'
+            )
+
+        # Check if predictive data exists for this client
         component = match.group(1)
+        data_dir = Path(settings.data_root) / "predictive" / "golden" / client.lower()
+        component_file = data_dir / f"{component}.csv"
+
+        if not data_dir.exists() or not component_file.exists():
+            logger.warning(f"No predictive data found for client {client}, component {component} at {component_file}")
+            return html.Div([
+                html.Div([
+                    html.Div([
+                        html.I(className="fas fa-database fa-3x mb-3 text-muted"),
+                        html.H4("Sin datos predictivos disponibles", className="text-muted"),
+                        html.P(
+                            f"No se encontraron datos predictivos de {component.title()} para el cliente {client.upper()}.",
+                            className="text-muted mb-2"
+                        ),
+                        html.P(
+                            "Los datos se generarán cuando exista historial suficiente de aceite y telemetría para este componente.",
+                            className="text-muted small"
+                        )
+                    ], className="text-center py-5")
+                ], className="card shadow-sm", style={"marginTop": "16px"})
+            ])
 
         from dashboard.tabs.tab_predictive_component import layout as predictive_component_layout
         return predictive_component_layout(client, component)

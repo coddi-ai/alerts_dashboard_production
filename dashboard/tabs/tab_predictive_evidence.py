@@ -574,7 +574,17 @@ def render_detailed_evidence(unit, df, df_latest, failure_mode, component="motor
     oil_subtitle = f"Variables asociadas a {selected_label}"
 
     if oil_vars and not df_unit.empty:
-        ts_fig = create_oil_timeseries_90d(df_unit, oil_vars, OIL_LABELS)
+        # Get oil range for threshold display
+        df_sorted_oil = df_unit.sort_values("sampleDate")
+        last_sample = df_sorted_oil.iloc[-1]
+        oil_range = last_sample.get("oilHourRange", "LT_1000")
+        
+        # Pass thresholds when there's only 1 variable (for limit lines)
+        ts_fig = create_oil_timeseries_90d(
+            df_unit, oil_vars, OIL_LABELS,
+            oil_thresholds=OIL_THRESHOLDS,
+            oil_range=oil_range,
+        )
         oil_chart = dcc.Graph(figure=ts_fig, config={"displayModeBar": False}) if ts_fig else html.P(
             "No hay suficientes datos históricos.", style={"color": "var(--text-muted)", "fontSize": "13px"})
         oil_table = create_oil_variables_table(df_unit, oil_vars, OIL_LABELS, OIL_THRESHOLDS)

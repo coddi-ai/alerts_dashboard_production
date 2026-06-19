@@ -136,7 +136,7 @@ def create_oil_variables_table(df_unit, variables, oil_labels, oil_thresholds=No
             html.Th("Valor actual", className="fm-th", style={"textAlign": "right"}),
             html.Th("Valor anterior", className="fm-th", style={"textAlign": "right"}),
             html.Th("Variación", className="fm-th", style={"textAlign": "center"}),
-            html.Th("Velocidad", className="fm-th", style={"textAlign": "center"}),
+            html.Th("Vel. Desgaste", className="fm-th", style={"textAlign": "center"}),
             html.Th("Estado", className="fm-th", style={"textAlign": "center"}),
         ])),
         html.Tbody(rows),

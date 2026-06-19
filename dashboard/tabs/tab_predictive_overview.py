@@ -181,7 +181,7 @@ def _failure_table(sorted_df, sort_col, failure_modes):
 
     header = html.Thead(html.Tr([
         html.Th("Unidad", className="fm-th fm-th-unit"),
-        html.Th("Hoy", className="fm-th fm-th-ranking"),
+        _th("Hoy", "ranking"),
         _th("Prom 30d", "avg_ranking_30d"),
         _th("Prom 60d", "avg_ranking_60d"),
         _th("Prom 90d", "ranking_acum_90d"),
@@ -193,6 +193,7 @@ def _failure_table(sorted_df, sort_col, failure_modes):
     for _, r in sorted_df.iterrows():
         status = r["status"]
         colors = _status_colors(status)
+        ranking_today = float(r.get("ranking", 0))
         avg30 = float(r.get("avg_ranking_30d", 0))
         avg60 = float(r.get("avg_ranking_60d", 0))
         avg90 = float(r.get("ranking_acum_90d", 0))
@@ -209,7 +210,7 @@ def _failure_table(sorted_df, sort_col, failure_modes):
 
         cells = [
             html.Td(r["Unit"], className="fm-td fm-td-unit"),
-            html.Td(f"{r['ranking']:.0f}", className="fm-td fm-td-ranking"),
+            _avg_cell(ranking_today, "ranking"),
             _avg_cell(avg30, "avg_ranking_30d"),
             _avg_cell(avg60, "avg_ranking_60d"),
             _avg_cell(avg90, "ranking_acum_90d"),
@@ -308,13 +309,39 @@ def _render_component_overview(df_latest, prev_ranking, component: str):
     sorted_df = latest.sort_values("avg_ranking_30d", ascending=False)
     table_section = html.Div([
         html.Div([
-            html.H4([
-                html.I(className="fas fa-table me-2"),
-                "Riesgo por Modo de Falla"
-            ], className="text-primary mb-3 mt-4 pb-2 border-bottom"),
-            html.P("Vista de modos de falla por unidad", className="text-muted mb-3"),
+            html.Div([
+                html.H4([
+                    html.I(className="fas fa-table me-2"),
+                    "Riesgo por Modo de Falla"
+                ], className="text-primary mb-0"),
+                html.Div([
+                    html.Span("Ordenar por: ", className="text-muted me-2",
+                              style={"fontSize": "0.85rem", "fontWeight": "500"}),
+                    dcc.Dropdown(
+                        id="predictive-fm-sort-selector",
+                        options=[
+                            {"label": "Hoy", "value": "ranking"},
+                            {"label": "30 días", "value": "avg_ranking_30d"},
+                            {"label": "60 días", "value": "avg_ranking_60d"},
+                            {"label": "90 días", "value": "ranking_acum_90d"},
+                        ],
+                        value="avg_ranking_30d",
+                        clearable=False,
+                        style={"width": "140px", "fontSize": "0.85rem"},
+                    ),
+                ], style={"display": "flex", "alignItems": "center"}),
+            ], style={
+                "display": "flex", "justifyContent": "space-between",
+                "alignItems": "center", "borderBottom": "1px solid #dee2e6",
+                "paddingBottom": "12px", "marginBottom": "12px",
+            }),
+            html.P("Vista de modos de falla por unidad — ordenado de mayor a menor riesgo",
+                   className="text-muted mb-3", style={"fontSize": "0.85rem"}),
         ]),
-        _failure_table(sorted_df, "avg_ranking_30d", failure_modes),
+        html.Div(
+            _failure_table(sorted_df, "avg_ranking_30d", failure_modes),
+            id="predictive-fm-table-container",
+        ),
     ], className="card", style={"marginTop": "16px"})
 
     return html.Div([hero, priority, table_section])

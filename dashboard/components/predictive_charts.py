@@ -280,12 +280,15 @@ def create_radar_comparison(unit_row, df_latest, failure_modes):
     return fig
 
 
-def create_oil_timeseries_90d(df_unit, variables, oil_labels):
+def create_oil_timeseries_90d(df_unit, variables, oil_labels, oil_thresholds=None, oil_range=None):
     """
     Crear serie temporal de variables de aceite.
     Ventana: max(últimos 90 días, últimas 3 muestras reales).
     Usa sampleDate como identificador de muestra real.
+    
+    Si hay 1 sola variable y existen umbrales, muestra líneas de límite.
     """
+
     if not variables:
         return None
     
@@ -319,6 +322,8 @@ def create_oil_timeseries_90d(df_unit, variables, oil_labels):
     
     fig = go.Figure()
     
+    show_limits = (len(variables) == 1 and oil_thresholds is not None and oil_range is not None)
+    
     for var in variables:
         if var not in df_filtered.columns:
             continue
@@ -327,15 +332,45 @@ def create_oil_timeseries_90d(df_unit, variables, oil_labels):
         if series.empty:
             continue
         
+        x_dates = pd.to_datetime(series["sampleDate"])
+        y_values = series[var].astype(float)
+        
+        # Main trace: values
         fig.add_trace(go.Scatter(
-            x=pd.to_datetime(series["sampleDate"]),
-            y=series[var].astype(float),
+            x=x_dates,
+            y=y_values,
             mode="lines+markers",
             name=oil_labels.get(var, var),
             line=dict(width=2),
             marker=dict(size=6),
             hovertemplate="%{x|%d %b %Y}<br><b>%{y:.2f}</b><extra></extra>",
         ))
+        
+        # Threshold lines (only for single variable mode)
+        if show_limits and oil_thresholds and var in oil_thresholds:
+            thresholds = oil_thresholds[var].get(oil_range)
+            if thresholds:
+                normal, alert, critic = thresholds
+                x_range = [x_dates.min(), x_dates.max()]
+                
+                fig.add_trace(go.Scatter(
+                    x=x_range, y=[normal, normal],
+                    mode="lines", name=f"Normal ({normal:.0f})",
+                    line=dict(width=1.5, dash="dot", color="#1d9e75"),
+                    hoverinfo="skip",
+                ))
+                fig.add_trace(go.Scatter(
+                    x=x_range, y=[alert, alert],
+                    mode="lines", name=f"Alerta ({alert:.0f})",
+                    line=dict(width=1.5, dash="dot", color="#ef9f27"),
+                    hoverinfo="skip",
+                ))
+                fig.add_trace(go.Scatter(
+                    x=x_range, y=[critic, critic],
+                    mode="lines", name=f"Crítico ({critic:.0f})",
+                    line=dict(width=1.5, dash="dot", color="#e24b4a"),
+                    hoverinfo="skip",
+                ))
     
     fig.update_layout(
         paper_bgcolor="rgba(0,0,0,0)",

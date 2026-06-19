@@ -13,6 +13,7 @@ from dashboard.tabs.tab_predictive_overview import (
     _discover_components,
     _load_component_data as _load_overview_component,
     _render_component_overview,
+    _failure_table,
 )
 from dashboard.tabs.tab_predictive_evidence import (
     _load_component_data as _load_evidence_component,
@@ -106,38 +107,145 @@ def register_callbacks(app):
             ])
 
     # ══════════════════════════════════════════════════════════════════════════
+    # OVERVIEW: Sort failure mode table by selected period
+    # ══════════════════════════════════════════════════════════════════════════
+
+    @app.callback(
+        Output("predictive-fm-table-container", "children"),
+        Input("predictive-fm-sort-selector", "value"),
+        State("predictive-ev-client-store", "data"),
+        State("predictive-ev-component-store", "data"),
+        prevent_initial_call=True,
+    )
+    def sort_failure_mode_table(sort_col, client, component):
+        """Re-sort and re-render the failure mode table based on selected period."""
+        if not sort_col or not client or not component:
+            return no_update
+
+        components = _discover_components(client)
+        filepath = components.get(component)
+        if not filepath:
+            return no_update
+
+        df, df_latest, _ = _load_overview_component(filepath, component)
+        if df_latest is None or df_latest.empty:
+            return no_update
+
+        failure_modes = get_failure_modes_dict(component)
+
+        # Classify status (same logic as _render_component_overview)
+        latest = df_latest.copy()
+        p80_30d = float(latest["avg_ranking_30d"].quantile(0.80))
+        latest["status"] = "Saludable"
+        latest.loc[latest["avg_ranking_30d"] >= p80_30d, "status"] = "Alerta"
+        latest.loc[
+            (latest["ranking"] > 80) & (latest["avg_ranking_30d"] >= p80_30d),
+            "status",
+        ] = "Crítica"
+
+        # Sort by selected column descending
+        if sort_col in latest.columns:
+            sorted_df = latest.sort_values(sort_col, ascending=False)
+        else:
+            sorted_df = latest.sort_values("avg_ranking_30d", ascending=False)
+
+        return _failure_table(sorted_df, sort_col, failure_modes)
+
+    # ══════════════════════════════════════════════════════════════════════════
     # EVIDENCE: Unit banner
     # ══════════════════════════════════════════════════════════════════════════
 
     @app.callback(
         Output("predictive-ev-unit-banner", "children"),
         Input("predictive-ev-unit", "value"),
+        State("predictive-ev-client-store", "data"),
+        State("predictive-ev-component-store", "data"),
     )
-    def update_unit_banner(selected_unit):
+    def update_unit_banner(selected_unit, client, component):
         if not selected_unit:
             return None
+
+        # Load data to get status context
+        ranking_text = ""
+        status_text = ""
+        status_color = "#667eea"
+        if client and component:
+            components = _discover_components(client)
+            filepath = components.get(component)
+            if filepath:
+                _, df_latest = _load_evidence_component(filepath, component)
+                if df_latest is not None and not df_latest.empty:
+                    row = df_latest[df_latest["Unit"] == selected_unit]
+                    if not row.empty:
+                        row = row.iloc[0]
+                        ranking_val = float(row.get("ranking", 0))
+                        ranking_text = f"{ranking_val:.0f}/100"
+                        if ranking_val >= 70:
+                            status_text = "Crítica"
+                            status_color = "#e24b4a"
+                        elif ranking_val >= 40:
+                            status_text = "Alerta"
+                            status_color = "#ef9f27"
+                        else:
+                            status_text = "Saludable"
+                            status_color = "#1d9e75"
+
+        component_label = (component or "").title()
 
         return html.Div([
             html.Div([
                 html.Div([
-                    html.I(className="fas fa-truck me-3", style={"fontSize": "24px"}),
+                    # Unit icon and name
                     html.Div([
-                        html.Div("Unidad Seleccionada", style={
+                        html.I(className="fas fa-truck", style={"fontSize": "28px"}),
+                    ], style={"marginRight": "16px"}),
+                    html.Div([
+                        html.Div("Unidad en Análisis", style={
                             "fontSize": "11px", "fontWeight": "500",
                             "textTransform": "uppercase", "letterSpacing": "0.5px",
-                            "opacity": "0.8", "marginBottom": "4px"
+                            "opacity": "0.8", "marginBottom": "2px"
                         }),
                         html.Div(selected_unit, style={
-                            "fontSize": "28px", "fontWeight": "700", "letterSpacing": "-0.5px"
-                        })
+                            "fontSize": "32px", "fontWeight": "700", "letterSpacing": "-0.5px",
+                            "lineHeight": "1.1"
+                        }),
+                        html.Div(f"Componente: {component_label}", style={
+                            "fontSize": "12px", "opacity": "0.8", "marginTop": "2px"
+                        }),
                     ]),
-                ], style={"display": "flex", "alignItems": "center", "gap": "16px"})
+                ], style={"display": "flex", "alignItems": "center"}),
+                # Status badge on the right
+                html.Div([
+                    html.Div([
+                        html.Div("Ranking Actual", style={
+                            "fontSize": "10px", "textTransform": "uppercase",
+                            "letterSpacing": "0.5px", "opacity": "0.8", "marginBottom": "4px"
+                        }),
+                        html.Div(ranking_text, style={
+                            "fontSize": "24px", "fontWeight": "700"
+                        }),
+                    ], style={"textAlign": "center", "marginRight": "20px"}),
+                    html.Div([
+                        html.Div("Estado", style={
+                            "fontSize": "10px", "textTransform": "uppercase",
+                            "letterSpacing": "0.5px", "opacity": "0.8", "marginBottom": "4px"
+                        }),
+                        html.Span(status_text, style={
+                            "background": "rgba(255,255,255,0.2)",
+                            "padding": "4px 12px", "borderRadius": "12px",
+                            "fontSize": "13px", "fontWeight": "600",
+                            "border": "1px solid rgba(255,255,255,0.4)"
+                        }),
+                    ], style={"textAlign": "center"}),
+                ], style={"display": "flex", "alignItems": "center"}),
             ], style={
-                "background": "linear-gradient(135deg, #667eea 0%, #764ba2 100%)",
-                "color": "white", "padding": "20px 28px", "borderRadius": "12px",
-                "boxShadow": "0 4px 12px rgba(102, 126, 234, 0.3)", "marginBottom": "1.5rem"
+                "display": "flex", "justifyContent": "space-between", "alignItems": "center"
             })
-        ])
+        ], style={
+            "background": f"linear-gradient(135deg, {status_color} 0%, {status_color}dd 100%)",
+            "color": "white", "padding": "20px 28px", "borderRadius": "12px",
+            "boxShadow": f"0 4px 12px {status_color}44", "marginBottom": "1.5rem"
+        })
 
     # ══════════════════════════════════════════════════════════════════════════
     # EVIDENCE: KPIs and fleet comparison (when unit changes)
