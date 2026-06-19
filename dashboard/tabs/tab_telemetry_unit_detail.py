@@ -2,7 +2,7 @@
 Telemetry Unit Detail Tab Layout (Page 2).
 
 Answers: "What data backs the conclusions we are presenting?"
-Shows: Unit AI comment, system risk table, signal overview, signal detail cards.
+Flow: Unit selector → AI comment + Systems table → System selector → Signals + Cards.
 """
 
 from dash import html, dcc, dash_table
@@ -13,7 +13,7 @@ def create_telemetry_unit_detail_layout() -> html.Div:
     """Create unit detail tab layout."""
 
     return html.Div([
-        # Unit Selector
+        # === UNIT SELECTOR ===
         dbc.Card([
             dbc.CardHeader([
                 html.H5([
@@ -22,38 +22,23 @@ def create_telemetry_unit_detail_layout() -> html.Div:
                 ], className="mb-0")
             ], className="bg-light"),
             dbc.CardBody([
-                dbc.Row([
-                    dbc.Col([
-                        html.Label([
-                            html.I(className="fas fa-truck me-1"),
-                            "Unidad"
-                        ], className="fw-bold mb-2"),
-                        dcc.Dropdown(
-                            id='telemetry-detail-unit-selector',
-                            placeholder="Seleccione una unidad...",
-                            clearable=False,
-                            searchable=True
-                        )
-                    ], md=4),
-                    dbc.Col([
-                        html.Label([
-                            html.I(className="fas fa-cogs me-1"),
-                            "Sistema"
-                        ], className="fw-bold mb-2"),
-                        dcc.Dropdown(
-                            id='telemetry-detail-system-selector',
-                            placeholder="Todos los sistemas",
-                            clearable=True
-                        )
-                    ], md=4),
-                ], className="g-3")
+                html.Label([
+                    html.I(className="fas fa-truck me-1"),
+                    "Unidad"
+                ], className="fw-bold mb-2"),
+                dcc.Dropdown(
+                    id='telemetry-detail-unit-selector',
+                    placeholder="Seleccione una unidad...",
+                    clearable=False,
+                    searchable=True
+                )
             ])
         ], className="shadow-sm mb-4"),
 
-        # AI Comment on Unit
+        # === AI COMMENT ON UNIT ===
         html.Div(id='telemetry-detail-ai-comment'),
 
-        # System Risk Table
+        # === SYSTEM RISK TABLE ===
         html.Div([
             html.H4([
                 html.I(className="fas fa-cogs me-2"),
@@ -68,11 +53,8 @@ def create_telemetry_unit_detail_layout() -> html.Div:
                         id='telemetry-detail-system-table',
                         columns=[
                             {'name': 'Sistema', 'id': 'system'},
-                            {'name': 'Risk Score', 'id': 'system_score', 'type': 'numeric'},
                             {'name': 'Estado', 'id': 'system_status'},
-                            {'name': 'Técnicas Activas', 'id': 'n_techniques_triggered', 'type': 'numeric'},
-                            {'name': 'Top Señal', 'id': 'top_signal'},
-                            {'name': 'Top Técnica', 'id': 'top_technique'},
+                            {'name': 'Señales en Alerta', 'id': 'signals_in_alert'},
                         ],
                         data=[],
                         sort_action='native',
@@ -113,7 +95,28 @@ def create_telemetry_unit_detail_layout() -> html.Div:
             ])
         ], className="shadow-sm mb-4"),
 
-        # Signal Overview Table (for selected system)
+        # === SYSTEM SELECTOR ===
+        dbc.Card([
+            dbc.CardHeader([
+                html.H5([
+                    html.I(className="fas fa-cogs me-2"),
+                    "Selección de Sistema"
+                ], className="mb-0")
+            ], className="bg-light"),
+            dbc.CardBody([
+                html.Label([
+                    html.I(className="fas fa-cogs me-1"),
+                    "Sistema"
+                ], className="fw-bold mb-2"),
+                dcc.Dropdown(
+                    id='telemetry-detail-system-selector',
+                    placeholder="Seleccione un sistema...",
+                    clearable=False
+                )
+            ])
+        ], className="shadow-sm mb-4"),
+
+        # === SIGNAL OVERVIEW TABLE ===
         html.Div([
             html.H4([
                 html.I(className="fas fa-wave-square me-2"),
@@ -128,11 +131,8 @@ def create_telemetry_unit_detail_layout() -> html.Div:
                         id='telemetry-detail-signal-table',
                         columns=[
                             {'name': 'Señal', 'id': 'signal'},
-                            {'name': 'Risk Score', 'id': 'risk_score', 'type': 'numeric'},
                             {'name': 'Estado', 'id': 'status'},
-                            {'name': 'Anomalía %', 'id': 'abnormal_pct', 'type': 'numeric'},
-                            {'name': 'Total Eventos', 'id': 'total_events', 'type': 'numeric'},
-                            {'name': 'Episodio Max (min)', 'id': 'max_episode', 'type': 'numeric'},
+                            {'name': 'Diagnóstico IA', 'id': 'ai_message'},
                         ],
                         data=[],
                         sort_action='native',
@@ -145,10 +145,17 @@ def create_telemetry_unit_detail_layout() -> html.Div:
                             'textAlign': 'center'
                         },
                         style_cell={
-                            'textAlign': 'center',
+                            'textAlign': 'left',
                             'padding': '10px',
-                            'fontSize': '14px'
+                            'fontSize': '14px',
+                            'whiteSpace': 'normal',
+                            'height': 'auto',
                         },
+                        style_cell_conditional=[
+                            {'if': {'column_id': 'signal'}, 'width': '20%', 'textAlign': 'center'},
+                            {'if': {'column_id': 'status'}, 'width': '12%', 'textAlign': 'center'},
+                            {'if': {'column_id': 'ai_message'}, 'width': '68%'},
+                        ],
                         style_data_conditional=[
                             {
                                 'if': {'filter_query': '{status} = "Anormal"'},
@@ -173,7 +180,7 @@ def create_telemetry_unit_detail_layout() -> html.Div:
             ])
         ], className="shadow-sm mb-4"),
 
-        # Signal Detail Cards Container (time series + KPI for each signal)
+        # === SIGNAL DETAIL CARDS (time series + KPI) ===
         html.Div([
             html.H4([
                 html.I(className="fas fa-chart-line me-2"),

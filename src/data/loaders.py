@@ -813,6 +813,35 @@ def load_telemetry_baselines(client: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def load_telemetry_limits(client: str) -> pd.DataFrame:
+    """
+    Load computed limits from silver layer, falling back to baselines.
+
+    Limits location: data/telemetry/silver/{client}/limits/limits_{YYYYMMDD}.parquet
+    Fallback: data/telemetry/silver/{client}/baselines/baseline_{YYYYMMDD}.parquet
+
+    Returns:
+        DataFrame with percentile thresholds (P2, P5, P95, P98 at minimum)
+    """
+    if client.lower() != 'cda':
+        return pd.DataFrame()
+
+    # Try limits directory first (new schema)
+    limits_dir = Path(f"data/telemetry/silver/{client.lower()}/limits")
+    if limits_dir.exists():
+        try:
+            limit_files = sorted(limits_dir.glob('limits_*.parquet'))
+            if limit_files:
+                df = safe_read_parquet(limit_files[-1])
+                logger.info(f"Loaded {len(df)} limit records from {limit_files[-1].name}")
+                return df
+        except Exception as e:
+            logger.warning(f"Error loading limits, falling back to baselines: {e}")
+
+    # Fallback to baselines
+    return load_telemetry_baselines(client)
+
+
 def load_silver_telemetry_week(client: str, week: int, year: int) -> pd.DataFrame:
     """
     Load silver layer telemetry data for a specific week.
@@ -840,6 +869,50 @@ def load_silver_telemetry_week(client: str, week: int, year: int) -> pd.DataFram
         return df
     except Exception as e:
         logger.error(f"Error loading silver telemetry week: {e}")
+        return pd.DataFrame()
+
+
+def load_telemetry_ai_comments(client: str, level: str) -> pd.DataFrame:
+    """
+    Load AI diagnostic comments from golden layer.
+
+    Args:
+        client: Client identifier (e.g., 'cda')
+        level: One of 'signal', 'system', 'unit'
+
+    Returns:
+        DataFrame with AI comments for the specified level.
+        Returns empty DataFrame if data not available.
+    """
+    if client.lower() != 'cda':
+        return pd.DataFrame()
+
+    base = Path(f"data/telemetry/golden/{client.lower()}/ai_comments")
+    if not base.exists():
+        return pd.DataFrame()
+
+    filename = f"{level}_comments.parquet"
+
+    # Search in partitioned structure (year=YYYY/week=WW/) or flat
+    try:
+        # Try partitioned read first
+        parquet_files = sorted(base.rglob(filename))
+        if parquet_files:
+            # Load latest partition
+            df = safe_read_parquet(parquet_files[-1])
+            logger.info(f"Loaded {len(df)} {level} AI comments")
+            return df
+
+        # Fallback: try as directory of parquet files
+        level_dir = base / f"{level}_comments"
+        if level_dir.exists():
+            df = safe_read_parquet(level_dir)
+            logger.info(f"Loaded {len(df)} {level} AI comments from directory")
+            return df
+
+        return pd.DataFrame()
+    except Exception as e:
+        logger.error(f"Error loading {level} AI comments: {e}")
         return pd.DataFrame()
 
 

@@ -19,8 +19,9 @@
    - [4. Distribution Shift Analysis](#4-distribution-shift-analysis)
    - [5. Anomaly Detection (LSTM Autoencoder)](#5-anomaly-detection-lstm-autoencoder)
 5. [Multi-Technique Aggregation](#multi-technique-aggregation)
-6. [LLM Integration](#llm-integration)
-7. [Scoring Methodology](#scoring-methodology)
+6. [AI Diagnosis](#ai-diagnosis)
+7. [LLM Integration (Legacy)](#llm-integration-legacy)
+8. [Scoring Methodology](#scoring-methodology)
 8. [Baseline Strategy](#baseline-strategy)
 9. [Pipeline Orchestration](#pipeline-orchestration)
 10. [Operational Guidelines](#operational-guidelines)
@@ -201,6 +202,15 @@ if critical_pct > 0:
 #### Requirements
 - ≥10 unique values per (model, state, signal) for valid percentile computation
 - ≥12 weeks of historical data for stable baseline estimates
+
+#### Limits Persistence
+
+Computed limits (the percentile-based thresholds per model_specification/state/signal) are **persisted to the Silver layer** at `data/telemetry/silver/{client}/limits/limits_{YYYYMMDD}.parquet`. This ensures:
+- **Auditability**: Which thresholds were active when a deviation was flagged
+- **Reproducibility**: Re-run event analysis without recomputing limits
+- **Downstream consumption**: Other tools/dashboards can reference the exact thresholds used
+
+Limits are recomputed and persisted on each pipeline execution. Previous versions are retained for historical traceability.
 
 ---
 
@@ -418,7 +428,133 @@ priority_score = (
 
 ---
 
-## LLM Integration
+## AI Diagnosis
+
+### Purpose
+
+Generate **structured, hierarchical diagnostic comments** by leveraging LLM intelligence against aggregated technique results. This step produces actionable natural language assessments at three levels (Signal → System → Unit), stored independently for dashboard consumption.
+
+Unlike the legacy LLM Integration (which generates ad-hoc explanations attached to health records), AI Diagnosis is a **first-class pipeline step** with its own output schema, storage location, and diagnostic hierarchy.
+
+### Architecture
+
+```
+Aggregated Health (system_health + unit_health)
+ + Technique Results (deviation, events, trend, distribution, autoencoder)
+         │
+         ▼
+  ┌──────────────────────────────┐
+  │     AI Diagnosis Engine      │
+  │                              │
+  │  Level 1: Signal Diagnosis   │  ← "What is remarkable about this signal?"
+  │  Level 2: System Diagnosis   │  ← "What is remarkable about this system?"
+  │  Level 3: Unit Diagnosis     │  ← "What is remarkable about this unit?"
+  │                              │
+  └──────────────┬───────────────┘
+                 │
+                 ▼
+  ┌──────────────────────────────┐
+  │   AI Comments (Golden Layer) │
+  │   Persisted as Parquet/JSON  │
+  └──────────────────────────────┘
+```
+
+### Diagnostic Hierarchy
+
+#### Level 1: Signal Diagnosis
+
+**Input**: All technique results for a specific (unit, signal) pair.
+
+**Question answered**: *"Based on the studies, what is remarkable about this signal (if any)?"*
+
+**Prompt context includes**:
+- Deviation status, abnormal %, critical %
+- Event count, max duration, severity classification
+- Trend direction, slope, significance
+- Distribution shift magnitude and direction
+- Signal metadata (risk_direction, criticality, physical bounds)
+
+**Output**: A structured comment per signal explaining what the combined evidence shows, or `null` if nothing remarkable is detected (Normal across all techniques).
+
+**Skip condition**: All techniques report Normal status for this signal.
+
+#### Level 2: System Diagnosis
+
+**Input**: All signal-level diagnoses within a system + system health score.
+
+**Question answered**: *"Based on the signals status, what is remarkable about this system?"*
+
+**Prompt context includes**:
+- System health score and status
+- Signal diagnoses (Level 1 outputs) for non-Normal signals
+- Number of techniques triggered
+- Inter-signal relationships (e.g., temperature + pressure correlations)
+
+**Output**: A synthesis comment explaining the system condition, cross-signal patterns, and recommended actions.
+
+**Skip condition**: System status is Normal and no signals have remarks.
+
+#### Level 3: Unit Diagnosis
+
+**Input**: All system-level diagnoses + unit health metrics.
+
+**Question answered**: *"With all the prior, what is remarkable about this unit?"*
+
+**Prompt context includes**:
+- Unit overall status and priority score
+- System diagnoses (Level 2 outputs) for non-Normal systems
+- Fleet-relative positioning (how this unit compares)
+- Maintenance urgency indicators
+
+**Output**: An executive-level assessment summarizing the unit condition, identifying the most critical concern, and recommending next steps.
+
+**Skip condition**: Unit status is Normal.
+
+### Generation Strategy
+
+| Level | When Generated | Cost Control |
+|-------|---------------|--------------|
+| Signal | Non-Normal signals only | Skip Normal; batch signals by system |
+| System | Non-Normal systems only | Use Level 1 outputs as context (no re-analysis) |
+| Unit | Non-Normal units only | Use Level 2 outputs as context (no re-analysis) |
+
+### Configuration
+
+```yaml
+ai_comments:
+  model: str                    # LLM model (default: "gpt-4o-mini")
+  temperature: float            # Low for factual (default: 0.2)
+  max_tokens_signal: int        # Per-signal token limit (default: 300)
+  max_tokens_system: int        # Per-system token limit (default: 500)
+  max_tokens_unit: int          # Per-unit token limit (default: 600)
+  rate_limit_delay: float       # Seconds between API calls (default: 0.5)
+  skip_normal: bool             # Skip all Normal entities (default: true)
+  batch_size: int               # Signals per API call for batching (default: 5)
+```
+
+### Output Storage
+
+**Location**: `data/telemetry/golden/{client}/ai_comments/year={YYYY}/week={WW}/`
+
+**Files**:
+- `signal_comments.parquet` — One row per (unit, signal) with non-Normal diagnosis
+- `system_comments.parquet` — One row per (unit, system) with non-Normal diagnosis
+- `unit_comments.parquet` — One row per unit with non-Normal diagnosis
+
+### Relationship to Legacy LLM Integration
+
+The legacy `LLM Integration` step (Phase 10) generates inline explanations attached directly to `system_health.explanation` and `unit_health.executive_summary`. The AI Diagnosis step replaces and supersedes this by:
+
+1. Adding **signal-level** granularity (previously absent)
+2. Storing comments **independently** (not embedded in health records)
+3. Following a **bottom-up** hierarchy (Signal → System → Unit) for consistency
+4. Enabling dashboard access to comments **by level** without parsing health records
+
+The legacy LLM fields remain for backward compatibility but are no longer the primary source of AI commentary for the dashboard.
+
+---
+
+## LLM Integration (Legacy)
 
 ### Purpose
 
@@ -541,15 +677,16 @@ Baselines computed per: `model_specification × signal × operational_state`
 ```
 Phase 1:  Load configuration + telemetry data
 Phase 2:  Preprocess (model specification, validation)
-Phase 3:  Load/compute baselines
+Phase 3:  Load/compute baselines and limits (persist limits to Silver layer)
 Phase 4:  Deviation Analysis (produces risk_level columns)
 Phase 5:  Event Analysis (depends on Phase 4)
 Phase 6:  Trend Analysis (independent)
 Phase 7:  Distribution Shift Analysis (independent)
 Phase 8:  Autoencoder Inference (depends on Phase 4 for training labels)
 Phase 9:  Aggregation (Signal → System → Unit)
-Phase 10: LLM Explanation Generation
-Phase 11: Persist outputs to Golden layer
+Phase 10: AI Diagnosis (Signal → System → Unit comments)
+Phase 11: LLM Explanation Generation (legacy, optional)
+Phase 12: Persist outputs to Golden layer
 ```
 
 ### Technique Dependencies
@@ -573,8 +710,16 @@ Phase 11: Persist outputs to Golden layer
     └──────┬──────┘
            │
            ▼
+    ┌──────────────┐
+    │ AI Diagnosis │ ◄── Aggregated health + all technique evidence
+    │ (Signal →    │
+    │  System →    │
+    │  Unit)       │
+    └──────┬───────┘
+           │
+           ▼
     ┌─────────────┐
-    │ LLM Explain │ ◄── Aggregated health + evidence
+    │ LLM Explain │ ◄── (Legacy, optional)
     └─────────────┘
 ```
 
@@ -588,11 +733,17 @@ Phase 11: Persist outputs to Golden layer
 | Trend Analysis | Weekly | End of ISO week |
 | Distribution Analysis | Weekly | End of ISO week |
 | Aggregation | After each technique run | Technique completion |
-| LLM Explanations | Weekly (or on status change) | Aggregation completion |
+| AI Diagnosis | Weekly (or on status change) | Aggregation completion |
+| LLM Explanations (legacy) | Weekly (or on status change) | Aggregation completion |
 
 ### Output Structure
 
 ```
+data/telemetry/silver/{client}/
+├── Telemetry_Wide_With_States/Week{WW}Year{YYYY}.parquet  (input)
+├── baselines/baseline_{YYYYMMDD}.parquet                  (input)
+└── limits/limits_{YYYYMMDD}.parquet                       (persisted during Phase 3)
+
 data/telemetry/golden/{client}/
 ├── technique_results/
 │   ├── deviation/year=2026/week=22/deviation_results.parquet
@@ -600,6 +751,10 @@ data/telemetry/golden/{client}/
 │   ├── trend/year=2026/week=22/trend_results.parquet
 │   ├── distribution/year=2026/week=22/distribution_results.parquet
 │   └── autoencoder/year=2026/week=22/autoencoder_results.parquet
+├── ai_comments/year=2026/week=22/
+│   ├── signal_comments.parquet
+│   ├── system_comments.parquet
+│   └── unit_comments.parquet
 ├── system_health/year=2026/week=22/system_health.parquet
 ├── unit_health/year=2026/week=22/unit_health.parquet
 └── models/autoencoder/{unit}_{system}_{version}/

@@ -153,6 +153,58 @@ T_09   | 2026-06-03 06:43:00     | Operacional  | 68.7        | 412.8      | 182
 
 ---
 
+### 3. Computed Limits
+
+**Purpose**: Percentile-based thresholds derived from baselines/data, used by Deviation and Event Analysis to classify each telemetry minute into risk levels. Persisted to enable auditability, reproducibility, and downstream consumption without recomputation.
+
+**Location**: `data/telemetry/silver/{client}/limits/`
+
+**File Pattern**: `limits_{YYYYMMDD}.parquet`
+
+**Schema**:
+
+| Column | Type | Nullable | Description |
+|--------|------|----------|-------------|
+| `model_specification` | string | No | Equipment model variant (e.g., "789C", "789C_with_silencer") |
+| `signal` | string | No | Signal name from signal_registry |
+| `state` | string | No | Operational state: "Operacional", "Ralenti", "Apagada" |
+| `P1` | float64 | No | 1st percentile |
+| `P2` | float64 | No | 2nd percentile |
+| `P5` | float64 | No | 5th percentile |
+| `P10` | float64 | No | 10th percentile |
+| `P25` | float64 | No | 25th percentile |
+| `P50` | float64 | No | 50th percentile (median) |
+| `P75` | float64 | No | 75th percentile |
+| `P90` | float64 | No | 90th percentile |
+| `P95` | float64 | No | 95th percentile |
+| `P98` | float64 | No | 98th percentile |
+| `P99` | float64 | No | 99th percentile |
+| `sample_count` | int64 | No | Number of valid samples used for computation |
+| `computation_date` | date | No | Date when limits were computed |
+
+**Constraints**:
+- One row per (model_specification, signal, state) combination
+- Only includes entries with ≥ `min_unique_values` (default: 10) unique samples
+- Percentile values are rounded to 2 decimal places
+- State values restricted to: `["Operacional", "Ralenti", "Apagada"]` (ND excluded)
+
+**Relationship to Baselines**:
+- Baselines are the historical reference distributions (external input)
+- Limits are the operational thresholds derived from data for classification
+- Both co-exist in the silver layer as reference data consumed by downstream techniques
+
+**Refresh Policy**: Recomputed each pipeline execution. Previous versions retained for audit trail.
+
+**Example**:
+```
+model_specification | signal      | state        | P1    | P2    | P5    | ... | P99   | sample_count | computation_date
+789C                | EngCoolTemp | Operacional  | 52.10 | 54.30 | 57.80 | ... | 98.40 | 45230        | 2026-06-10
+789C                | EngCoolTemp | Ralenti      | 38.20 | 39.50 | 41.00 | ... | 72.10 | 12840        | 2026-06-10
+789C_with_silencer  | EngCoolTemp | Operacional  | 53.40 | 55.60 | 58.90 | ... | 99.20 | 38100        | 2026-06-10
+```
+
+---
+
 ## Configuration Files
 
 ### 1. Signal Registry
@@ -448,7 +500,106 @@ llm:
 
 ---
 
-### 6. System Health
+### 6. AI Comments — Signal Level
+
+**Purpose**: Structured AI diagnostic comments per signal, explaining what technique evidence reveals.
+
+**Location**: `data/telemetry/golden/{client}/ai_comments/year={YYYY}/week={WW}/`
+
+**File Pattern**: `signal_comments.parquet`
+
+**Language**: All AI-generated text fields are in **Spanish**.
+
+**Schema**:
+
+| Column | Type | Nullable | Description |
+|--------|------|----------|-------------|
+| `unit` | string | No | Equipment identifier |
+| `signal` | string | No | Signal name |
+| `system` | string | No | System name |
+| `status` | string | No | Aggregated signal status |
+| `risk_score` | float64 | No | Signal risk score at time of diagnosis |
+| `description` | string | No | Brief summary of what was detected (max ~20 words, Spanish) |
+| `explaining` | string | No | Detailed explanation of findings and relevance (2-4 sentences, Spanish) |
+| `techniques_referenced` | string | No | JSON array of technique names that informed the diagnosis |
+| `evaluation_timestamp` | datetime64[ns] | No | When diagnosis was generated |
+| `model_used` | string | No | LLM model identifier |
+
+**Constraints**:
+- Only signals with non-Normal status are included
+- `description`: concise, max ~20 words — explains *what* was detected
+- `explaining`: detailed, 2-4 sentences — explains *what was found* and *why it is relevant*
+- `techniques_referenced` contains only techniques that reported non-Normal for this signal
+- No `recommended_action` at signal level — actions are generated at system/unit level
+
+---
+
+### 7. AI Comments — System Level
+
+**Purpose**: Synthesized AI diagnostic at system level, combining signal-level findings.
+
+**Location**: `data/telemetry/golden/{client}/ai_comments/year={YYYY}/week={WW}/`
+
+**File Pattern**: `system_comments.parquet`
+
+**Language**: All AI-generated text fields are in **Spanish**.
+
+**Schema**:
+
+| Column | Type | Nullable | Description |
+|--------|------|----------|-------------|
+| `unit` | string | No | Equipment identifier |
+| `system` | string | No | System name |
+| `system_status` | string | No | System health status |
+| `system_score` | float64 | No | System health score at time of diagnosis |
+| `description` | string | No | Brief summary of system condition (max ~20 words, Spanish) |
+| `explaining` | string | No | Detailed explanation of findings and relevance (2-4 sentences, Spanish) |
+| `signals_referenced` | string | No | JSON array of signal names discussed |
+| `recommended_action` | string | Yes | Suggested maintenance action (Spanish) |
+| `evaluation_timestamp` | datetime64[ns] | No | When diagnosis was generated |
+| `model_used` | string | No | LLM model identifier |
+
+**Constraints**:
+- Only systems with non-Normal status are included
+- Uses signal-level comments as input context (bottom-up)
+- `recommended_action` is a single actionable sentence, generated with full signal context
+
+---
+
+### 8. AI Comments — Unit Level
+
+**Purpose**: Executive-level AI diagnostic summarizing the unit condition.
+
+**Location**: `data/telemetry/golden/{client}/ai_comments/year={YYYY}/week={WW}/`
+
+**File Pattern**: `unit_comments.parquet`
+
+**Language**: All AI-generated text fields are in **Spanish**.
+
+**Schema**:
+
+| Column | Type | Nullable | Description |
+|--------|------|----------|-------------|
+| `unit` | string | No | Equipment identifier |
+| `overall_status` | string | No | Unit overall status |
+| `priority_score` | float64 | No | Unit priority score at time of diagnosis |
+| `description` | string | No | Brief summary of unit condition (max ~20 words, Spanish) |
+| `explaining` | string | No | Detailed executive assessment (2-4 sentences, Spanish) |
+| `systems_referenced` | string | No | JSON array of system names discussed |
+| `urgency` | string | No | "routine", "monitor", "schedule_inspection", "immediate" |
+| `recommended_action` | string | Yes | Top-priority maintenance recommendation (Spanish) |
+| `evaluation_timestamp` | datetime64[ns] | No | When diagnosis was generated |
+| `model_used` | string | No | LLM model identifier |
+
+**Constraints**:
+- Only units with non-Normal status are included
+- Uses system-level comments as input context (bottom-up)
+- `urgency` maps priority_score ranges to action timelines
+- `recommended_action` generated with full system-level context
+
+---
+
+### 9. System Health
 
 **Purpose**: Aggregated system-level health assessments combining all techniques.
 
@@ -475,7 +626,7 @@ llm:
 
 ---
 
-### 7. Unit Health
+### 10. Unit Health
 
 **Purpose**: Top-level fleet ranking and unit health prioritization.
 
@@ -500,7 +651,7 @@ llm:
 
 ---
 
-### 8. Autoencoder Models (Artifacts)
+### 11. Autoencoder Models (Artifacts)
 
 **Purpose**: Persisted trained LSTM autoencoder models and associated scalers.
 
@@ -549,10 +700,10 @@ llm:
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                         SILVER LAYER (INPUT)                                  │
 │                                                                              │
-│  Telemetry_Wide_With_States/    │    baselines/                              │
-│  Week{WW}Year{YYYY}.parquet     │    baseline_{YYYYMMDD}.parquet             │
-│  [Unit|Fecha|Estado|signals...] │    [model|signal|state|percentiles...]     │
-└───────────┬─────────────────────────────────┬───────────────────────────────┘
+│  Telemetry_Wide_With_States/    │    baselines/          │    limits/        │
+│  Week{WW}Year{YYYY}.parquet     │    baseline_{date}     │    limits_{date}  │
+│  [Unit|Fecha|Estado|signals...] │    .parquet            │    .parquet       │
+└───────────┬─────────────────────────────────┬──────────────────┬────────────┘
             │                                 │
             ▼                                 ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -586,12 +737,15 @@ llm:
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                         GOLDEN LAYER (OUTPUT)                                 │
 │                                                                              │
-│  technique_results/         │  system_health/    │  unit_health/             │
+│  technique_results/         │  ai_comments/      │  system_health/           │
 │  ├── deviation/             │  year=YYYY/        │  year=YYYY/               │
 │  ├── events/                │  week=WW/          │  week=WW/                 │
-│  ├── trend/                 │                    │                            │
-│  ├── distribution/          │  models/           │                            │
-│  └── autoencoder/           │  autoencoder/      │                            │
+│  ├── trend/                 │  ├── signal_       │                            │
+│  ├── distribution/          │  │   comments      │  unit_health/             │
+│  └── autoencoder/           │  ├── system_       │  year=YYYY/               │
+│                             │  │   comments      │  week=WW/                 │
+│                             │  └── unit_         │                            │
+│                             │      comments      │  models/autoencoder/      │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -658,6 +812,48 @@ class UnitHealthSchema(BaseModel):
     evaluation_timestamp: datetime
     baseline_version: str
     executive_summary: Optional[str] = None
+
+
+class SignalCommentSchema(BaseModel):
+    """Validates an AI signal-level comment row."""
+    unit: str
+    signal: str
+    system: str
+    status: str = Field(pattern=r'^(Alerta|Anormal|InsufficientData)$')
+    risk_score: float = Field(ge=0, le=100)
+    description: str = Field(min_length=1)
+    explaining: str = Field(min_length=0)
+    techniques_referenced: str  # JSON array
+    evaluation_timestamp: datetime
+    model_used: str
+
+
+class SystemCommentSchema(BaseModel):
+    """Validates an AI system-level comment row."""
+    unit: str
+    system: str
+    system_status: str = Field(pattern=r'^(Alerta|Anormal|InsufficientData)$')
+    system_score: float = Field(ge=0, le=100)
+    description: str = Field(min_length=1)
+    explaining: str = Field(min_length=0)
+    signals_referenced: str  # JSON array
+    recommended_action: Optional[str] = None
+    evaluation_timestamp: datetime
+    model_used: str
+
+
+class UnitCommentSchema(BaseModel):
+    """Validates an AI unit-level comment row."""
+    unit: str
+    overall_status: str = Field(pattern=r'^(Alerta|Anormal|InsufficientData)$')
+    priority_score: float = Field(ge=0)
+    description: str = Field(min_length=1)
+    explaining: str = Field(min_length=0)
+    systems_referenced: str  # JSON array
+    urgency: str = Field(pattern=r'^(routine|monitor|schedule_inspection|immediate)$')
+    recommended_action: Optional[str] = None
+    evaluation_timestamp: datetime
+    model_used: str
 ```
 
 ### Runtime Validation Pattern
@@ -709,11 +905,12 @@ def validate_output(df: pd.DataFrame, schema_class: type, sample_size: int = 100
 | Output Type | Retention | Rationale |
 |-------------|-----------|-----------|
 | Technique results | 1 year | Sufficient for trend backtesting |
+| AI Comments | 2 years | Historical diagnostic tracking, paired with health |
 | System/Unit health | 2 years | Historical tracking and comparison |
 | Events | 1 year | Operational relevance window |
 | Baselines | All versions | Minimal storage, full auditability |
 | Models | Last 3 versions | Rollback capability |
-| LLM explanations | Stored with health outputs | Paired with assessments |
+| LLM explanations | Stored with health outputs | Paired with assessments (legacy) |
 
 ### Backward Compatibility
 

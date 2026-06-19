@@ -74,7 +74,7 @@ Provide maintenance teams with a **fleet health monitoring dashboard** that answ
 | F1 | Fleet Status | Donut Chart | `unit_health.overall_status` | At-a-glance fleet distribution |
 | F2 | System Heatmap | Heatmap | `system_health` (pivot) | Spot which unit+system combinations are risky |
 | F3 | Priority Table | Data Table | `unit_health` (sorted) | Ranked list for action prioritization |
-| F4 | AI Assessment | Data Table | `unit_health.executive_summary` | Human-readable explanation per unit |
+| F4 | AI Assessment | Data Table | `ai_comments/unit_comments.parquet` | Human-readable diagnosis per unit (from AI Diagnosis step) |
 
 ### Interactivity
 
@@ -96,6 +96,7 @@ Provide maintenance teams with a **fleet health monitoring dashboard** that answ
 ├──────────────────────────────────────────────────────────────────────┤
 │                                                                       │
 │  [AI Comment on Unit]                                                 │
+│  Source: ai_comments/unit_comments.parquet (unit-level diagnosis)      │
 │  "T_12 shows elevated risk in Transmission (lockup slip trending     │
 │   +0.83/day, R²=0.56) and Engine (turbo outlet pressure drifting).   │
 │   Recommend transmission inspection within 48 hours."                 │
@@ -180,6 +181,56 @@ Each signal plot contains:
 - System dropdown → updates signal table and per-signal detail cards
 - Hover on time series → shows exact value, timestamp, and state
 - Signals sorted by risk score (worst first, most important at top)
+
+---
+
+## AI Comments Integration
+
+The dashboard consumes structured AI diagnostic comments produced by the **AI Diagnosis** pipeline step. These comments are stored independently from health records and accessed by level.
+
+### Data Source
+
+```
+data/telemetry/golden/{client}/ai_comments/year={YYYY}/week={WW}/
+├── signal_comments.parquet   → Per-signal diagnostics
+├── system_comments.parquet   → Per-system diagnostics  
+└── unit_comments.parquet     → Per-unit executive diagnostics
+```
+
+### Where AI Comments Appear
+
+| Page | Location | Comment Level | Source File |
+|------|----------|---------------|-------------|
+| Page 1 | AI Assessment Table (F4) | Unit | `unit_comments.parquet` |
+| Page 2 | Unit header section | Unit | `unit_comments.parquet` |
+| Page 2 | System Risk Table (expandable row) | System | `system_comments.parquet` |
+| Page 2 | Signal detail cards (above time series) | Signal | `signal_comments.parquet` |
+
+### Loading Pattern
+
+```python
+@lru_cache(maxsize=1)
+def load_ai_comments(cache_key):
+    """Load AI diagnostic comments from golden layer."""
+    base = Path('data/telemetry/golden/cda/ai_comments')
+    latest = sorted(base.glob('year=*/week=*/'))[-1] if list(base.glob('year=*/')) else None
+    if not latest:
+        return {'signal': pd.DataFrame(), 'system': pd.DataFrame(), 'unit': pd.DataFrame()}
+    return {
+        'signal': pd.read_parquet(latest / 'signal_comments.parquet') if (latest / 'signal_comments.parquet').exists() else pd.DataFrame(),
+        'system': pd.read_parquet(latest / 'system_comments.parquet') if (latest / 'system_comments.parquet').exists() else pd.DataFrame(),
+        'unit': pd.read_parquet(latest / 'unit_comments.parquet') if (latest / 'unit_comments.parquet').exists() else pd.DataFrame(),
+    }
+```
+
+### Display Rules
+
+- If no AI comment exists for an entity (Normal status), show "Operando dentro de parámetros normales."
+- All AI text (`description`, `explaining`, `recommended_action`) is in **Spanish**
+- `description` is shown as a headline/summary; `explaining` is shown expanded or on-demand
+- Unit comments include an `urgency` field → used to style the comment card (green/orange/red border)
+- System and unit comments include `recommended_action` → shown as a callout below the diagnostic text
+- Signal comments show `description` inline above the time series plot; `explaining` available on expand
 
 ---
 

@@ -8,10 +8,12 @@ import pandas as pd
 import json
 from typing import Optional
 
+from dashboard.components.telemetry_charts import translate_system
+
 
 def build_fleet_priority_table(unit_health_df: pd.DataFrame) -> list:
     """
-    Build priority table data sorted by priority_score descending.
+    Build priority table: Unidad | Estado | Sistemas en Alerta.
 
     Returns list of dicts ready for DataTable.
     """
@@ -19,29 +21,24 @@ def build_fleet_priority_table(unit_health_df: pd.DataFrame) -> list:
         return []
 
     df = unit_health_df.copy()
-
-    # Parse top_risk_systems JSON if needed
-    if 'top_risk_systems' in df.columns:
-        df['top_risk_systems'] = df['top_risk_systems'].apply(_parse_json_list)
-
-    # Round numeric columns
-    if 'priority_score' in df.columns:
-        df['priority_score'] = df['priority_score'].round(1)
-    if 'unit_score' in df.columns:
-        df['unit_score'] = df['unit_score'].round(1)
-
     df = df.sort_values('priority_score', ascending=False)
 
-    cols = ['unit', 'overall_status', 'priority_score', 'unit_score',
-            'n_anormal_systems', 'n_alerta_systems', 'top_risk_systems']
+    # Build "sistemas en alerta" column combining anormal + alerta counts
+    n_anormal = df.get('n_anormal_systems', pd.Series(0, index=df.index))
+    n_alerta = df.get('n_alerta_systems', pd.Series(0, index=df.index))
+    df['sistemas_en_alerta'] = (n_anormal.fillna(0) + n_alerta.fillna(0)).astype(int)
+
+    cols = ['unit', 'overall_status', 'sistemas_en_alerta']
     available = [c for c in cols if c in df.columns]
 
     return df[available].to_dict('records')
 
 
-def build_system_risk_table(system_health_df: pd.DataFrame, unit: str) -> list:
+def build_system_risk_table(system_health_df: pd.DataFrame, unit: str, deviation_df: pd.DataFrame = None) -> list:
     """
-    Build system risk table for a specific unit, sorted by system_score descending.
+    Build system risk table: Sistema | Estado | Señales en Alerta.
+
+    Translates system names to Spanish.
     """
     if system_health_df.empty:
         return []
@@ -50,12 +47,23 @@ def build_system_risk_table(system_health_df: pd.DataFrame, unit: str) -> list:
     if df.empty:
         return []
 
-    if 'system_score' in df.columns:
-        df['system_score'] = df['system_score'].round(1)
+    df['system_score'] = df['system_score'].round(1) if 'system_score' in df.columns else 0
     df = df.sort_values('system_score', ascending=False)
 
-    cols = ['system', 'system_score', 'system_status', 'n_techniques_triggered',
-            'top_signal', 'top_technique']
+    # Translate system names
+    df['system'] = df['system'].map(translate_system)
+
+    # Count signals in alert per system from deviation data
+    if deviation_df is not None and not deviation_df.empty:
+        dev_unit = deviation_df[deviation_df['unit'] == unit]
+        alert_counts = dev_unit[dev_unit['status'].isin(['Alerta', 'Anormal'])].groupby('system').size()
+        # Translate keys
+        alert_counts.index = alert_counts.index.map(translate_system)
+        df['signals_in_alert'] = df['system'].map(alert_counts).fillna(0).astype(int)
+    else:
+        df['signals_in_alert'] = 0
+
+    cols = ['system', 'system_status', 'signals_in_alert']
     available = [c for c in cols if c in df.columns]
 
     return df[available].to_dict('records')
@@ -72,32 +80,43 @@ def build_signal_overview_table(
 
     Args:
         deviation_df: Deviation analysis results
-        events_df: Event analysis results
+        events_df: Event analysis results (uses 'feature' column for signal name)
         unit: Selected unit
-        system: Optional system filter
+        system: Optional system filter (in Spanish — will be reverse-translated)
     """
     if deviation_df.empty:
         return []
 
     dev = deviation_df[deviation_df['unit'] == unit].copy()
+
+    # Reverse-translate system name for filtering (Spanish → English)
     if system:
-        dev = dev[dev['system'] == system]
+        reverse_map = {v: k for k, v in {
+            'Engine': 'Motor', 'Transmission': 'Transmisión',
+            'Brakes': 'Frenos', 'Steering': 'Dirección'
+        }.items()}
+        system_en = reverse_map.get(system, system)
+        dev = dev[dev['system'] == system_en]
+
     if dev.empty:
         return []
 
-    # Get latest evaluation per signal
-    if 'evaluation_date' in dev.columns:
-        dev = dev.sort_values('evaluation_date', ascending=False).drop_duplicates(subset=['signal'])
+    # Get latest evaluation per signal (use year/week instead of evaluation_date)
+    if 'year' in dev.columns and 'week' in dev.columns:
+        dev = dev.sort_values(['year', 'week'], ascending=False).drop_duplicates(subset=['signal'])
 
-    # Summarize events per signal
+    # Summarize events per signal — events use 'feature' column, not 'signal'
     event_stats = {}
     if not events_df.empty:
         evt = events_df[events_df['unit'] == unit]
-        if system:
-            evt = evt[evt['system'] == system]
+        # Events don't have 'system' column, match by feature name against signal names
+        signal_list = dev['signal'].tolist()
+        feature_col = 'feature' if 'feature' in evt.columns else 'signal'
+        evt = evt[evt[feature_col].isin(signal_list)]
         if not evt.empty:
-            event_stats = evt.groupby('signal').agg(
-                total_events=('event_id', 'count'),
+            group_col = 'event_group' if 'event_group' in evt.columns else 'event_id'
+            event_stats = evt.groupby(feature_col).agg(
+                total_events=(group_col, 'count'),
                 max_episode=('duration_minutes', 'max')
             ).to_dict('index')
 
@@ -141,11 +160,13 @@ def build_signal_kpi(
         'trend_formula': '-'
     }
 
-    # Event stats
+    # Event stats — events use 'feature' column
     if not events_df.empty:
-        evt = events_df[(events_df['unit'] == unit) & (events_df['signal'] == signal_name)]
+        feature_col = 'feature' if 'feature' in events_df.columns else 'signal'
+        evt = events_df[(events_df['unit'] == unit) & (events_df[feature_col] == signal_name)]
         if not evt.empty:
-            kpi['total_events'] = len(evt)
+            group_col = 'event_group' if 'event_group' in evt.columns else 'event_id'
+            kpi['total_events'] = len(evt[group_col].unique()) if group_col in evt.columns else len(evt)
             kpi['warnings'] = int((evt['event_type_weighted'] == 'warning').sum())
             kpi['longest_episode'] = int(evt['duration_minutes'].max())
 
