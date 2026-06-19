@@ -17,7 +17,7 @@ from pathlib import Path
 # from dashboard.tabs.tab_reports import create_reports_tab
 from dashboard.tabs.tab_alerts import create_layout as create_alerts_tab
 # from dashboard.tabs.tab_mantenciones_general import layout_mantenciones_general
-# from dashboard.tabs.tab_telemetry import create_layout as create_telemetry_tab
+from dashboard.tabs.tab_telemetry import create_layout as create_telemetry_tab
 from dashboard.tabs.tab_overview_general import create_layout as create_overview_general_tab
 from dashboard.tabs.tab_data_freshness import create_layout as create_data_freshness_tab
 from dashboard.tabs.tab_oil import create_layout as create_oil_tab
@@ -383,7 +383,7 @@ def create_main_dashboard(user_data: dict) -> html.Div:
                 # {'id': 'monitoring-hot-sheet', 'label': 'Hot Sheet', 'tab': create_hot_sheet_tab},
                 {'id': 'monitoring-alerts', 'label': 'Alertas', 'tab': create_alerts_tab},
                 # {'id': 'monitoring-menace-control', 'label': 'Control de Amenazas', 'tab': create_menace_control_tab},
-                # {'id': 'monitoring-telemetry', 'label': 'Telemetría', 'tab': create_telemetry_tab},
+                {'id': 'monitoring-telemetry', 'label': 'Telemetría', 'tab': create_telemetry_tab},
                 # {'id': 'monitoring-health-index', 'label': 'Índice de Salud', 'tab': create_health_index_tab},
                 # {'id': 'monitoring-mantentions', 'label': 'Mantenciones', 'tab': layout_mantenciones_general},
                 {'id': 'monitoring-oil', 'label': 'Aceite', 'tab': create_oil_tab}

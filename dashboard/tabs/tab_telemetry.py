@@ -1,69 +1,54 @@
 """
-Main Telemetry Tab with Internal Tabs.
+Main Telemetry Tab — Fleet Health Monitor.
 
-Provides a unified entry point with tabs for Fleet Overview,
-Machine Detail, Component Detail, and Limits.
+Two-page layout:
+- Fleet Overview: Fleet status donut, system heatmap, priority table, AI assessments
+- Unit Detail: System risk table, signal cards with time series + KPI tables
 """
 
 from dash import html, dcc
 import dash_bootstrap_components as dbc
-from src.utils.logger import get_logger
-
-logger = get_logger(__name__)
 
 
-def create_layout() -> html.Div:
+def create_layout(client: str = 'cda') -> html.Div:
     """
-    Create unified telemetry tab layout with internal tabs.
-    
-    Returns:
-        Dash HTML Div with tabbed interface
+    Create unified telemetry health monitor layout with internal tabs.
     """
-    logger.info("Creating unified Telemetry Tab layout with internal tabs")
-
-    layout = html.Div([
+    return html.Div([
         # Header
         dbc.Row([
             dbc.Col([
                 html.H2([
-                    html.I(className="fas fa-satellite-dish me-3"),
-                    "Monitor de Telemetría"
+                    html.I(className="fas fa-heartbeat me-3"),
+                    "Fleet Health Monitor"
                 ], className="text-primary mb-1"),
                 html.P(
-                    "Monitoreo jerárquico de sensores: Flota → Máquina → Componente → Señal",
+                    "Monitoreo de salud de flota basado en telemetría multi-técnica",
                     className="text-muted"
                 )
             ])
         ], className="mb-4"),
 
         # Client restriction notice
-        html.Div(
-            id='telemetry-client-notice',
-            children=[
-                dbc.Alert([
-                    html.I(className="fas fa-info-circle me-2"),
-                    "Este módulo está disponible únicamente para el cliente CDA"
-                ], color="info", className="mb-4")
-            ]
-        ),
-
-        # Persistent store for cross-tab navigation (fleet → component)
-        dcc.Store(id='telemetry-nav-store', data=None),
+        dbc.Alert([
+            html.I(className="fas fa-info-circle me-2"),
+            "Este módulo está disponible únicamente para el cliente CDA"
+        ], color="info", className="mb-4"),
 
         # Internal Tabs
         dcc.Tabs(
-            id='telemetry-tabs',
-            value='fleet',
+            id='telemetry-health-tabs',
+            value='fleet-overview',
             children=[
                 dcc.Tab(
-                    label='Vista Flota',
-                    value='fleet',
+                    label='Vista de Flota',
+                    value='fleet-overview',
                     className='custom-tab',
                     selected_className='custom-tab--selected'
                 ),
                 dcc.Tab(
-                    label='Detalle Componente',
-                    value='component',
+                    label='Detalle de Unidad',
+                    value='unit-detail',
                     className='custom-tab',
                     selected_className='custom-tab--selected'
                 )
@@ -72,9 +57,6 @@ def create_layout() -> html.Div:
         ),
 
         # Tab content container
-        html.Div(id='telemetry-tab-content')
+        html.Div(id='telemetry-health-tab-content')
 
     ], className="container-fluid p-4")
-
-    logger.info("Unified Telemetry Tab layout created successfully")
-    return layout
