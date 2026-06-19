@@ -109,8 +109,6 @@ def calculate_alert_criticality_score(df_alerts: pd.DataFrame, days: int = 30) -
     def categorize_status(score):
         if score == 0:
             return 'Normal'
-        elif score <= 5:
-            return 'Atención'
         elif score <= 15:
             return 'Alerta'
         else:
