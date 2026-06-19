@@ -98,6 +98,10 @@ def register_navigation_callbacks(app: dash.Dash) -> None:
         'monitoring-oil': create_oil_tab,
         # Predictive sections are handled dynamically below
         # 'limits-oil': create_limits_tab,  # Commented - not active
+        # New placeholder sections
+        'integration-sap': lambda: create_placeholder_content('SAP Connection'),
+        'reporting-main': lambda: create_placeholder_content('Reportabilidad'),
+        'admin-main': lambda: create_placeholder_content('Administración'),
     }
 
     def _get_predictive_content(active_section, client):
@@ -195,6 +199,9 @@ def register_navigation_callbacks(app: dash.Dash) -> None:
                                      'monitoring-telemetry', 
                                      'monitoring-mantentions']:
                     content = content_generator(client)
+                elif active_section in ['integration-sap', 'reporting-main', 'admin-main']:
+                    # Placeholder sections don't need client parameter
+                    content = content_generator()
                 else:
                     content = content_generator()
             except TypeError as e:

@@ -327,13 +327,13 @@ def create_placeholder_content(section_name: str) -> html.Div:
             dbc.CardBody([
                 html.Div([
                     html.I(className="fas fa-tools fa-3x mb-3 text-muted"),
-                    html.H3("En Progreso", className="text-muted"),
+                    html.H3("En Desarrollo", className="text-muted"),
                     html.P(
-                        f"La sección {section_name} está actualmente en desarrollo.",
+                        f"Estamos trabajando en la sección {section_name}.",
                         className="text-muted mb-2"
                     ),
                     html.P(
-                        "Esta funcionalidad estará disponible pronto. Consulte el plan de migración para la línea de tiempo.",
+                        "Esta funcionalidad estará disponible pronto.",
                         className="text-muted small"
                     )
                 ], className="text-center py-5")
@@ -396,6 +396,30 @@ def create_main_dashboard(user_data: dict) -> html.Div:
             'subsections': [
                 {'id': f'predictive-{comp}', 'label': comp.title()}
                 for comp in predictive_components
+            ]
+        },
+        {
+            'section': 'integration',
+            'label': 'Integración',
+            'icon': 'fas fa-plug',
+            'subsections': [
+                {'id': 'integration-sap', 'label': 'SAP Connection', 'tab': lambda: create_placeholder_content('SAP Connection')}
+            ]
+        },
+        {
+            'section': 'reporting',
+            'label': 'Reportes',
+            'icon': 'fas fa-file-alt',
+            'subsections': [
+                {'id': 'reporting-main', 'label': 'Reportabilidad', 'tab': lambda: create_placeholder_content('Reportabilidad')}
+            ]
+        },
+        {
+            'section': 'admin',
+            'label': 'Administración',
+            'icon': 'fas fa-cog',
+            'subsections': [
+                {'id': 'admin-main', 'label': 'Administración', 'tab': lambda: create_placeholder_content('Administración')}
             ]
         },
     ]
