@@ -190,7 +190,7 @@ def create_login_page() -> dbc.Container:
             ], width=12, lg=5, xl=4, className='mx-auto')
         ], className="align-items-center min-vh-100")
     ], fluid=True, style={
-        "background": "linear-gradient(135deg, #667eea 0%, #764ba2 100%)",
+        "background": "#00173b",
         "minHeight": "100vh"
     })
 
