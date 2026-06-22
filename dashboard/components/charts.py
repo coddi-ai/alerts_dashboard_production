@@ -6,47 +6,230 @@ import plotly.graph_objects as go
 import plotly.express as px
 import pandas as pd
 import numpy as np
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 
-# Color scheme
+# Color scheme (GR-05: Single status design language)
 STATUS_COLORS = {
     'Normal': '#28a745',   # Green
     'Alerta': '#ffc107',   # Yellow/Amber
-    'Anormal': '#dc3545'   # Red
+    'Anormal': '#dc3545',  # Red
+    'InsufficientData': '#6c757d'  # Neutral gray
 }
 
 
 def create_status_pie_chart(df: pd.DataFrame) -> go.Figure:
     """
-    Create pie chart showing machine status distribution.
+    DEPRECATED: Use create_machine_status_donut instead.
+    
+    Kept for backward compatibility.
+    """
+    return create_machine_status_donut(df)
+
+
+def create_machine_status_donut(df: pd.DataFrame, title: str = "Machine Status Distribution") -> go.Figure:
+    """
+    Create donut chart showing machine status distribution (GR-02, OIL-M-01).
+    
+    - Donut format (not pie)
+    - Total count in center
+    - Clickable segments for filtering
+    - Legend shows count and percentage
     
     Args:
         df: DataFrame with machine statuses (Golden layer - Machine Status schema)
+        title: Chart title
     
     Returns:
-        Plotly figure
+        Plotly figure with clickData support
     """
     if df.empty:
         return go.Figure()
     
     # Use 'overall_status' column
     status_counts = df['overall_status'].value_counts()
+    total_machines = status_counts.sum()
+    
+    # Calculate percentages
+    percentages = (status_counts / total_machines * 100).round(1)
+    
+    # Create labels with count and percentage for legend
+    labels_with_counts = [
+        f"{status}: {count} ({percentages[status]}%)" 
+        for status, count in status_counts.items()
+    ]
     
     fig = go.Figure(data=[go.Pie(
         labels=status_counts.index,
         values=status_counts.values,
         marker=dict(colors=[STATUS_COLORS.get(s, '#999999') for s in status_counts.index]),
-        hole=0.4,
-        textinfo='label+percent+value',
-        textfont=dict(size=14)
+        hole=0.5,  # Donut hole
+        textinfo='label+percent',
+        textfont=dict(size=13),
+        hovertemplate='<b>%{label}</b><br>Count: %{value}<br>Percentage: %{percent}<extra></extra>',
+        text=labels_with_counts,  # For legend
+        textposition='inside'
     )])
     
+    # Add total count annotation in center
+    fig.add_annotation(
+        text=f"<b>{total_machines}</b><br>Total",
+        x=0.5, y=0.5,
+        font=dict(size=20, color='#333'),
+        showarrow=False,
+        xref="paper",
+        yref="paper"
+    )
+    
     fig.update_layout(
-        title="Machine Status Distribution",
-        title_font_size=18,
+        title=dict(
+            text=title,
+            font=dict(size=18)
+        ),
         showlegend=True,
-        height=400
+        legend=dict(
+            orientation="v",
+            yanchor="middle",
+            y=0.5,
+            xanchor="left",
+            x=1.05
+        ),
+        height=400,
+        margin=dict(l=20, r=150, t=60, b=20)
+    )
+    
+    return fig
+
+
+def create_component_stacked_bar_chart(
+    df: pd.DataFrame, 
+    use_normalized: bool = False,
+    title: str = "Component Status Distribution"
+) -> go.Figure:
+    """
+    Create stacked horizontal bar chart for component status distribution (OIL-M-06).
+    
+    Enhanced June 2026: Hover shows which units belong to each component-status combination.
+    
+    Replaces donut chart with scalable categorical comparison.
+    - Each bar = component
+    - Stacks = Normal, Alerta, Anormal
+    - Sorted by highest abnormal burden first
+    - Toggle between original and normalized component names
+    - Hover shows unit IDs for traceability
+    
+    Args:
+        df: DataFrame with classified reports (component-level data)
+        use_normalized: Use componentNameNormalized (grouped) vs componentName (original)
+        title: Chart title
+    
+    Returns:
+        Plotly figure with interactive hover showing unit details
+    """
+    if df.empty:
+        return go.Figure()
+    
+    # Choose component column
+    component_col = 'componentNameNormalized' if use_normalized else 'componentName'
+    
+    # Get latest sample for each unit-component
+    latest_components = df.loc[df.groupby(['unitId', component_col])['sampleDate'].idxmax()]
+    
+    # Count status by component AND collect unit IDs
+    status_by_component = {}
+    unit_lists = {}  # Store which units are in each component-status combination
+    
+    for component in latest_components[component_col].unique():
+        component_df = latest_components[latest_components[component_col] == component]
+        status_counts = component_df['report_status'].value_counts()
+        status_by_component[component] = status_counts.to_dict()
+        
+        # Collect unit IDs for each status
+        unit_lists[component] = {}
+        for status in ['Normal', 'Alerta', 'Anormal']:
+            units = component_df[component_df['report_status'] == status]['unitId'].tolist()
+            unit_lists[component][status] = units
+    
+    # Convert to DataFrame for easier manipulation
+    status_df = pd.DataFrame(status_by_component).T.fillna(0)
+    
+    # Ensure all status columns exist
+    for status in ['Normal', 'Alerta', 'Anormal']:
+        if status not in status_df.columns:
+            status_df[status] = 0
+    
+    # Calculate abnormal burden for sorting (Anormal > Alerta > Normal)
+    status_df['burden'] = (
+        status_df.get('Anormal', 0) * 100 + 
+        status_df.get('Alerta', 0) * 10
+    )
+    
+    # Sort by burden descending
+    status_df = status_df.sort_values('burden', ascending=True)  # True for horizontal bars (bottom to top)
+    status_df = status_df.drop('burden', axis=1)
+    
+    # Title-case component names for display
+    component_names = [str(c).title() for c in status_df.index]
+    
+    # Create stacked horizontal bar chart
+    fig = go.Figure()
+    
+    for status in ['Normal', 'Alerta', 'Anormal']:
+        if status in status_df.columns:
+            # Build custom hover text with unit lists
+            hover_texts = []
+            for component in status_df.index:
+                units = unit_lists.get(component, {}).get(status, [])
+                count = len(units)
+                if count > 0:
+                    # Show first 10 units, indicate if there are more
+                    units_display = ', '.join(units[:10])
+                    if count > 10:
+                        units_display += f'... (+{count-10} more)'
+                    hover_text = f"<b>{status}</b><br>Count: {count}<br>Units: {units_display}"
+                else:
+                    hover_text = f"<b>{status}</b><br>Count: 0"
+                hover_texts.append(hover_text)
+            
+            fig.add_trace(go.Bar(
+                name=status,
+                y=component_names,
+                x=status_df[status],
+                orientation='h',
+                marker=dict(color=STATUS_COLORS[status]),
+                text=status_df[status].astype(int),
+                textposition='inside',
+                hovertemplate='%{hovertext}<extra></extra>',
+                hovertext=hover_texts,
+                customdata=[[unit_lists.get(comp, {}).get(status, [])] for comp in status_df.index]
+            ))
+    
+    fig.update_layout(
+        title=dict(
+            text=title,
+            font=dict(size=16)
+        ),
+        xaxis=dict(
+            title="Number of Components",
+            tickangle=-90
+        ),
+        yaxis_title="Component",
+        barmode='stack',
+        showlegend=True,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1
+        ),
+        height=max(400, len(status_df) * 25),  # Scale height with number of components
+        margin=dict(l=150, r=20, t=80, b=60),
+        hoverlabel=dict(
+            bgcolor="white",
+            font_size=12,
+            font_family="Arial"
+        )
     )
     
     return fig

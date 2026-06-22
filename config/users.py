@@ -27,21 +27,71 @@ USERS: Dict[str, Dict[str, any]] = {
     "admin": {
         "password": hash_password("admin123"),  # Change in production!
         "name": "Administrator",
-        "clients": ["CDA", "EMIN"],  # Access to all clients
+        "clients": ["CDA", "EMIN", "ENEX"],  # Access to all clients
         "role": "admin"
     },
     "cda_user": {
-        "password": hash_password("cda123"),  # Change in production!
-        "name": "CDA User",
+        "password": hash_password("CdA.2026"),  # Change in production!
+        "name": "CDA",
         "clients": ["CDA"],  # Only CDA data
         "role": "client"
     },
     "emin_user": {
-        "password": hash_password("emin123"),  # Change in production!
-        "name": "EMIN User",
+        "password": hash_password("Emin.2026"),  # Change in production!
+        "name": "EMIN",
         "clients": ["EMIN"],  # Only EMIN data
         "role": "client"
+    },
+    "enex_user": {
+        "password": hash_password("Enex.2026"),  # Change in production!
+        "name": "ENEX User",
+        "clients": ["ENEX"],  # Only ENEX data
+        "role": "client"
+    },
+    # Arturo Casanga - CDA Stake holder with access to CDA data
+    "a.casanga": {
+        "password": hash_password("Teck.2026"),  # Change in production!
+        "name": "Arturo Casanga",
+        "clients": ["CDA"],  # Only CDA data
+        "role": "client"
+    },
+    
+    # Eduardo Carvajal - Coddi Administrator with access to cda data
+    "e.carvajal": {
+        "password": hash_password("Coddi.2026"),  # Change in production!
+        "name": "Eduardo Carvajal",
+        "clients": ["CDA"],  # Only CDA data
+        "role": "admin"
+    },
+    # Pedro Cancino - Coddi Administrator with access to all data
+    "p.cancino": {
+        "password": hash_password("Coddi.2026"),  # Change in production!
+        "name": "Pedro Cancino",
+        "clients": ["CDA", "EMIN", "ENEX"],  # Access to all clients
+        "role": "admin"
+    },
+    # Patricio Ortiz - Coddi Administrator with access to all data
+    "p.ortiz": {
+        "password": hash_password("Coddi.2026"),  # Change in production!
+        "name": "Patricio Ortiz",
+        "clients": ["CDA", "EMIN", "ENEX"],  # Access to all clients
+        "role": "admin"
+    },
+    # Francisco Vilches - Coddi Administrator with access to all data
+    "f.vilches": {
+        "password": hash_password("Coddi.2026"),  # Change in production!
+        "name": "Francisco Vilches",
+        "clients": ["CDA", "EMIN", "ENEX"],  # Access to all clients
+        "role": "admin"
+    },
+    # Data Team - Coddi Administrator with access to all data
+    "data_team": {
+        "password": hash_password("Coddi.2026"),  # Change in production!
+        "name": "Data Team",
+        "clients": ["CDA", "EMIN", "ENEX"],  # Access to all clients
+        "role": "admin"
     }
+    
 }
 
 

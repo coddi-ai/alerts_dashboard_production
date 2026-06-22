@@ -1,7 +1,7 @@
 # Multi-Technical Alerts Dashboard - Overview
 
-**Version**: 2.0.0  
-**Last Updated**: February 4, 2026  
+**Version**: 2.1.0  
+**Last Updated**: April 10, 2026  
 **Owner**: Technical Alerts Team
 
 ---
@@ -12,8 +12,9 @@
 2. [Dashboard Purpose](#dashboard-purpose)
 3. [Data Sources](#data-sources)
 4. [Dashboard Architecture](#dashboard-architecture)
-5. [Dashboard Sections](#dashboard-sections)
-6. [Multi-Client Architecture](#multi-client-architecture)
+5. [User Interface Design](#user-interface-design)
+6. [Dashboard Sections](#dashboard-sections)
+7. [Multi-Client Architecture](#multi-client-architecture)
 
 ---
 
@@ -107,6 +108,113 @@ Where:
 - **Storage**: Parquet files (columnar format)
 - **Deployment**: Docker containers
 - **AI Integration**: LLM-based recommendations
+
+### User Interface Design
+
+**Version 2.1** (April 2026) introduced a comprehensive layout redesign focused on professional appearance, improved usability, and modern web application standards.
+
+#### Header / App Bar
+
+The top navigation bar provides a **branded, professional entry point** with clear visual hierarchy:
+
+**Design Features**:
+- **Enhanced Logo Visibility**: Logo displayed in white container with rounded corners and subtle shadow for maximum contrast
+- **Dual-Level Branding**: Platform name with secondary tagline for context
+- **Integrated Client Selector**: Global client context control positioned prominently in header
+- **User Profile Section**: Clean display of username, role, and logout functionality with icon support
+- **Visual Styling**:
+  - Fixed positioning (80px height) for persistent access
+  - Dark background (#1a252f) with accent border (#3498db)
+  - Professional shadow for depth and separation
+  - Consistent spacing with 28px padding
+
+**Key Elements** (left to right):
+1. **Logo** (with white background treatment)
+2. **Platform Title** ("Plataforma de Monitoreo Multi-Técnica")
+3. **Client Context Selector** (dropdown, auto-right aligned)
+4. **User Info** (username, role badge)
+5. **Logout Button** (danger color, prominent)
+
+#### Full-Height Sidebar Navigation
+
+The left sidebar provides **persistent, hierarchical navigation** throughout the application:
+
+**Design Features**:
+- **Full Viewport Height**: Extends from header (80px) to bottom with no gaps
+- **Fixed Positioning**: 260px width, always visible during scroll
+- **Visual Continuity**: Connects seamlessly with header for unified shell layout
+- **Hierarchical Structure**:
+  - Section headers (uppercase, bold, with icons)
+  - Subsection menu items (indented, with chevron indicators)
+- **Interactive States**:
+  - Hover: Light blue background, subtle right shift, chevron animation
+  - Active: Blue accent border, darker background, bold text
+  - Transition animations for smooth interactions
+
+**Navigation Sections**:
+1. **Overview** (dashboard icon)
+   - General
+2. **Monitoring** (chart icon)
+   - Alerts
+   - Telemetry
+   - Health Index
+   - Mantentions
+   - Oil
+3. **Limits** (sliders icon)
+   - Oil
+
+**Styling Details**:
+- Background: #2c3e50 (dark blue-gray)
+- Typography: Clean sans-serif with varied weights for hierarchy
+- Spacing: 24px header padding, 12px item spacing
+- Icons: FontAwesome 5 for consistent iconography
+- Scrollable menu area for extensibility
+
+#### Content Area Layout
+
+The main content area provides **optimized space for visualizations and data**:
+
+**Design Features**:
+- **Proper Margins**: Left margin (260px) + top margin (80px) to accommodate fixed header/sidebar
+- **Clean Background**: Light gray (#f8f9fa) for contrast with white cards
+- **Generous Padding**: 28px padding for breathing room
+- **Full Viewport Usage**: min-height ensures full page coverage
+
+#### Global Controls
+
+**Client Context Selector**:
+- **Location**: Header (between branding and user info)
+- **Purpose**: Global filter affecting all dashboard views
+- **Behavior**: Persistent across all sections, non-clearable
+- **Styling**: White background dropdown with 200px minimum width
+
+#### Layout Consistency
+
+**Spacing System**:
+- Header height: 80px (fixed)
+- Sidebar width: 260px (fixed)
+- Content padding: 28px (standard)
+- Element spacing: 12px (small), 24px (medium), 32px (large)
+
+**Color Palette**:
+- Primary brand: #3498db (blue)
+- Dark backgrounds: #1a252f (header), #2c3e50 (sidebar)
+- Content background: #f8f9fa (light gray)
+- Text: White on dark, dark on light
+- Accents: rgba overlays for hover states
+
+**Typography Scale**:
+- Page titles: 1.1rem, weight 700
+- Section headers: 0.95rem, weight 600, uppercase
+- Menu items: 0.9rem, weight 400-600
+- Body text: 0.9rem, weight 400
+
+#### Responsive Behavior
+
+- Fixed header maintains branding and global controls on scroll
+- Sidebar remains accessible at all times
+- Content area scrolls independently
+- Consistent layout across different screen heights
 
 ---
 
@@ -341,6 +449,16 @@ Alerts are generated through technique-specific logic:
 ---
 
 ## 🔄 Version History
+
+### Version 2.1.0 (April 2026)
+- **Major UI/UX Redesign**: Professional dashboard layout overhaul
+- **Enhanced Header**: Improved logo visibility with white container treatment, dual-level branding
+- **Global Client Selector**: Moved to header as primary control for better UX
+- **Full-Height Sidebar**: Seamless navigation layout with no gaps, fixed positioning
+- **Improved Navigation Styling**: Interactive states (hover, active) with smooth transitions
+- **Consistent Spacing System**: Standardized margins, padding across all layout components
+- **Visual Hierarchy**: Clear typography scale, color palette, and element organization
+- **Unified Shell Layout**: Header, sidebar, and content area work as cohesive application framework
 
 ### Version 2.0.0 (February 2026)
 - Multi-technique integration architecture

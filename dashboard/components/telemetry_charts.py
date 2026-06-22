@@ -1,38 +1,53 @@
 """
-Chart components for Telemetry Dashboard.
+Chart components for Telemetry Health Dashboard.
 
-Reusable Plotly figure builders for telemetry monitoring visualizations.
+Plotly figure builders for fleet heatmap and signal time series cards.
 """
 
 import pandas as pd
 import numpy as np
-import json
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional
+import yaml
+from pathlib import Path
+from typing import Optional, Dict
+from functools import lru_cache
 
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from src.utils.logger import get_logger
-
-logger = get_logger(__name__)
-
-# ========================================
-# COLOR SCHEMES
-# ========================================
-
 STATUS_COLORS = {
-    'Normal': '#28a745',
-    'Alerta': '#ffc107',
-    'Anormal': '#dc3545',
-    'InsufficientData': '#6c757d'
+    'Normal': '#2ecc71',
+    'Alerta': '#f39c12',
+    'Anormal': '#e74c3c',
+    'InsufficientData': '#95a5a6'
 }
 
-HISTORICAL_COLOR = '#B0C4DE'  # Light steel blue
+# English → Spanish system name translation
+SYSTEM_TRANSLATION = {
+    'Engine': 'Motor',
+    'Transmission': 'Transmisión',
+    'Brakes': 'Frenos',
+    'Steering': 'Dirección',
+}
+
+
+def translate_system(name: str) -> str:
+    """Translate system name from English to Spanish."""
+    return SYSTEM_TRANSLATION.get(name, name)
+
+
+@lru_cache(maxsize=1)
+def load_signal_registry(client: str = 'cda') -> Dict[str, str]:
+    """Load signal registry and return name → display_name mapping."""
+    path = Path(f'data/telemetry/config/{client}/signal_registry.yaml')
+    if not path.exists():
+        return {}
+    with open(path, 'r', encoding='utf-8') as f:
+        data = yaml.safe_load(f)
+    return {s['name']: s['display_name'] for s in data.get('signals', [])}
 
 
 def _empty_figure(message: str = "Sin datos disponibles") -> go.Figure:
-    """Create an empty figure with a message."""
+    """Create an empty figure with a centered message."""
     fig = go.Figure()
     fig.add_annotation(
         text=message,
@@ -40,569 +55,269 @@ def _empty_figure(message: str = "Sin datos disponibles") -> go.Figure:
         x=0.5, y=0.5, showarrow=False,
         font=dict(size=14, color='gray')
     )
+    fig.update_layout(xaxis=dict(visible=False), yaxis=dict(visible=False), height=300)
+    return fig
+
+
+def build_fleet_heatmap(system_health_df: pd.DataFrame, unit_health_df: pd.DataFrame) -> go.Figure:
+    """
+    Build system health heatmap (Units rows × Systems cols) with unit status column.
+
+    Sorted by priority score (worst at top). Includes overall_status as last column.
+    """
+    if system_health_df.empty:
+        return _empty_figure("Sin datos de sistemas disponibles")
+
+    # Join priority and status for sorting
+    priority_map = {}
+    status_map_units = {}
+    if not unit_health_df.empty:
+        if 'priority_score' in unit_health_df.columns:
+            priority_map = unit_health_df.set_index('unit')['priority_score'].to_dict()
+        if 'overall_status' in unit_health_df.columns:
+            status_map_units = unit_health_df.set_index('unit')['overall_status'].to_dict()
+
+    # Translate system names
+    df = system_health_df.copy()
+    df['system_es'] = df['system'].map(translate_system)
+
+    # Pivot: units as rows, systems (spanish) as columns, values = system_score
+    pivot = df.pivot_table(
+        index='unit', columns='system_es', values='system_score', aggfunc='first'
+    )
+
+    # Sort by priority (descending = worst at top)
+    pivot['_priority'] = pivot.index.map(lambda u: priority_map.get(u, 0))
+    pivot = pivot.sort_values('_priority', ascending=False).drop(columns='_priority')
+
+    # Add Estado column (mapped to numeric for color: Anormal=90, Alerta=50, Normal=10)
+    status_numeric = {'Anormal': 90, 'Alerta': 50, 'Normal': 10, 'InsufficientData': 5}
+    pivot['Estado'] = pivot.index.map(
+        lambda u: status_numeric.get(status_map_units.get(u, 'Normal'), 10)
+    )
+
+    # Map scores to status text for hover
+    status_map_sys = df.pivot_table(
+        index='unit', columns='system_es', values='system_status', aggfunc='first'
+    )
+
+    # Build custom hover text
+    hover_text = []
+    for unit in pivot.index:
+        row_hover = []
+        for sys in pivot.columns:
+            if sys == 'Estado':
+                unit_status = status_map_units.get(unit, 'Normal')
+                row_hover.append(f"<b>{unit}</b><br>Estado General: {unit_status}")
+            else:
+                score = pivot.loc[unit, sys]
+                status = status_map_sys.loc[unit, sys] if unit in status_map_sys.index and sys in status_map_sys.columns else ''
+                row_hover.append(
+                    f"<b>{unit}</b> — {sys}<br>Estado: {status}<br>Risk Score: {score:.1f}"
+                    if pd.notna(score) else ""
+                )
+        hover_text.append(row_hover)
+
+    # Semantic color scale (soft, professional)
+    z_values = pivot.values
+    colorscale = [
+        [0.00, '#f0fff4'],   # very low risk — pale green
+        [0.20, '#c6f6d5'],   # low — soft green
+        [0.40, '#fefcbf'],   # moderate — soft yellow
+        [0.60, '#fed7aa'],   # elevated — soft orange
+        [0.80, '#feb2b2'],   # high — soft red
+        [1.00, '#dc3545'],   # critical — danger red
+    ]
+
+    fig = go.Figure(data=go.Heatmap(
+        z=z_values,
+        x=pivot.columns.tolist(),
+        y=pivot.index.tolist(),
+        colorscale=colorscale,
+        zmin=0,
+        zmax=100,
+        texttemplate='%{z:.1f}',
+        textfont=dict(size=11, color='#1a252f'),
+        hovertext=hover_text,
+        hoverinfo='text',
+        xgap=2,
+        ygap=2,
+        colorbar=dict(
+            title=dict(text="Risk Score", font=dict(size=11)),
+            thickness=12,
+            len=0.9,
+            tickvals=[0, 20, 40, 60, 80, 100],
+            ticktext=["0", "20", "40", "60", "80", "100"],
+            tickfont=dict(size=10),
+        )
+    ))
+
     fig.update_layout(
-        xaxis=dict(visible=False),
-        yaxis=dict(visible=False),
-        height=300
+        height=max(280, 48 * len(pivot)),
+        margin=dict(t=10, b=30, l=70, r=60),
+        xaxis=dict(side='top', tickangle=0, tickfont=dict(size=12, color='#1a252f')),
+        yaxis=dict(autorange='reversed', tickfont=dict(size=11, color='#1a252f')),
+        plot_bgcolor='white',
+        paper_bgcolor='white',
     )
     return fig
 
 
-# ========================================
-# FLEET OVERVIEW CHARTS
-# ========================================
-
-def build_fleet_kpi_cards(machine_df: pd.DataFrame) -> go.Figure:
+def build_heatmap_insights(system_health_df: pd.DataFrame, unit_health_df: pd.DataFrame) -> dict:
     """
-    Build KPI indicator cards for fleet health overview.
-    
-    Args:
-        machine_df: DataFrame with machine status (filtered to latest week)
-    
-    Returns:
-        Plotly Figure with 4 indicator traces
+    Extract insight KPIs for the heatmap header.
+
+    Returns dict with: most_risky_unit, most_critical_system, max_score
     """
-    if machine_df.empty:
-        return _empty_figure("Sin datos de flota disponibles")
+    insights = {
+        'most_risky_unit': '-',
+        'most_critical_system': '-',
+        'max_score': 0.0,
+    }
 
-    try:
-        total_units = len(machine_df)
-        status_counts = machine_df['overall_status'].value_counts()
+    if unit_health_df.empty:
+        return insights
 
-        normal_count = status_counts.get('Normal', 0)
-        alerta_count = status_counts.get('Alerta', 0)
-        anormal_count = status_counts.get('Anormal', 0)
+    # Most risky unit
+    top_unit = unit_health_df.sort_values('priority_score', ascending=False).iloc[0]
+    insights['most_risky_unit'] = top_unit['unit']
 
-        normal_pct = (normal_count / total_units) * 100 if total_units > 0 else 0
-        alerta_pct = (alerta_count / total_units) * 100 if total_units > 0 else 0
-        anormal_pct = (anormal_count / total_units) * 100 if total_units > 0 else 0
+    # Most critical system (highest system_score)
+    if not system_health_df.empty:
+        top_sys = system_health_df.sort_values('system_score', ascending=False).iloc[0]
+        insights['most_critical_system'] = translate_system(top_sys['system'])
+        insights['max_score'] = round(top_sys['system_score'], 1)
 
-        fig = make_subplots(
-            rows=1, cols=4,
-            specs=[[{'type': 'indicator'}] * 4],
-            subplot_titles=('Total Unidades', 'Normal', 'Alerta', 'Anormal')
-        )
-
-        # Total Units
-        fig.add_trace(go.Indicator(
-            mode="number",
-            value=total_units,
-            number={'font': {'size': 40}}
-        ), row=1, col=1)
-
-        # Normal
-        fig.add_trace(go.Indicator(
-            mode="number",
-            value=normal_count,
-            title={'text': f"{normal_pct:.1f}%"},
-            number={'font': {'size': 40, 'color': STATUS_COLORS['Normal']}}
-        ), row=1, col=2)
-
-        # Alerta
-        fig.add_trace(go.Indicator(
-            mode="number",
-            value=alerta_count,
-            title={'text': f"{alerta_pct:.1f}%"},
-            number={'font': {'size': 40, 'color': STATUS_COLORS['Alerta']}}
-        ), row=1, col=3)
-
-        # Anormal
-        fig.add_trace(go.Indicator(
-            mode="number",
-            value=anormal_count,
-            title={'text': f"{anormal_pct:.1f}%"},
-            number={'font': {'size': 40, 'color': STATUS_COLORS['Anormal']}}
-        ), row=1, col=4)
-
-        fig.update_layout(
-            height=200,
-            showlegend=False,
-            margin=dict(t=40, b=10, l=10, r=10)
-        )
-
-        return fig
-
-    except Exception as e:
-        logger.error(f"Error building fleet KPI cards: {e}")
-        return _empty_figure(f"Error: {str(e)}")
+    return insights
 
 
-def build_fleet_pie_chart(machine_df: pd.DataFrame) -> go.Figure:
-    """
-    Build status distribution pie chart for fleet overview.
-    
-    Args:
-        machine_df: DataFrame with machine status (filtered to latest week)
-    
-    Returns:
-        Plotly Figure with pie chart
-    """
-    if machine_df.empty:
-        return _empty_figure("Sin datos de flota disponibles")
-
-    try:
-        status_counts = machine_df['overall_status'].value_counts()
-
-        fig = go.Figure(data=[go.Pie(
-            labels=status_counts.index,
-            values=status_counts.values,
-            marker=dict(colors=[STATUS_COLORS.get(s, '#999') for s in status_counts.index]),
-            textinfo='label+value+percent',
-            textposition='auto',
-            hovertemplate='%{label}<br>Cantidad: %{value}<br>Porcentaje: %{percent}<extra></extra>'
-        )])
-
-        fig.update_layout(
-            title_text="Distribución de Estado de Flota",
-            height=400,
-            showlegend=True,
-            legend=dict(orientation='h', yanchor='bottom', y=-0.1, xanchor='center', x=0.5),
-            margin=dict(t=50, b=50, l=20, r=20)
-        )
-
-        return fig
-
-    except Exception as e:
-        logger.error(f"Error building fleet pie chart: {e}")
-        return _empty_figure(f"Error: {str(e)}")
-
-
-# ========================================
-# MACHINE DETAIL CHARTS
-# ========================================
-
-def build_component_radar_chart(component_details: List[Dict]) -> go.Figure:
-    """
-    Build radar chart showing component health scores.
-    
-    Args:
-        component_details: List of component dictionaries with 'component' and 'component_score'
-    
-    Returns:
-        Plotly Figure with radar chart
-    """
-    if not component_details:
-        return _empty_figure("Sin datos de componentes disponibles")
-
-    try:
-        df = pd.DataFrame(component_details)
-
-        if 'component' not in df.columns or 'component_score' not in df.columns:
-            return _empty_figure("Faltan campos de datos de componentes")
-
-        # Sort by component name
-        df = df.sort_values('component')
-
-        categories = df['component'].tolist()
-        values = df['component_score'].tolist()
-
-        # Close the radar polygon
-        categories_closed = categories + [categories[0]]
-        values_closed = values + [values[0]]
-
-        # Determine fill color based on worst status
-        statuses = df.get('component_status', pd.Series(['Normal'] * len(df)))
-        if 'Anormal' in statuses.values:
-            fill_color = 'rgba(220, 53, 69, 0.2)'
-            line_color = STATUS_COLORS['Anormal']
-        elif 'Alerta' in statuses.values:
-            fill_color = 'rgba(255, 193, 7, 0.2)'
-            line_color = STATUS_COLORS['Alerta']
-        else:
-            fill_color = 'rgba(40, 167, 69, 0.2)'
-            line_color = STATUS_COLORS['Normal']
-
-        fig = go.Figure()
-
-        fig.add_trace(go.Scatterpolar(
-            r=values_closed,
-            theta=categories_closed,
-            fill='toself',
-            fillcolor=fill_color,
-            line=dict(color=line_color, width=2),
-            marker=dict(size=8, color=line_color),
-            name='Score Componente',
-            hovertemplate='%{theta}<br>Score: %{r:.3f}<extra></extra>'
-        ))
-
-        fig.update_layout(
-            polar=dict(
-                radialaxis=dict(
-                    visible=True,
-                    range=[0, max(values) * 1.2 if max(values) > 0 else 1],
-                    showticklabels=True,
-                    tickfont=dict(size=9)
-                ),
-                angularaxis=dict(tickfont=dict(size=10))
-            ),
-            showlegend=False,
-            title="Radar de Salud de Componentes",
-            height=400,
-            margin=dict(t=50, b=20, l=60, r=60)
-        )
-
-        return fig
-
-    except Exception as e:
-        logger.error(f"Error building component radar chart: {e}")
-        return _empty_figure(f"Error: {str(e)}")
-
-
-# ========================================
-# COMPONENT DETAIL CHARTS
-# ========================================
-
-def build_weekly_boxplots(
-    unit_id: str,
-    component: str,
-    signals_table: pd.DataFrame,
-    combined_df: pd.DataFrame,
-    baseline_df: pd.DataFrame,
-    current_week: int,
-    current_year: int
+def build_signal_timeseries_card(
+    signal_name: str,
+    raw_df: pd.DataFrame,
+    limits_df: pd.DataFrame,
+    trend_df: pd.DataFrame,
+    unit: Optional[str] = None
 ) -> go.Figure:
     """
-    Build weekly distribution boxplots with baseline bands for multiple signals.
-    
-    Horizontal boxplots showing 6 weeks of data per signal, with current week
-    colored by evaluation status and P5-P95 baseline bands.
-    
+    Build time series figure for a single signal.
+
+    Includes:
+    - 30-min rolling mean (blue line)
+    - P95/P98 limits (dashed orange/red horizontal lines)
+    - P5/P2 limits (dashed orange/red for low risk)
+    - Trend regression line (if significant)
+
     Args:
-        unit_id: Selected unit ID
-        component: Selected component name
-        signals_table: DataFrame with signal evaluations (signal, signal_status, score)
-        combined_df: Concatenated silver data for all weeks
-        baseline_df: Baseline thresholds DataFrame
-        current_week: Current evaluation week number
-        current_year: Current evaluation year
-    
-    Returns:
-        Plotly Figure with multi-signal boxplot grid
+        signal_name: Column name in raw_df
+        raw_df: Silver telemetry filtered to one unit
+        limits_df: Limits/baselines with Unit/Signal/EstadoMaquina/P2/P5/P95/P98
+        trend_df: Trend results for this unit+signal
+        unit: Unit identifier for limits lookup
     """
-    if signals_table.empty or combined_df.empty:
-        return _empty_figure("Sin datos de señales disponibles para gráficos")
+    if raw_df.empty or signal_name not in raw_df.columns:
+        return _empty_figure(f"Sin datos para {signal_name}")
 
-    try:
-        signal_list = signals_table['signal'].tolist()
-        num_signals = len(signal_list)
+    df = raw_df[['Fecha', signal_name, 'Estado']].dropna(subset=[signal_name]).copy()
+    df = df.sort_values('Fecha')
 
-        if num_signals == 0:
-            return _empty_figure("Sin señales para graficar")
+    if df.empty:
+        return _empty_figure(f"Sin datos válidos para {signal_name}")
 
-        # Determine grid layout (max 2 columns)
-        if num_signals == 1:
-            n_rows, n_cols = 1, 1
-        elif num_signals == 2:
-            n_rows, n_cols = 1, 2
-        else:
-            n_cols = 2
-            n_rows = (num_signals + 1) // 2
+    # 30-min rolling mean
+    df['rolling_mean'] = df[signal_name].rolling(window=30, min_periods=5).mean()
 
-        # Create subplots
-        fig = make_subplots(
-            rows=n_rows,
-            cols=n_cols,
-            subplot_titles=[s for s in signal_list],
-            vertical_spacing=0.08,
-            horizontal_spacing=0.10,
-            shared_yaxes=True if n_cols > 1 else False
-        )
+    fig = go.Figure()
 
-        # Get baselines for this unit
-        unit_baselines = pd.DataFrame()
-        if baseline_df is not None and not baseline_df.empty:
-            unit_baselines = baseline_df[
-                (baseline_df['Unit'] == unit_id) &
-                (baseline_df['Signal'].isin(signal_list))
-            ].copy()
+    # Main signal line (rolling mean)
+    fig.add_trace(go.Scatter(
+        x=df['Fecha'],
+        y=df['rolling_mean'],
+        mode='lines',
+        name='Media móvil 30min',
+        line=dict(color='#2c3e50', width=1.5),
+        hovertemplate='%{x}<br>Valor: %{y:.2f}<extra></extra>'
+    ))
 
-        # Sort weeks chronologically (most recent at top)
-        week_labels_sorted = sorted(
-            combined_df['week_label'].unique(),
-            key=lambda x: (int(x.split('/')[1]), int(x.split()[1].split('/')[0])),
-            reverse=True
-        )
+    # Limits reference lines (from limits or baselines)
+    if not limits_df.empty and unit:
+        # Support both column naming conventions
+        unit_col = 'Unit' if 'Unit' in limits_df.columns else 'unit'
+        signal_col = 'Signal' if 'Signal' in limits_df.columns else 'signal'
+        state_col = 'EstadoMaquina' if 'EstadoMaquina' in limits_df.columns else 'state'
 
-        for idx, signal_name in enumerate(signal_list):
-            row = (idx // n_cols) + 1
-            col = (idx % n_cols) + 1
+        bl = limits_df[
+            (limits_df[unit_col] == unit) &
+            (limits_df[signal_col] == signal_name)
+        ]
+        # Prefer 'Operacional' states (match prefix or exact)
+        if not bl.empty:
+            op_mask = bl[state_col].str.startswith('Operacional')
+            if op_mask.any():
+                bl = bl[op_mask]
+            # If multiple operational states, take the one with highest sample_count
+            if len(bl) > 1 and 'sample_count' in bl.columns:
+                bl = bl.sort_values('sample_count', ascending=False)
+            bl_row = bl.iloc[0]
+            x_range = [df['Fecha'].min(), df['Fecha'].max()]
 
-            if signal_name not in combined_df.columns:
-                continue
-
-            signal_data = combined_df[combined_df[signal_name].notna()].copy()
-            if signal_data.empty:
-                continue
-
-            # Get signal status
-            signal_row = signals_table[signals_table['signal'] == signal_name]
-            signal_status = 'Normal'
-            if not signal_row.empty and 'signal_status' in signal_row.columns:
-                signal_status = signal_row.iloc[0]['signal_status']
-
-            current_week_color = STATUS_COLORS.get(signal_status, STATUS_COLORS['Normal'])
-
-            # Get baselines
-            percentile_refs = {}
-            if not unit_baselines.empty:
-                signal_baselines = unit_baselines[unit_baselines['Signal'] == signal_name]
-                if not signal_baselines.empty:
-                    percentile_refs = {
-                        'P2': signal_baselines['P2'].mean(),
-                        'P5': signal_baselines['P5'].mean(),
-                        'P95': signal_baselines['P95'].mean(),
-                        'P98': signal_baselines['P98'].mean()
-                    }
-
-            # Add boxplots per week
-            for week_label in week_labels_sorted:
-                week_data = signal_data[signal_data['week_label'] == week_label][signal_name]
-                if week_data.empty:
-                    continue
-
-                is_current = (week_label == f'Sem {current_week:02d}/{current_year}')
-                box_color = current_week_color if is_current else HISTORICAL_COLOR
-
-                # Violin (density)
-                fig.add_trace(
-                    go.Violin(
-                        x=week_data,
-                        y=[week_label] * len(week_data),
-                        orientation='h',
-                        side='both',
-                        line_color=box_color,
-                        fillcolor=box_color,
-                        opacity=0.3,
-                        points=False,
-                        meanline_visible=False,
-                        showlegend=False,
-                        width=0.8,
-                        hoverinfo='skip'
-                    ),
-                    row=row, col=col
-                )
-
-                # Box (median + quartiles)
-                fig.add_trace(
-                    go.Box(
-                        x=week_data,
-                        y=[week_label] * len(week_data),
-                        orientation='h',
-                        boxmean=False,
-                        marker=dict(color=box_color, opacity=0.7, size=3),
-                        line=dict(width=2 if is_current else 1, color=box_color),
-                        fillcolor='rgba(255,255,255,0)',
-                        boxpoints=False,
-                        showlegend=False,
-                        width=0.4,
-                        hovertemplate=(
-                            f'<b>{week_label}</b><br>'
-                            'Mediana: %{x:.2f}<br>'
-                            '<extra></extra>'
-                        )
-                    ),
-                    row=row, col=col
-                )
-
-            # Add baseline bands
-            if percentile_refs:
-                fig.add_vrect(
-                    x0=percentile_refs['P5'],
-                    x1=percentile_refs['P95'],
-                    fillcolor='rgba(40, 167, 69, 0.1)',
-                    line_width=0,
-                    row=row, col=col,
-                    layer='below'
-                )
-                fig.add_vline(
-                    x=percentile_refs['P2'],
-                    line=dict(color='rgba(220, 53, 69, 0.3)', dash='dot', width=1),
-                    row=row, col=col
-                )
-                fig.add_vline(
-                    x=percentile_refs['P98'],
-                    line=dict(color='rgba(220, 53, 69, 0.3)', dash='dot', width=1),
-                    row=row, col=col
-                )
-
-        # Add status legend traces
-        for status, color in STATUS_COLORS.items():
-            if status != 'InsufficientData':
+            if 'P95' in bl_row.index and pd.notna(bl_row['P95']):
                 fig.add_trace(go.Scatter(
-                    x=[None], y=[None], mode='markers',
-                    marker=dict(size=10, color=color),
-                    name=status, showlegend=True
+                    x=x_range, y=[bl_row['P95']] * 2,
+                    mode='lines', name='P95',
+                    line=dict(color='#f39c12', dash='dash', width=1),
+                    showlegend=True
                 ))
-        fig.add_trace(go.Scatter(
-            x=[None], y=[None], mode='markers',
-            marker=dict(size=10, color=HISTORICAL_COLOR),
-            name='Histórico', showlegend=True
-        ))
+            if 'P98' in bl_row.index and pd.notna(bl_row['P98']):
+                fig.add_trace(go.Scatter(
+                    x=x_range, y=[bl_row['P98']] * 2,
+                    mode='lines', name='P98',
+                    line=dict(color='#e74c3c', dash='dash', width=1),
+                    showlegend=True
+                ))
+            if 'P5' in bl_row.index and pd.notna(bl_row['P5']):
+                fig.add_trace(go.Scatter(
+                    x=x_range, y=[bl_row['P5']] * 2,
+                    mode='lines', name='P5',
+                    line=dict(color='#f39c12', dash='dash', width=1),
+                    showlegend=True
+                ))
+            if 'P2' in bl_row.index and pd.notna(bl_row['P2']):
+                fig.add_trace(go.Scatter(
+                    x=x_range, y=[bl_row['P2']] * 2,
+                    mode='lines', name='P2',
+                    line=dict(color='#e74c3c', dash='dash', width=1),
+                    showlegend=True
+                ))
 
-        fig.update_layout(
-            title=dict(
-                text=(
-                    f'Distribución Semanal de Señales - {component} (Unidad: {unit_id})<br>'
-                    '<sub>Semana actual con color de estado | Banda baseline P5-P95</sub>'
-                ),
-                font=dict(size=14)
-            ),
-            height=350 * n_rows,
-            showlegend=True,
-            legend=dict(
-                orientation='h', yanchor='bottom', y=1.02,
-                xanchor='right', x=1,
-                bgcolor='rgba(255,255,255,0.8)',
-                bordercolor='lightgray', borderwidth=1
-            ),
-            font=dict(size=10)
-        )
+    # Trend line overlay (if significant worsening trend)
+    if not trend_df.empty:
+        sig_trends = trend_df[
+            (trend_df['is_significant'] == True) &
+            (trend_df['is_good_fit'] == True)
+        ]
+        if not sig_trends.empty:
+            best = sig_trends.sort_values('r2', ascending=False).iloc[0]
+            interp = best.get('trend_interpretation', '')
+            color = '#e74c3c' if interp == 'worsening' else '#2ecc71'
+            if 'start_time' in best.index and 'end_time' in best.index:
+                x_trend = [best['start_time'], best['end_time']]
+                slope = best['slope_per_day']
+                days = (best['end_time'] - best['start_time']).total_seconds() / 86400
+                y_start = df['rolling_mean'].dropna().iloc[0] if len(df['rolling_mean'].dropna()) > 0 else 0
+                y_trend = [y_start, y_start + slope * days]
+                fig.add_trace(go.Scatter(
+                    x=x_trend, y=y_trend,
+                    mode='lines',
+                    name=f'Tendencia ({interp})',
+                    line=dict(color=color, dash='dot', width=2)
+                ))
 
-        # Axis formatting
-        for i in range(1, n_rows + 1):
-            for j in range(1, n_cols + 1):
-                fig.update_xaxes(
-                    title_text="Valor", showgrid=True,
-                    gridwidth=0.5, gridcolor='lightgray',
-                    row=i, col=j
-                )
-                if j == 1:
-                    fig.update_yaxes(
-                        title_text="Semana", showgrid=False, row=i, col=j
-                    )
-                else:
-                    fig.update_yaxes(
-                        showticklabels=False, showgrid=False, row=i, col=j
-                    )
-
-        return fig
-
-    except Exception as e:
-        logger.error(f"Error building weekly boxplots: {e}")
-        import traceback
-        traceback.print_exc()
-        return _empty_figure(f"Error: {str(e)}")
-
-
-def build_daily_timeseries(
-    selected_signal: str,
-    unit_id: str,
-    component: str,
-    combined_daily: pd.DataFrame,
-    baseline_df: pd.DataFrame
-) -> go.Figure:
-    """
-    Build daily time series boxplots for a single signal across multiple weeks.
-    
-    Args:
-        selected_signal: Signal name to plot
-        unit_id: Selected unit ID
-        component: Selected component name
-        combined_daily: Concatenated daily data with 'Fecha' column
-        baseline_df: Baseline thresholds DataFrame
-    
-    Returns:
-        Plotly Figure with daily violin + box plots
-    """
-    if combined_daily.empty or selected_signal not in combined_daily.columns:
-        return _empty_figure(f"Sin datos para la señal {selected_signal}")
-
-    try:
-        # Ensure datetime
-        if not pd.api.types.is_datetime64_any_dtype(combined_daily['Fecha']):
-            combined_daily = combined_daily.copy()
-            combined_daily['Fecha'] = pd.to_datetime(combined_daily['Fecha'])
-
-        combined_daily = combined_daily.sort_values('Fecha')
-        signal_data = combined_daily[combined_daily[selected_signal].notna()].copy()
-
-        if signal_data.empty:
-            return _empty_figure(f"Sin datos para la señal {selected_signal}")
-
-        signal_data['date_label'] = signal_data['Fecha'].dt.strftime('%m/%d')
-        date_labels = signal_data.groupby('date_label')['Fecha'].first().sort_values().index.tolist()
-
-        # Get baselines
-        percentile_refs = {}
-        if baseline_df is not None and not baseline_df.empty:
-            unit_baselines = baseline_df[
-                (baseline_df['Unit'] == unit_id) &
-                (baseline_df['Signal'] == selected_signal)
-            ]
-            if not unit_baselines.empty:
-                percentile_refs = {
-                    'P2': unit_baselines['P2'].mean(),
-                    'P5': unit_baselines['P5'].mean(),
-                    'P95': unit_baselines['P95'].mean(),
-                    'P98': unit_baselines['P98'].mean()
-                }
-
-        fig = go.Figure()
-
-        for date_label in date_labels:
-            day_data = signal_data[signal_data['date_label'] == date_label][selected_signal]
-            if day_data.empty:
-                continue
-
-            fig.add_trace(go.Violin(
-                y=day_data, x=[date_label] * len(day_data),
-                orientation='v', side='both',
-                line_color='#87CEEB', fillcolor='#87CEEB',
-                opacity=0.3, points=False,
-                meanline_visible=False, showlegend=False,
-                width=0.8, hoverinfo='skip'
-            ))
-
-            fig.add_trace(go.Box(
-                y=day_data, x=[date_label] * len(day_data),
-                orientation='v', boxmean=False,
-                marker=dict(color='#87CEEB', opacity=0.7, size=3),
-                line=dict(width=1, color='#87CEEB'),
-                fillcolor='rgba(255,255,255,0)',
-                boxpoints=False, showlegend=False,
-                width=0.4,
-                hovertemplate=(
-                    f'<b>{date_label}</b><br>'
-                    'Mediana: %{y:.2f}<br>'
-                    '<extra></extra>'
-                )
-            ))
-
-        if percentile_refs:
-            fig.add_hrect(
-                y0=percentile_refs['P5'], y1=percentile_refs['P95'],
-                fillcolor='rgba(40, 167, 69, 0.1)',
-                line_width=0, layer='below'
-            )
-            fig.add_hline(
-                y=percentile_refs['P2'],
-                line=dict(color='rgba(220, 53, 69, 0.3)', dash='dot', width=1)
-            )
-            fig.add_hline(
-                y=percentile_refs['P98'],
-                line=dict(color='rgba(220, 53, 69, 0.3)', dash='dot', width=1)
-            )
-
-        fig.update_layout(
-            title=dict(
-                text=(
-                    f'Serie Temporal Diaria - {selected_signal} - {component} '
-                    f'(Unidad: {unit_id})<br>'
-                    '<sub>Banda baseline P5-P95</sub>'
-                ),
-                font=dict(size=14)
-            ),
-            height=500,
-            showlegend=False,
-            xaxis_title="Fecha (MM/DD)",
-            yaxis_title="Valor",
-            xaxis=dict(showgrid=True, gridwidth=0.5, gridcolor='lightgray'),
-            yaxis=dict(showgrid=True, gridwidth=0.5, gridcolor='lightgray'),
-            font=dict(size=10)
-        )
-
-        return fig
-
-    except Exception as e:
-        logger.error(f"Error building daily timeseries: {e}")
-        return _empty_figure(f"Error: {str(e)}")
+    fig.update_layout(
+        height=280,
+        margin=dict(t=30, b=40, l=50, r=20),
+        xaxis_title="",
+        yaxis_title="Valor",
+        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
+        hovermode='x unified'
+    )
+    return fig

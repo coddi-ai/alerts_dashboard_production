@@ -1,0 +1,148 @@
+/* 
+ * Custom Layout Styles for Multi-Technical Alerts Dashboard
+ * Version 2.1.1 - April 2026
+ * 
+ * Navigation, layout, and form styling for professional appearance
+ */
+
+/* ========================================
+   NAVIGATION MENU STYLING
+   ======================================== */
+
+/* Navigation Menu Items - Hover State */
+.nav-menu-item:hover {
+    background-color: rgba(52, 152, 219, 0.2) !important;
+    color: #3498db !important;
+    transform: translateX(4px);
+}
+
+/* Navigation Menu Items - Active State */
+.nav-menu-item.active {
+    background-color: rgba(52, 152, 219, 0.3) !important;
+    color: #3498db !important;
+    font-weight: 600 !important;
+    border-left: 3px solid #3498db;
+}
+
+/* Navigation Chevron - Hover Animation */
+.nav-menu-item:hover .nav-chevron {
+    transform: translateX(3px);
+}
+
+/* Navigation Chevron - Base Transition */
+.nav-chevron {
+    transition: transform 0.2s ease;
+}
+
+/* Smooth transitions for menu items */
+.nav-menu-item {
+    transition: all 0.2s ease;
+}
+
+/* ========================================
+   SIDEBAR SCROLLBAR
+   ======================================== */
+
+/* Enhanced scrollbar for sidebar on Windows */
+.sidebar-menu::-webkit-scrollbar {
+    width: 8px;
+}
+
+.sidebar-menu::-webkit-scrollbar-track {
+    background: rgba(0, 0, 0, 0.1);
+    border-radius: 4px;
+}
+
+.sidebar-menu::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.2);
+    border-radius: 4px;
+}
+
+.sidebar-menu::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.3);
+}
+
+/* ========================================
+   CLIENT SELECTOR - COMPACT STYLE
+   ======================================== */
+
+/* Compact client selector in header - reduced visual weight */
+.client-compact-selector {
+    display: inline-block;
+}
+
+.client-compact-selector .Select-control {
+    border-radius: 4px;
+    min-height: 32px;
+    height: 32px;
+    font-size: 0.85rem;
+}
+
+.client-compact-selector .Select-value {
+    line-height: 30px;
+    padding-left: 8px;
+}
+
+.client-compact-selector .Select-input {
+    height: 30px;
+}
+
+.client-compact-selector .Select-placeholder {
+    line-height: 30px;
+}
+
+.client-compact-selector .Select-arrow-zone {
+    padding-right: 8px;
+}
+
+/* ========================================
+   LOGIN PAGE ENHANCEMENTS
+   ======================================== */
+
+/* Login form focus states */
+#username-input:focus,
+#password-input:focus {
+    border-color: #667eea;
+    box-shadow: 0 0 0 0.2rem rgba(102, 126, 234, 0.25);
+}
+
+/* Login button hover effect */
+#login-button:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    transition: all 0.2s ease;
+}
+
+#login-button:active {
+    transform: translateY(0);
+}
+
+/* Input group icons styling */
+.input-group-text {
+    border-right: none;
+}
+
+.input-group .form-control {
+    border-left: none;
+}
+
+.input-group .form-control:focus {
+    border-left: none;
+}
+
+/* Login card animations */
+@keyframes fadeInUp {
+    from {
+        opacity: 0;
+        transform: translateY(20px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+/* Apply animation when page loads */
+.card {
+    animation: fadeInUp 0.5s ease-out;
+}

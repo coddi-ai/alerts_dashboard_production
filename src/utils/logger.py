@@ -5,8 +5,10 @@ Provides easy access to configured loggers throughout the application.
 """
 
 import logging
+import os
 from config.logging_config import get_logger as _get_logger
 
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
 def get_logger(name: str) -> logging.Logger:
     """
@@ -23,7 +25,17 @@ def get_logger(name: str) -> logging.Logger:
         logger = get_logger(__name__)
         logger.info("Processing data...")
     """
-    return _get_logger(name)
+
+    logging.basicConfig(
+        level=getattr(logging, LOG_LEVEL, logging.INFO),
+    )
+
+    logger = _get_logger(name)
+
+    logger.debug("Debug message")
+    logger.info("Info message")
+
+    return logger
 
 
 class LoggerMixin:

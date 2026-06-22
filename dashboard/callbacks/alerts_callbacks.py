@@ -28,7 +28,6 @@ from src.data.loaders import (
 from dashboard.components.alerts_charts import (
     create_alerts_per_unit_chart,
     create_alerts_per_month_chart,
-    create_trigger_distribution_treemap,
     create_system_distribution_pie_chart,
     create_oil_radar_chart,
     create_sensor_trends_chart_golden,
@@ -94,12 +93,11 @@ def render_tab_content(active_tab):
     [
         Input('alerts-unit-distribution-chart', 'clickData'),
         Input('alerts-month-distribution-chart', 'clickData'),
-        Input('alerts-trigger-distribution-chart', 'clickData'),
         Input('alerts-system-distribution-chart', 'clickData')
     ],
     [State('alerts-filter-store', 'data')]
 )
-def update_filters_from_clicks(unit_click, month_click, trigger_click, system_click, current_filters):
+def update_filters_from_clicks(unit_click, month_click, system_click, current_filters):
     """
     Update filter store based on chart clicks.
     Toggle behavior: clicking the same value again clears that filter.
@@ -107,7 +105,6 @@ def update_filters_from_clicks(unit_click, month_click, trigger_click, system_cl
     Args:
         unit_click: Click data from unit distribution chart
         month_click: Click data from month distribution chart
-        trigger_click: Click data from trigger distribution chart
         system_click: Click data from system distribution chart
         current_filters: Current filter state
     
@@ -144,17 +141,6 @@ def update_filters_from_clicks(unit_click, month_click, trigger_click, system_cl
             filters['month'] = month
             logger.info(f"Month filter set to: {month}")
     
-    # Handle trigger click - toggle behavior
-    elif trigger_id == 'alerts-trigger-distribution-chart' and trigger_click:
-        trigger = trigger_click['points'][0]['label']
-        if filters.get('trigger') == trigger:
-            # Clicking same trigger - clear filter
-            filters.pop('trigger', None)
-            logger.info(f"Trigger filter cleared (was: {trigger})")
-        else:
-            filters['trigger'] = trigger
-            logger.info(f"Trigger filter set to: {trigger}")
-    
     # Handle system click - toggle behavior
     elif trigger_id == 'alerts-system-distribution-chart' and system_click:
         system = system_click['points'][0]['label']
@@ -177,26 +163,27 @@ def update_filters_from_clicks(unit_click, month_click, trigger_click, system_cl
     [
         Output('alerts-unit-distribution-chart', 'figure'),
         Output('alerts-month-distribution-chart', 'figure'),
-        Output('alerts-trigger-distribution-chart', 'figure'),
         Output('alerts-system-distribution-chart', 'figure'),
         Output('alerts-summary-stats', 'children'),
         Output('alerts-table-container', 'children')
     ],
     [
         Input('client-selector', 'value'),
-        Input('alerts-filter-store', 'data')
+        Input('alerts-filter-store', 'data'),
+        Input('alerts-date-range-picker', 'start_date'),
+        Input('alerts-date-range-picker', 'end_date')
     ]
 )
-def update_general_tab(client: str, filters: dict):
+def update_general_tab(client: str, filters: dict, start_date: str, end_date: str):
     """
     Update all components in the General Tab when client changes or filters are applied.
     
     Args:
         client: Selected client identifier
-        filters: Dictionary with active filters (unit, month, trigger, sistema)
+        filters: Dictionary with active filters (unit, month, sistema)
     
     Returns:
-        Tuple of (unit_chart, month_chart, trigger_chart, system_chart, stats, table)
+        Tuple of (unit_chart, month_chart, system_chart, stats, table)
     """
     if not client:
         raise PreventUpdate
@@ -212,11 +199,21 @@ def update_general_tab(client: str, filters: dict):
         logger.warning(f"No alerts data available for client: {client}")
         empty_fig = {'data': [], 'layout': {'title': 'No data available'}}
         empty_alert = dbc.Alert("No hay datos de alertas disponibles", color="warning")
-        return empty_fig, empty_fig, empty_fig, empty_fig, empty_alert, empty_alert
+        return empty_fig, empty_fig, empty_fig, empty_alert, empty_alert
     
     try:
         # Apply filters if present
         filtered_df = alerts_df.copy()
+        
+        # Apply date range filter
+        if start_date or end_date:
+            if 'Timestamp' in filtered_df.columns:
+                filtered_df['Timestamp'] = pd.to_datetime(filtered_df['Timestamp'])
+                if start_date:
+                    filtered_df = filtered_df[filtered_df['Timestamp'] >= pd.to_datetime(start_date)]
+                if end_date:
+                    filtered_df = filtered_df[filtered_df['Timestamp'] <= pd.to_datetime(end_date) + pd.Timedelta(days=1)]
+                logger.info(f"After date range filter ({start_date} to {end_date}): {len(filtered_df)} rows")
         
         if filters:
             if 'unit' in filters and filters['unit']:
@@ -228,9 +225,6 @@ def update_general_tab(client: str, filters: dict):
                 filtered_df['Month_str'] = filtered_df['Month'].astype(str).str[:7]
                 filtered_df = filtered_df[filtered_df['Month_str'] == month_str]
                 logger.info(f"After month filter ({month_str}): {len(filtered_df)} rows")
-            if 'trigger' in filters and filters['trigger']:
-                filtered_df = filtered_df[filtered_df['Trigger_type'] == filters['trigger']]
-                logger.info(f"After trigger filter: {len(filtered_df)} rows")
             if 'sistema' in filters and filters['sistema']:
                 filtered_df = filtered_df[filtered_df['sistema'] == filters['sistema']]
                 logger.info(f"After sistema filter: {len(filtered_df)} rows")
@@ -239,12 +233,11 @@ def update_general_tab(client: str, filters: dict):
             logger.warning("No data after applying filters")
             empty_fig = {'data': [], 'layout': {'title': 'No hay datos con los filtros aplicados'}}
             empty_alert = dbc.Alert("No hay datos con los filtros aplicados", color="info")
-            return empty_fig, empty_fig, empty_fig, empty_fig, empty_alert, empty_alert
+            return empty_fig, empty_fig, empty_fig, empty_alert, empty_alert
         
-        # Create charts (using filtered data for visualization)
+        # Create charts (using filtered data for visualization) - removed trigger_chart
         unit_chart = create_alerts_per_unit_chart(filtered_df)
         month_chart = create_alerts_per_month_chart(filtered_df)
-        trigger_chart = create_trigger_distribution_treemap(filtered_df)
         system_chart = create_system_distribution_pie_chart(filtered_df)
         
         # Calculate summary statistics
@@ -259,13 +252,24 @@ def update_general_tab(client: str, filters: dict):
         table = create_alerts_datatable(filtered_df)
         
         logger.info(f"General tab updated successfully with {total_alerts} alerts")
-        return unit_chart, month_chart, trigger_chart, system_chart, stats, table
+        return unit_chart, month_chart, system_chart, stats, table
     
     except Exception as e:
         logger.error(f"Error updating general tab: {e}")
         error_fig = {'data': [], 'layout': {'title': f'Error: {str(e)}'}}
         error_alert = dbc.Alert(f"Error al cargar datos: {str(e)}", color="danger")
-        return error_fig, error_fig, error_fig, error_fig, error_alert, error_alert
+        return error_fig, error_fig, error_fig, error_alert, error_alert
+
+
+@callback(
+    [Output('alerts-date-range-picker', 'start_date'),
+     Output('alerts-date-range-picker', 'end_date')],
+    [Input('alerts-date-range-clear', 'n_clicks')],
+    prevent_initial_call=True
+)
+def clear_date_range(_):
+    """Clear the date range picker."""
+    return None, None
 
 
 @callback(
@@ -783,15 +787,17 @@ def create_telemetry_evidence_section(alert_row: pd.Series, client: str) -> html
         
         logger.info(f"Processing telemetry alert: Unit={unit_id}, Time={alert_time}, Trigger={trigger}")
         
-        # Load feature names mapping for Spanish titles
-        feature_name_map = load_feature_names(client)
+        # Load feature names mapping for Spanish titles (use FEATURE_NAMES_ES from alerts_charts)
+        from dashboard.components.alerts_charts import FEATURE_NAMES_ES
+        feature_name_map = FEATURE_NAMES_ES
         
         # Identify features to plot (columns ending with _Value)
         value_cols = [col for col in alert_data_clean.columns if col.endswith('_Value')]
         feature_names = [col.replace('_Value', '') for col in value_cols]
         
-        # Filter out Payload and EngSpd (always excluded from charts)
-        excluded_features = ['Payload', 'EngSpd']
+        # Filter out features from CHART DISPLAY ONLY (data still available for KPIs)
+        # Note: Payload, EngSpd, GroundSpd, EngLoad are excluded from charts but remain in alert_data_clean
+        excluded_features = ['Payload', 'EngSpd', 'GroundSpd', 'EngLoad']
         feature_names = [f for f in feature_names if f not in excluded_features]
         
         if not feature_names:
@@ -825,20 +831,22 @@ def create_telemetry_evidence_section(alert_row: pd.Series, client: str) -> html
             trigger=trigger
         )
         
-        # Build section
+        # Build section with NEW LAYOUT: [Trends full] then [KPIs 4 | GPS 8]
         return html.Div([
+            # Section header
             dbc.Row([
                 dbc.Col([
                     html.H4([
-                        html.I(className="fas fa-satellite-dish me-2"),
+                        html.I(className="fas fa-signal me-2"),
                         "Evidencia de Telemetría"
-                    ], className="text-info mb-3")
+                    ], className="text-primary mb-3 mt-4 pb-2 border-bottom"),
+                    html.P("Análisis de datos de sensores y ubicación GPS durante el evento", 
+                           className="text-muted mb-3")
                 ])
             ]),
             
-            # TimeSeries | GPS (side by side)
+            # Row 1: Sensor Trends (FULL WIDTH)
             dbc.Row([
-                # Sensor Trends (left side - 6 columns)
                 dbc.Col([
                     dbc.Card([
                         dbc.CardHeader([
@@ -846,7 +854,7 @@ def create_telemetry_evidence_section(alert_row: pd.Series, client: str) -> html
                                 html.I(className="fas fa-chart-line me-2"),
                                 "Tendencias de Sensores"
                             ], className="mb-0")
-                        ]),
+                        ], className="bg-light"),
                         dbc.CardBody([
                             dcc.Loading(
                                 id="loading-sensor-trends-callback",
@@ -860,17 +868,39 @@ def create_telemetry_evidence_section(alert_row: pd.Series, client: str) -> html
                             )
                         ])
                     ], className="shadow-sm mb-4")
-                ], md=6),
+                ], md=12)
+            ]),
+            
+            # Row 2: KPIs (LEFT, 1 col x 4 rows, 4 cols) + GPS Map (RIGHT, 8 cols) - SAME HEIGHT
+            dbc.Row([
+                # Left: KPIs (vertical layout, 1 column x 4 rows)
+                dbc.Col([
+                    dbc.Card([
+                        dbc.CardHeader([
+                            html.H5([
+                                html.I(className="fas fa-tachometer-alt me-2"),
+                                "Indicadores de Contexto"
+                            ], className="mb-0")
+                        ], className="bg-light"),
+                        dbc.CardBody([
+                            dcc.Loading(
+                                id="loading-context-kpis-callback",
+                                type="circle",
+                                children=[context_kpis]
+                            )
+                        ], className="p-3")
+                    ], className="shadow-sm mb-4 h-100")  # h-100 for full height
+                ], md=4),
                 
-                # GPS Map (right side - 6 columns)
+                # Right: GPS Map
                 dbc.Col([
                     dbc.Card([
                         dbc.CardHeader([
                             html.H5([
                                 html.I(className="fas fa-map-marked-alt me-2"),
-                                "Ruta GPS"
+                                "Ubicación y Ruta GPS"
                             ], className="mb-0")
-                        ]),
+                        ], className="bg-light"),
                         dbc.CardBody([
                             dcc.Loading(
                                 id="loading-gps-map-callback",
@@ -879,37 +909,14 @@ def create_telemetry_evidence_section(alert_row: pd.Series, client: str) -> html
                                     dcc.Graph(
                                         figure=gps_map_fig,
                                         config={'displayModeBar': True},
-                                        style={'height': '600px'}
+                                        style={'height': '500px'}
                                     )
                                 ]
                             )
-                        ])
-                    ], className="shadow-sm mb-4")
-                ], md=6)
-            ]),
-            
-            # Context KPIs (full width)
-            dbc.Row([
-                dbc.Col([
-                    dbc.Card([
-                        dbc.CardHeader([
-                            html.H5([
-                                html.I(className="fas fa-tachometer-alt me-2"),
-                                "Indicadores de Contexto"
-                            ], className="mb-0")
-                        ]),
-                        dbc.CardBody([
-                            dcc.Loading(
-                                id="loading-context-kpis-callback",
-                                type="circle",
-                                children=[
-                                    context_kpis
-                                ]
-                            )
-                        ])
-                    ], className="shadow-sm mb-4")
-                ], md=12)
-            ])
+                        ], className="p-2")
+                    ], className="shadow-sm mb-4 h-100")  # h-100 for full height
+                ], md=8)
+            ], className="gx-3")  # Horizontal spacing between columns
         ], className="mb-5")
     
     except Exception as e:
@@ -1004,6 +1011,49 @@ def create_oil_evidence_section(alert_row: pd.Series, client: str) -> html.Div:
         
         comp_limits = limits[client][machine][component_normalized]
         
+        # Get sample's oil hour range for v2.3 stratified limits
+        sample_oil_hour_range = oil_report.get('oilHourRange', 'UNKNOWN')
+        logger.info(f"Sample oilHourRange: {sample_oil_hour_range}")
+        
+        # Helper function to get stratified limits with fallback (v2.3)
+        def get_essay_limits(essay_name, oil_hour_range):
+            """
+            Get limits for an essay with oil-hour stratification fallback.
+            
+            Fallback hierarchy:
+            1. Exact match: essay + oilHourRange
+            2. Fallback: Average across all available oilHourRanges for this essay
+            3. Legacy: Single 'ALL' key (v2.2 compatibility)
+            
+            Returns: dict with threshold_normal, threshold_alert, threshold_critic or None
+            """
+            if essay_name not in comp_limits:
+                return None
+            
+            essay_limits = comp_limits[essay_name]
+            
+            # Try exact match (v2.3 preferred)
+            if oil_hour_range in essay_limits:
+                logger.debug(f"Essay {essay_name}: Using oil_hour_stratified limits ({oil_hour_range})")
+                return essay_limits[oil_hour_range]
+            
+            # Try legacy 'ALL' key (v2.2 compatibility)
+            if 'ALL' in essay_limits:
+                logger.debug(f"Essay {essay_name}: Using legacy non-stratified limits (v2.2)")
+                return essay_limits['ALL']
+            
+            # Fallback: Average across all available oil hour ranges
+            if len(essay_limits) > 0:
+                logger.debug(f"Essay {essay_name}: Using fallback_global (averaging {len(essay_limits)} ranges)")
+                avg_limits = {
+                    'threshold_normal': sum(v.get('threshold_normal', 0) for v in essay_limits.values()) / len(essay_limits),
+                    'threshold_alert': sum(v.get('threshold_alert', 0) for v in essay_limits.values()) / len(essay_limits),
+                    'threshold_critic': sum(v.get('threshold_critic', 0) for v in essay_limits.values()) / len(essay_limits)
+                }
+                return avg_limits
+            
+            return None
+        
         # Create charts and tables for each group
         charts_and_tables = []
         
@@ -1011,7 +1061,12 @@ def create_oil_evidence_section(alert_row: pd.Series, client: str) -> html.Div:
             essays = group_mapping[group_name]
             
             # Filter essays that exist in sample and have limits
-            valid_essays = [e for e in essays if e in oil_report.index and pd.notna(oil_report[e]) and e in comp_limits]
+            valid_essays = []
+            for e in essays:
+                if e in oil_report.index and pd.notna(oil_report[e]):
+                    essay_lim = get_essay_limits(e, sample_oil_hour_range)
+                    if essay_lim is not None:
+                        valid_essays.append(e)
             
             if not valid_essays:
                 continue
@@ -1025,9 +1080,11 @@ def create_oil_evidence_section(alert_row: pd.Series, client: str) -> html.Div:
                 value = float(oil_report[essay])
                 actual_values.append(value)
                 
-                normal = comp_limits[essay].get('threshold_normal', 0)
-                alert = comp_limits[essay].get('threshold_alert', 0)
-                critic = comp_limits[essay].get('threshold_critic', 0)
+                # Get stratified limits
+                essay_limits = get_essay_limits(essay, sample_oil_hour_range)
+                normal = essay_limits.get('threshold_normal', 0)
+                alert = essay_limits.get('threshold_alert', 0)
+                critic = essay_limits.get('threshold_critic', 0)
                 
                 # Normalize value for radar chart (0-100 scale)
                 if value >= critic:
@@ -1239,6 +1296,24 @@ def create_oil_evidence_section(alert_row: pd.Series, client: str) -> html.Div:
         }
         status_color = status_colors.get(report_status, 'secondary')
         
+        # Get oil meter and oil hour range for display
+        oil_meter = oil_report.get('oilMeter', None)
+        oil_meter_display = f"{oil_meter:.1f}h" if pd.notna(oil_meter) else "N/A"
+        
+        # Oil hour range badge color and text
+        oil_hour_range_colors = {
+            'LT_1000': 'success',  # Fresh oil - green
+            'GE_1000': 'warning',  # Aged oil - orange
+            'UNKNOWN': 'secondary'  # Unknown - gray
+        }
+        oil_hour_range_labels = {
+            'LT_1000': 'Aceite Fresco (<1000h)',
+            'GE_1000': 'Aceite Envejecido (≥1000h)',
+            'UNKNOWN': 'Edad de Aceite Desconocida'
+        }
+        oil_hour_color = oil_hour_range_colors.get(sample_oil_hour_range, 'secondary')
+        oil_hour_label = oil_hour_range_labels.get(sample_oil_hour_range, sample_oil_hour_range)
+        
         return html.Div([
             dbc.Row([
                 dbc.Col([
@@ -1246,12 +1321,33 @@ def create_oil_evidence_section(alert_row: pd.Series, client: str) -> html.Div:
                         html.I(className="fas fa-flask me-2"),
                         "Evidencia de Tribología"
                     ], className="text-warning mb-2"),
-                    dbc.Badge(
-                        f"Estado: {report_status}",
-                        color=status_color,
-                        className="mb-3",
-                        style={'fontSize': '1rem'}
-                    )
+                    html.Div([
+                        dbc.Badge(
+                            f"Estado: {report_status}",
+                            color=status_color,
+                            className="me-2",
+                            style={'fontSize': '1rem'}
+                        ),
+                        dbc.Badge(
+                            f"ID Muestra: {tribology_id}",
+                            color="info",
+                            className="me-2",
+                            style={'fontSize': '1rem'}
+                        ),
+                        dbc.Badge(
+                            f"Horas Aceite: {oil_meter_display}",
+                            color="dark",
+                            className="me-2",
+                            style={'fontSize': '1rem'}
+                        ),
+                        dbc.Badge(
+                            oil_hour_label,
+                            color=oil_hour_color,
+                            className="mb-3",
+                            style={'fontSize': '1rem'},
+                            title="Límites estratificados v2.3 basados en edad del aceite"
+                        )
+                    ], className="mb-3")
                 ])
             ]),
             html.Div(charts_and_tables)

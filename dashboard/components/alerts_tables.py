@@ -5,13 +5,86 @@ Functions to create Dash DataTables for alerts listings.
 """
 
 import pandas as pd
+import re
 from dash import dash_table, html
 import dash_bootstrap_components as dbc
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def parse_ia_message_sections(mensaje_ia: str) -> Dict[str, str]:
+    """
+    Separa el mensaje de IA en 4 secciones principales usando regex.
+    
+    Args:
+        mensaje_ia: Texto completo generado por la IA
+        
+    Returns:
+        dict con las secciones: {
+            'diagnostico': str,
+            'causa_probable': str,
+            'riesgo': str,
+            'nivel_riesgo': str,  # BAJO/MEDIO/ALTO
+            'acciones': str
+        }
+    """
+    sections = {
+        'diagnostico': '',
+        'causa_probable': '',
+        'riesgo': '',
+        'nivel_riesgo': 'MEDIO',  # Default
+        'acciones': ''
+    }
+    
+    if not mensaje_ia or pd.isna(mensaje_ia):
+        return sections
+    
+    # Patrones para identificar secciones (case insensitive)
+    patterns = {
+        'diagnostico': r'(?:DIAGNÓSTICO|DIAGNOSTICO)[:\s](.+?)(?=(?:CAUSA|RIESGO|ACCIONES|$))',
+        'causa_probable': r'(?:CAUSA PROBABLE|CAUSA)[:\s](.+?)(?=(?:RIESGO|ACCIONES|$))',
+        'riesgo': r'(?:RIESGO OPERACIONAL|RIESGO)[:\s](.+?)(?=(?:ACCIONES|$))',
+        'acciones': r'(?:ACCIONES CLARAS|ACCIONES RECOMENDADAS|ACCIONES)[:\s](.+?)$'
+    }
+    
+    try:
+        for key, pattern in patterns.items():
+            match = re.search(pattern, mensaje_ia, re.IGNORECASE | re.DOTALL)
+            if match:
+                text = match.group(1).strip()
+                text = re.sub(r'^[:\-\s]+', '', text)
+                # Remove "DIRECTO" from diagnostico if present (case sensitive)
+                if key == 'diagnostico':
+                    text = text.replace('DIRECTO:', '').strip()
+                    # Clean up any extra spaces
+                    text = re.sub(r'\s+', ' ', text)
+                sections[key] = text
+        
+        # Extraer nivel de riesgo (BAJO/MEDIO/ALTO)
+        riesgo_match = re.search(r'(BAJO|MEDIO|ALTO)', sections['riesgo'], re.IGNORECASE)
+        if riesgo_match:
+            sections['nivel_riesgo'] = riesgo_match.group(1).upper()
+        
+        # Fallback: dividir por párrafos si no se encontraron secciones
+        if not any([sections['diagnostico'], sections['causa_probable'], sections['acciones']]):
+            paragraphs = [p.strip() for p in mensaje_ia.split('\n\n') if p.strip()]
+            if len(paragraphs) >= 1:
+                sections['diagnostico'] = paragraphs[0]
+            if len(paragraphs) >= 2:
+                sections['causa_probable'] = paragraphs[1]
+            if len(paragraphs) >= 3:
+                sections['riesgo'] = paragraphs[2]
+            if len(paragraphs) >= 4:
+                sections['acciones'] = '\n'.join(paragraphs[3:])
+    
+    except Exception as e:
+        logger.warning(f"Error parseando mensaje IA: {e}")
+        sections['diagnostico'] = mensaje_ia
+    
+    return sections
 
 
 def create_alerts_datatable(alerts_df: pd.DataFrame) -> dash_table.DataTable:
@@ -123,7 +196,7 @@ def create_alerts_datatable(alerts_df: pd.DataFrame) -> dash_table.DataTable:
 
 def create_alert_detail_card(alert_row: pd.Series) -> dbc.Card:
     """
-    Create card displaying detailed alert specification.
+    Create card displaying detailed alert specification with structured AI diagnosis.
     
     Args:
         alert_row: Series with alert data
@@ -135,67 +208,117 @@ def create_alert_detail_card(alert_row: pd.Series) -> dbc.Card:
         return dbc.Alert("No se ha seleccionado ninguna alerta", color="warning")
     
     try:
+        # Parse AI diagnosis into structured sections
+        ai_message = alert_row['mensaje_ia']
+        diagnosis_sections = parse_ia_message_sections(ai_message)
+        
         card_content = dbc.Card([
             dbc.CardHeader([
                 html.H4([
-                    html.I(className="fas fa-exclamation-triangle me-2"),
-                    "Especificación de Alerta"
-                ], className="mb-0")
-            ], className="bg-warning text-dark"),
+                    html.I(className="fas fa-exclamation-circle me-2"),
+                    f"Alerta: {alert_row.get('FusionID', 'N/A')}"
+                ], className="mb-0 text-white")
+            ], className="bg-danger"),
             
             dbc.CardBody([
-                dbc.Row([
-                    dbc.Col([
-                        html.P([
-                            html.Strong("📅 Fecha: "),
-                            alert_row['Timestamp'].strftime('%Y-%m-%d %H:%M:%S')
-                        ], className="mb-2"),
-                        
-                        html.P([
-                            html.Strong("🚜 Unidad: "),
-                            alert_row['UnitId']
-                        ], className="mb-2"),
-                        
-                        html.P([
-                            html.Strong("🔧 Sistema: "),
-                            alert_row['sistema']
-                        ], className="mb-2")
-                    ], md=6),
-                    
-                    dbc.Col([
-                        html.P([
-                            html.Strong("📍 SubSistema: "),
-                            alert_row['subsistema']
-                        ], className="mb-2"),
-                        
-                        html.P([
-                            html.Strong("⚙️ Componente: "),
-                            alert_row['componente']
-                        ], className="mb-2"),
-                        
-                        html.P([
-                            html.Strong("📡 Fuente: "),
-                            alert_row['Trigger_type']
-                        ], className="mb-2")
-                    ], md=6)
-                ]),
-                
-                html.Hr(),
-                
+                # Alert Metadata Section
                 html.Div([
                     html.H5([
-                        html.I(className="fas fa-robot me-2"),
-                        "Diagnóstico AI"
-                    ], className="text-primary mb-3"),
+                        html.I(className="fas fa-info-circle me-2"),
+                        "Información de la Alerta"
+                    ], className="text-primary mb-3 pb-2 border-bottom"),
                     
-                    html.P(
-                        alert_row['mensaje_ia'],
-                        className="text-muted",
-                        style={'whiteSpace': 'pre-wrap'}
-                    )
+                    dbc.Row([
+                        dbc.Col([
+                            html.Div([
+                                html.Span([
+                                    html.I(className="fas fa-calendar-alt me-2 text-muted"),
+                                    html.Strong("Fecha: ")
+                                ]),
+                                html.Span(alert_row['Timestamp'].strftime('%d/%m/%Y %H:%M:%S'))
+                            ], className="mb-3"),
+                            
+                            html.Div([
+                                html.Span([
+                                    html.I(className="fas fa-truck me-2 text-muted"),
+                                    html.Strong("Unidad: ")
+                                ]),
+                                html.Span(alert_row['UnitId'], className="badge bg-primary")
+                            ], className="mb-3"),
+                            
+                            html.Div([
+                                html.Span([
+                                    html.I(className="fas fa-broadcast-tower me-2 text-muted"),
+                                    html.Strong("Fuente: ")
+                                ]),
+                                html.Span(alert_row['Trigger_type'], 
+                                         className="badge bg-info")
+                            ], className="mb-3")
+                        ], md=6),
+                        
+                        dbc.Col([
+                            html.Div([
+                                html.Span([
+                                    html.I(className="fas fa-cogs me-2 text-muted"),
+                                    html.Strong("Sistema: ")
+                                ]),
+                                html.Span(alert_row['sistema'], className="text-dark")
+                            ], className="mb-3"),
+                            
+                            html.Div([
+                                html.Span([
+                                    html.I(className="fas fa-layer-group me-2 text-muted"),
+                                    html.Strong("SubSistema: ")
+                                ]),
+                                html.Span(alert_row['subsistema'] if pd.notna(alert_row['subsistema']) else 'N/A')
+                            ], className="mb-3"),
+                            
+                            html.Div([
+                                html.Span([
+                                    html.I(className="fas fa-wrench me-2 text-muted"),
+                                    html.Strong("Componente: ")
+                                ]),
+                                html.Span(alert_row['componente'] if pd.notna(alert_row['componente']) else 'N/A')
+                            ], className="mb-3")
+                        ], md=6)
+                    ])
+                ], className="mb-4"),
+                
+                # AI Diagnosis Section - Only Diagnóstico and Recomendaciones
+                html.Div([
+                    html.H5([
+                        html.I(className="fas fa-brain me-2"),
+                        "Análisis Inteligente"
+                    ], className="text-primary mb-3 pb-2 border-bottom"),
+                    
+                    # Diagnóstico subsection
+                    html.Div([
+                        html.H6([
+                            html.Span("🔬", className="me-2"),
+                            "Diagnóstico"
+                        ], className="text-dark mb-2"),
+                        html.P(
+                            diagnosis_sections['diagnostico'] or "No disponible",
+                            className="text-muted ps-4",
+                            style={'whiteSpace': 'pre-wrap', 'lineHeight': '1.6'}
+                        )
+                    ], className="mb-3 p-3 bg-light rounded"),
+                    
+                    # Recomendaciones subsection
+                    html.Div([
+                        html.H6([
+                            html.Span("✅", className="me-2"),
+                            "Recomendaciones"
+                        ], className="text-dark mb-2"),
+                        html.P(
+                            diagnosis_sections['acciones'] or "No disponible",
+                            className="text-muted ps-4",
+                            style={'whiteSpace': 'pre-wrap', 'lineHeight': '1.6'}
+                        )
+                    ], className="mb-3 p-3 bg-light rounded")
                 ])
             ])
-        ], className="shadow mb-4")
+        ], className="shadow-sm mb-4 border-0")
         
         logger.info(f"Created alert detail card for FusionID: {alert_row.get('FusionID', 'N/A')}")
         return card_content

@@ -39,14 +39,26 @@ from dashboard.callbacks.overview_general_callbacks import register_overview_gen
 # Import alerts callbacks (uses @callback decorator, auto-registered on import)
 import dashboard.callbacks.alerts_callbacks
 
-# Import telemetry callbacks (uses @callback decorator, auto-registered on import)
+# Import telemetry health callbacks (uses @callback decorator, auto-registered on import)
 import dashboard.callbacks.telemetry_callbacks
 
 # Import oil callbacks (uses @callback decorator, auto-registered on import)
 import dashboard.callbacks.oil_callbacks
 
+# Import menace control callbacks (uses @callback decorator, auto-registered on import)
+import dashboard.callbacks.menace_control_callbacks
+
+# Import hot sheet callbacks (uses @callback decorator, auto-registered on import)
+import dashboard.callbacks.hot_sheet_callbacks
+
 # Import health index callbacks module
 from dashboard.callbacks.health_index_callbacks import register_health_index_callbacks
+
+# Import data freshness callbacks (uses @callback decorator, auto-registered on import)
+import dashboard.callbacks.data_freshness_callbacks
+
+# Import predictive callbacks
+from dashboard.callbacks.predictive_callbacks import register_callbacks as register_predictive_callbacks
 
 
 def normalize_prefix(prefix: str | None) -> str:
@@ -93,16 +105,17 @@ register_auth_callbacks(app)
 register_navigation_callbacks(app)
 register_limits_callbacks(app)
 register_machines_callbacks(app)
-# register_reports_callbacks(app)  # Disabled - tab not in current layout
+register_reports_callbacks(app)
 register_mantenciones_general_callbacks(app)
 register_overview_general_callbacks(app)
 register_health_index_callbacks(app)
+register_predictive_callbacks(app)
 
 
 if __name__ == '__main__':
     # Get host and port from environment or use defaults
     host = os.getenv('DASHBOARD_HOST', '0.0.0.0')
-    port = int(os.getenv('DASHBOARD_PORT', '8050'))
+    port = int(os.getenv('DASHBOARD_PORT', '8080'))
     debug = os.getenv('DEBUG', 'False').lower() == 'true'
     
     # Check if data folder exists, sync from S3 if needed
@@ -132,5 +145,5 @@ if __name__ == '__main__':
     app.run(
         host=host,
         port=port,
-        debug=debug
+        debug=False
     )

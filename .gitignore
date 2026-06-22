@@ -60,7 +60,7 @@ venv.bak/
 
 # Jupyter Notebook
 .ipynb_checkpoints
-
+*.ipynb
 # mypy
 .mypy_cache/
 .dmypy.json
@@ -95,3 +95,12 @@ NAVIGATION_FIX_SUMMARY.md
 IMPLEMENTATION_SUMMARY.md
 
 dataDev/*
+dataDev2/*
+dataDep/*
+
+ui_notes.md
+new_dashboard/*
+ai_docs/*
+
+# PDF files (local reference docs)
+*.pdf

@@ -6,27 +6,7 @@ Provides user authentication and authorization for client data access.
 
 import hashlib
 from typing import Dict, List, Optional
-
-
-# User database (in-memory for now)
-# TODO: Move to database or config file for production
-USERS = {
-    'admin': {
-        'password': hashlib.sha256('admin123'.encode()).hexdigest(),
-        'role': 'admin',
-        'clients': ['CDA', 'EMIN']
-    },
-    'cda_user': {
-        'password': hashlib.sha256('cda123'.encode()).hexdigest(),
-        'role': 'viewer',
-        'clients': ['CDA']
-    },
-    'emin_user': {
-        'password': hashlib.sha256('emin123'.encode()).hexdigest(),
-        'role': 'viewer',
-        'clients': ['EMIN']
-    }
-}
+from config.users import USERS
 
 
 def hash_password(password: str) -> str:
@@ -62,6 +42,7 @@ def authenticate_user(username: str, password: str) -> Optional[Dict]:
     if hash_password(password) == user['password']:
         return {
             'username': username,
+            'name': user.get('name', username),
             'role': user['role'],
             'clients': user['clients']
         }

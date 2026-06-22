@@ -5,7 +5,9 @@ Reusable table components for Multi-Technical-Alerts dashboard.
 from dash import dash_table, html
 import dash_bootstrap_components as dbc
 import pandas as pd
-from typing import List, Dict
+import numpy as np
+import json
+from typing import List, Dict, Optional
 
 
 def create_limits_table(df: pd.DataFrame) -> dash_table.DataTable:
@@ -72,59 +74,74 @@ def create_limits_table(df: pd.DataFrame) -> dash_table.DataTable:
     )
 
 
-def create_priority_table(df: pd.DataFrame) -> dash_table.DataTable:
+def create_priority_table(df: pd.DataFrame, status_filter: Optional[str] = None) -> dash_table.DataTable:
     """
     Create priority table for machines requiring attention.
     
+    Simplified to show only 3 columns:
+    - Unit: Equipment identifier
+    - Status: Overall health status
+    - AI Recommendation: AI-generated maintenance advice
+    
     Args:
         df: DataFrame with machine statuses
+        status_filter: Optional filter by status (from donut click)
     
     Returns:
         Dash DataTable
     """
     if df.empty:
-        return html.Div("No priority machines", className="text-success p-3")
+        return html.Div("No machine data available", className="text-muted p-3")
     
-    # Filter to non-Normal machines and sort by priority
-    priority_df = df[df['overall_status'] != 'Normal'].copy()
-    priority_df = priority_df.sort_values('priority_score', ascending=False).head(10)
+    # Apply status filter if provided (OIL-M-01: clickable donut)
+    if status_filter and status_filter != 'All':
+        df = df[df['overall_status'] == status_filter].copy()
     
-    if priority_df.empty:
-        return html.Div("All machines are Normal", className="text-success p-3")
+    # Sort by priority score descending (highest urgency first)
+    df = df.sort_values('priority_score', ascending=False)
     
-    # Select columns
-    display_df = priority_df[['unit_id', 'overall_status', 'machine_score', 
-                               'components_anormal', 'components_alerta', 
-                               'latest_sample_date']].copy()
+    # Select only the 3 required columns
+    display_df = df[['unit_id', 'overall_status']].copy()
     
-    # Apply .upper() to unit_id
-    if 'unit_id' in display_df.columns:
-        display_df['unit_id'] = display_df['unit_id'].str.upper()
+    # Add AI recommendation if available
+    if 'machine_ai_recommendation' in df.columns:
+        display_df['ai_recommendation'] = df['machine_ai_recommendation'].apply(
+            lambda x: str(x) if pd.notna(x) else 'No recommendation available'
+        )
+    else:
+        display_df['ai_recommendation'] = 'No recommendation available'
+    
+    # Keep unit_id in original format (don't convert case) for proper matching
+    # The data uses format like 'T_10', 'T_11', etc.
+    
+    if display_df.empty:
+        return html.Div("Ninguna máquina coincide con el filtro seleccionado", className="text-info p-3")
     
     return dash_table.DataTable(
         id='priority-table',
         columns=[
-            {'name': 'Unit ID', 'id': 'unit_id'},
-            {'name': 'Status', 'id': 'overall_status'},
-            {'name': 'Score', 'id': 'machine_score', 'type': 'numeric'},
-            {'name': 'Anormal', 'id': 'components_anormal', 'type': 'numeric'},
-            {'name': 'Alerta', 'id': 'components_alerta', 'type': 'numeric'},
-            {'name': 'Last Sample', 'id': 'latest_sample_date'}
+            {'name': 'Unidad', 'id': 'unit_id'},
+            {'name': 'Estado', 'id': 'overall_status'},
+            {'name': 'Recomendación IA', 'id': 'ai_recommendation'}
         ],
         data=display_df.to_dict('records'),
         style_table={'overflowX': 'auto'},
         style_cell={
             'textAlign': 'left',
-            'padding': '10px',
-            'fontSize': '14px'
+            'padding': '12px',
+            'fontSize': '13px',
+            'whiteSpace': 'normal',
+            'height': 'auto'
         },
         style_header={
             'backgroundColor': '#343a40',
             'color': 'white',
             'fontWeight': 'bold',
-            'textAlign': 'center'
+            'textAlign': 'center',
+            'fontSize': '14px'
         },
         style_data_conditional=[
+            # Status column styling (GR-05: Single status design language)
             {
                 'if': {
                     'filter_query': '{overall_status} = "Anormal"',
@@ -142,15 +159,41 @@ def create_priority_table(df: pd.DataFrame) -> dash_table.DataTable:
                 'backgroundColor': '#ffc107',
                 'color': 'black',
                 'fontWeight': 'bold'
+            },
+            {
+                'if': {
+                    'filter_query': '{overall_status} = "Normal"',
+                    'column_id': 'overall_status'
+                },
+                'backgroundColor': '#28a745',
+                'color': 'white',
+                'fontWeight': 'bold'
             }
         ],
-        sort_action='native'
+        style_cell_conditional=[
+            {'if': {'column_id': 'unit_id'}, 'width': '15%', 'fontWeight': '500'},
+            {'if': {'column_id': 'overall_status'}, 'width': '15%'},
+            {'if': {'column_id': 'ai_recommendation'}, 'width': '70%', 'minWidth': '300px'}
+        ],
+        sort_action='native',
+        page_size=15,
+        row_selectable='single',  # Enable row selection for master-detail (OIL-M-03)
+        selected_rows=[]
     )
 
 
 def create_machine_detail_table(df: pd.DataFrame) -> dash_table.DataTable:
     """
-    Create detailed machine component table.
+    Create detailed machine component table (OIL-M-04).
+    
+    Displays:
+    - Component name
+    - Status
+    - Sample date
+    - Essays broken (extracted essay names from breached_essays)
+    - AI recommendation
+    
+    Sorted worst-first (Anormal > Alerta > Normal, then by severity).
     
     Args:
         df: DataFrame with component statuses for a machine
@@ -159,27 +202,74 @@ def create_machine_detail_table(df: pd.DataFrame) -> dash_table.DataTable:
         Dash DataTable
     """
     if df.empty:
-        return html.Div("Select a machine to view details", className="text-muted p-3")
+        return html.Div("Seleccione una máquina para ver los detalles", className="text-muted p-3")
     
-    # Apply formatting to unitId and componentName
     df = df.copy()
-    if 'unitId' in df.columns:
-        df['unitId'] = df['unitId'].str.upper()
+    
+    # Sort worst-first: Anormal first, then by severity descending
+    status_order = {'Anormal': 0, 'Alerta': 1, 'Normal': 2}
+    df['_status_rank'] = df['report_status'].map(status_order).fillna(99)
+    df = df.sort_values(['_status_rank', 'severity_score'], ascending=[True, False])
+    df = df.drop('_status_rank', axis=1)
+    
+    # Format component name
     if 'componentName' in df.columns:
         df['componentName'] = df['componentName'].str.title()
     
-    # Dynamic columns based on available data
-    columns = []
-    if 'unitId' in df.columns:
-        columns.append({'name': 'Machine', 'id': 'unitId'})
+    # Parse breached_essays to extract essay names from list of dictionaries
+    if 'breached_essays' in df.columns:
+        def extract_essay_names(x):
+            try:
+                # Handle None first
+                if x is None:
+                    return 'N/A'
+                
+                # Handle numpy array or list of dictionaries
+                if isinstance(x, (list, np.ndarray)):
+                    if len(x) == 0:
+                        return 'N/A'
+                    essay_names = [item.get('essay', '') for item in x if isinstance(item, dict)]
+                    return ', '.join(essay_names) if essay_names else 'N/A'
+                
+                # Handle JSON string (fallback)
+                if isinstance(x, str):
+                    if x.startswith('['):
+                        parsed = json.loads(x)
+                        essay_names = [item.get('essay', '') for item in parsed if isinstance(item, dict)]
+                        return ', '.join(essay_names) if essay_names else 'N/A'
+                    return x
+                
+                # Fallback for any other type
+                return 'N/A'
+            except Exception as e:
+                return 'N/A'
+        
+        df['essays_broken_names'] = df['breached_essays'].apply(extract_essay_names)
+    else:
+        df['essays_broken_names'] = 'N/A'
     
-    columns.extend([
-        {'name': 'Component', 'id': 'componentName'},
-        {'name': 'Status', 'id': 'report_status'},
-        {'name': 'Severity Score', 'id': 'severity_score', 'type': 'numeric'},
-        {'name': 'Essays Broken', 'id': 'essays_broken', 'type': 'numeric'},
-        {'name': 'Sample Date', 'id': 'sampleDate'}
-    ])
+    # Format AI recommendations (full text, no truncation)
+    if 'ai_recommendation' in df.columns:
+        def format_ai_recommendation(x):
+            try:
+                if pd.isna(x) or x is None:
+                    return 'N/A'
+                return str(x)
+            except:
+                return 'N/A'
+        
+        df['ai_text'] = df['ai_recommendation'].apply(format_ai_recommendation)
+    else:
+        df['ai_text'] = 'N/A'
+    
+    # Define columns: Component, Status, Sample Date, Essays Broken, AI Recommendation
+    columns = [
+        {'name': 'Componente', 'id': 'componentName'},
+        {'name': 'Estado', 'id': 'report_status'},
+        {'name': 'Fecha Muestra', 'id': 'sampleDate'},
+        {'name': 'Ensayos Anormales', 'id': 'essays_broken_names'},
+        {'name': 'Recomendación IA', 'id': 'ai_text'}
+    ]
     
     return dash_table.DataTable(
         id='machine-detail-table',
@@ -189,7 +279,9 @@ def create_machine_detail_table(df: pd.DataFrame) -> dash_table.DataTable:
         style_cell={
             'textAlign': 'left',
             'padding': '10px',
-            'fontSize': '14px'
+            'fontSize': '13px',
+            'whiteSpace': 'normal',
+            'height': 'auto'
         },
         style_header={
             'backgroundColor': '#6c757d',
@@ -198,6 +290,7 @@ def create_machine_detail_table(df: pd.DataFrame) -> dash_table.DataTable:
             'textAlign': 'center'
         },
         style_data_conditional=[
+            # Status column styling (GR-05: Single status design language)
             {
                 'if': {
                     'filter_query': '{report_status} = "Anormal"',
@@ -223,9 +316,24 @@ def create_machine_detail_table(df: pd.DataFrame) -> dash_table.DataTable:
                 },
                 'backgroundColor': '#d4edda',
                 'color': '#155724'
+            },
+            # Highlight high essays_broken
+            {
+                'if': {
+                    'filter_query': '{essays_broken} > 3',
+                    'column_id': 'essays_broken'
+                },
+                'backgroundColor': '#f8d7da',
+                'fontWeight': 'bold'
             }
         ],
-        sort_action='native'
+        style_cell_conditional=[
+            {'if': {'column_id': 'ai_summary'}, 'width': '25%', 'minWidth': '180px'},
+            {'if': {'column_id': 'breached_essays_text'}, 'width': '20%', 'minWidth': '150px'},
+            {'if': {'column_id': 'componentName'}, 'width': '15%'}
+        ],
+        sort_action='native',
+        page_size=20
     )
 
 

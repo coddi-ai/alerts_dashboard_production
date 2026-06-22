@@ -1,19 +1,22 @@
 """
 Machines Overview tab callbacks for Multi-Technical-Alerts dashboard.
 
-Complete implementation with all 4 sections from documentation.
+Redesigned following OIL-M-01 through OIL-M-06 requirements with improved UX.
 """
 
-from dash import Input, Output, State, html, dcc, dash_table
+from dash import Input, Output, State, html, dcc, dash_table, ctx
 from dash.exceptions import PreventUpdate
 import pandas as pd
 import plotly.graph_objects as go
-import plotly.express as px
 from pathlib import Path
 from config.settings import get_settings
 from src.utils.file_utils import safe_read_parquet
 from src.utils.logger import get_logger
-from dashboard.components.charts import create_status_pie_chart, STATUS_COLORS
+from dashboard.components.charts import (
+    create_machine_status_donut, 
+    create_component_stacked_bar_chart, 
+    STATUS_COLORS
+)
 from dashboard.components.tables import create_priority_table, create_machine_detail_table
 import dash_bootstrap_components as dbc
 
@@ -24,385 +27,383 @@ def register_machines_callbacks(app):
     """
     Register callbacks for Machines Overview tab.
     
+    Implements:
+    - OIL-M-01: Interactive donut chart filtering priority table
+    - OIL-M-02: User-facing diagnostic table columns
+    - OIL-M-03: Persistent master-detail flow
+    - OIL-M-04: Component evidence focused on condition
+    - OIL-M-05: Quick navigation to report detail
+    - OIL-M-06: Component stacked bar chart with grouping toggle
+    
     Args:
         app: Dash application instance
     """
     
-    # SECTION 1: Machine-Level Overview (Pie + Priority Table)
+    # ========================================
+    # SECTION 1: Fleet Status KPIs (Redesigned June 2026)
+    # ========================================
+    
     @app.callback(
-        [Output('status-pie-chart', 'figure'),
-         Output('priority-table-container', 'children'),
+        [Output('kpi-total-machines', 'children'),
+         Output('kpi-normal-machines', 'children'),
+         Output('kpi-alerta-machines', 'children'),
+         Output('kpi-anormal-machines', 'children'),
          Output('machine-detail-selector', 'options'),
          Output('nav-equipment-selector', 'options')],
-        [Input('client-selector', 'value'),
-         Input('status-filter', 'value')]
+        [Input('client-selector', 'value')]
     )
-    def update_machines_overview(client, status_filter):
-        """Update machines overview based on client and status filter."""
-        logger.info(f"Machines overview callback triggered: client={client}, status_filter={status_filter}")
+    def update_fleet_kpis(client):
+        """
+        Update fleet status KPI cards and machine options.
+        
+        Redesigned June 2026: Replaced donut chart with KPIs for better data density.
+        """
+        logger.info(f"Fleet KPIs callback triggered: client={client}")
         
         if not client:
-            from plotly.graph_objects import Figure
             logger.warning("No client selected")
-            return Figure(), "Please select a client", [], []
+            return "0", "0", "0", "0", [], []
         
         settings = get_settings()
-        
-        # Load machine status data from golden layer
-        machine_file = settings.get_machine_status_path(client)
+        machine_file = settings.get_machine_status_path(client.lower())
         logger.info(f"Looking for machine file at: {machine_file}")
         
         if not machine_file.exists():
-            from plotly.graph_objects import Figure
             logger.error(f"Machine file not found: {machine_file}")
-            return Figure(), f"No machine data available at {machine_file}", [], []
+            return "0", "0", "0", "0", [], []
         
         try:
             df = safe_read_parquet(machine_file)
             
-            # Apply status filter
-            if status_filter:
-                df = df[df['overall_status'].isin(status_filter)]
+            # Calculate status counts
+            status_counts = df['overall_status'].value_counts()
+            total = len(df)
+            normal = status_counts.get('Normal', 0)
+            alerta = status_counts.get('Alerta', 0)
+            anormal = status_counts.get('Anormal', 0)
             
-            # Create pie chart
-            pie_chart = create_status_pie_chart(df)
-            
-            # Create priority table
-            priority_table = create_priority_table(df)
-            
-            # Machine options for detail selector - add "All Machines" option
+            # Machine options for selectors
             machines = sorted(df['unit_id'].unique().tolist())
-            machine_options = [{'label': 'All Machines', 'value': 'ALL'}] + [{'label': m.upper(), 'value': m} for m in machines]
+            machine_options = [{'label': m, 'value': m} for m in machines]
             
-            return pie_chart, priority_table, machine_options, machine_options[1:]  # Nav options without "All"
+            return str(total), str(normal), str(alerta), str(anormal), machine_options, machine_options
             
         except Exception as e:
-            from plotly.graph_objects import Figure
-            return Figure(), f"Error: {str(e)}", [], []
+            logger.error(f"Error loading fleet KPIs: {str(e)}")
+            return "0", "0", "0", "0", [], []
     
     
-    # SECTION 2: Machine Detail Drill-Down
     @app.callback(
-        [Output('machine-info-header', 'children'),
-         Output('machine-detail-table-container', 'children')],
-        [Input('machine-detail-selector', 'value'),
-         Input('client-selector', 'value')]
+        [Output('priority-table-container', 'children'),
+         Output('table-filter-badge', 'children')],
+        [Input('kpi-normal-card', 'n_clicks'),
+         Input('kpi-alerta-card', 'n_clicks'),
+         Input('kpi-anormal-card', 'n_clicks'),
+         Input('client-selector', 'value')],
+        prevent_initial_call=False
     )
-    def update_machine_details(unit_id, client):
-        """Update machine detail view."""
-        if not client:
-            return "", "Select a client to view machine details"
+    def update_priority_table(normal_clicks, alerta_clicks, anormal_clicks, client):
+        """
+        Update priority table with optional filter from KPI card clicks.
         
-        if not unit_id:
-            return "", "Select a machine to view component details"
+        Redesigned June 2026: Click on KPI cards to filter table by status.
+        """
+        if not client:
+            return "Por favor seleccione un cliente", ""
         
         settings = get_settings()
+        machine_file = settings.get_machine_status_path(client.lower())
         
-        # Load classified reports from golden layer
-        reports_file = settings.get_classified_reports_path(client)
+        if not machine_file.exists():
+            return "No hay datos de máquinas disponibles", ""
+        
+        try:
+            df = safe_read_parquet(machine_file)
+            
+            # Determine status filter from clicked KPI
+            status_filter = None
+            filter_badge = ""
+            
+            triggered = ctx.triggered_id if ctx.triggered else None
+            
+            if triggered == 'kpi-normal-card' and normal_clicks:
+                status_filter = 'Normal'
+                filter_badge = dbc.Badge("Filtrado: Normal", color="success", className="ms-2")
+            elif triggered == 'kpi-alerta-card' and alerta_clicks:
+                status_filter = 'Alerta'
+                filter_badge = dbc.Badge("Filtrado: Alerta", color="warning", className="ms-2")
+            elif triggered == 'kpi-anormal-card' and anormal_clicks:
+                status_filter = 'Anormal'
+                filter_badge = dbc.Badge("Filtrado: Anormal", color="danger", className="ms-2")
+            
+            # Create priority table with filter
+            priority_table = create_priority_table(df, status_filter)
+            
+            return priority_table, filter_badge
+            
+        except Exception as e:
+            logger.error(f"Error updating priority table: {str(e)}")
+            return f"Error: {str(e)}", ""
+    
+    
+    # ========================================
+    # SECTION 2: Machine Detail (Master-Detail)
+    # ========================================
+    
+    @app.callback(
+        [Output('machine-selection-indicator', 'children'),
+         Output('machine-selection-indicator', 'color'),
+         Output('machine-detail-table-container', 'children')],
+        [Input('priority-table', 'selected_rows'),
+         Input('machine-detail-selector', 'value'),
+         Input('client-selector', 'value')],
+        [State('priority-table', 'data')]
+    )
+    def update_machine_detail(selected_rows, manual_selection, client, table_data):
+        """
+        Update machine detail view with persistent selection indicator.
+        
+        Implements OIL-M-03 (persistent master-detail), OIL-M-04 (condition-focused).
+        """
+        if not client:
+            return "Ninguna máquina seleccionada", "light", "Seleccione un cliente para ver los detalles de la máquina"
+        
+        # Determine which machine to show
+        unit_id = None
+        selection_source = "manual"
+        
+        # Priority: Table selection > Manual dropdown
+        if selected_rows and len(selected_rows) > 0 and table_data:
+            # Don't convert to lowercase - use the unit_id as-is from the table
+            # The parquet files store unit_id as 'T_10', 'T_11', etc.
+            unit_id = table_data[selected_rows[0]]['unit_id']
+            selection_source = "table"
+        elif manual_selection:
+            unit_id = manual_selection
+            selection_source = "dropdown"
+        
+        if not unit_id:
+            return "Ninguna máquina seleccionada", "light", "Seleccione una máquina de la tabla de prioridad o del menú desplegable"
+        
+        # Load data
+        settings = get_settings()
+        reports_file = settings.get_classified_reports_path(client.lower())
+        
+        logger.info(f"Looking for unit_id: {unit_id} in classified reports")
         
         if not reports_file.exists():
-            return "", "No reports data available"
+            return "Ninguna máquina seleccionada", "light", "No hay datos de reportes disponibles"
+        
+        try:
+            df = safe_read_parquet(reports_file)
+            machine_df = df[df['unitId'] == unit_id].copy()
+            
+            if machine_df.empty:
+                logger.warning(f"No data found for unit_id: {unit_id}")
+                return f"Máquina {unit_id} seleccionada", "warning", f"No se encontraron datos para la máquina {unit_id}"
+            
+            # Get latest sample for each component
+            latest_samples = machine_df.loc[machine_df.groupby('componentName')['sampleDate'].idxmax()]
+            
+            # Add breached_essays and ai_recommendation columns if needed
+            display_df = latest_samples[['componentName', 'report_status', 'severity_score', 
+                                          'essays_broken', 'sampleDate']].copy()
+            
+            # Add additional columns if available
+            if 'breached_essays' in latest_samples.columns:
+                display_df['breached_essays'] = latest_samples['breached_essays']
+            if 'ai_recommendation' in latest_samples.columns:
+                display_df['ai_recommendation'] = latest_samples['ai_recommendation']
+            
+            # Format date
+            display_df['sampleDate'] = pd.to_datetime(display_df['sampleDate']).dt.strftime('%Y-%m-%d')
+            
+            # Create persistent selection indicator (OIL-M-03)
+            machine_info = machine_df.iloc[0]
+            machine_type = str(machine_info.get('machineName', 'N/A')).title()
+            
+            # Count critical components
+            anormal_count = (display_df['report_status'] == 'Anormal').sum()
+            alerta_count = (display_df['report_status'] == 'Alerta').sum()
+            normal_count = (display_df['report_status'] == 'Normal').sum()
+            
+            indicator = html.Div([
+                html.H5([
+                    html.Span("📍 ", style={'fontSize': '1.2em'}),
+                    f"Seleccionada: {unit_id}",
+                    html.Span(f" ({machine_type})", className="text-muted ms-2")
+                ], className="mb-2"),
+                html.Div([
+                    html.Span([
+                        html.Strong("Componentes: "),
+                        f"{len(display_df)} total"
+                    ], className="me-3"),
+                    html.Span([
+                        html.Span(f"🟢 {normal_count} Normal", className="me-2"),
+                        html.Span(f"🟡 {alerta_count} Alerta", className="me-2"),
+                        html.Span(f"🔴 {anormal_count} Anormal", className="me-2")
+                    ])
+                ], className="small")
+            ])
+            
+            # Create component detail table (OIL-M-04)
+            table = create_machine_detail_table(display_df)
+            
+            return indicator, "info", table
+            
+        except Exception as e:
+            logger.error(f"Error updating machine detail for {unit_id}: {str(e)}")
+            return f"Error al cargar máquina {unit_id}", "danger", f"Error: {str(e)}"
+    
+    
+    # ========================================
+    # SECTION 4: Component Distribution Chart
+    # ========================================
+    
+    @app.callback(
+        Output('component-grouping-state', 'data'),
+        [Input('toggle-component-grouping', 'n_clicks')],
+        [State('component-grouping-state', 'data')],
+        prevent_initial_call=True
+    )
+    def toggle_component_grouping(n_clicks, current_state):
+        """
+        Toggle between original and normalized component grouping (OIL-M-06).
+        """
+        if n_clicks:
+            return {'use_normalized': not current_state.get('use_normalized', False)}
+        return current_state
+    
+    
+    @app.callback(
+        [Output('component-stacked-bar-chart', 'figure'),
+         Output('component-grouping-indicator', 'children')],
+        [Input('component-grouping-state', 'data'),
+         Input('client-selector', 'value')]
+    )
+    def update_component_distribution(grouping_state, client):
+        """
+        Update component status stacked bar chart (OIL-M-06).
+        
+        Replaces donut with scalable horizontal stacked bar chart.
+        Toggle between original component names and normalized (grouped) names.
+        """
+        if not client:
+            from plotly.graph_objects import Figure
+            return Figure(), ""
+        
+        settings = get_settings()
+        reports_file = settings.get_classified_reports_path(client.lower())
+        
+        if not reports_file.exists():
+            from plotly.graph_objects import Figure
+            return Figure(), ""
         
         try:
             df = safe_read_parquet(reports_file)
             
-            # Filter to selected machine(s)
-            if unit_id == 'ALL':
-                machine_df = df.copy()
-                header_text = "All Machines"
+            use_normalized = grouping_state.get('use_normalized', False)
+            
+            # Create stacked bar chart (OIL-M-06)
+            chart = create_component_stacked_bar_chart(df, use_normalized)
+            
+            # Indicator text
+            if use_normalized:
+                indicator_text = "📊 Showing grouped components (using componentNameNormalized)"
             else:
-                machine_df = df[df['unitId'] == unit_id].copy()
-                header_text = f"Machine: {unit_id}"
+                indicator_text = "📊 Showing original component granularity"
             
-            if machine_df.empty:
-                return "", f"No data found for {header_text}"
-            
-            # Get latest samples for each component (per machine if ALL)
-            if unit_id == 'ALL':
-                latest_samples = machine_df.loc[machine_df.groupby(['unitId', 'componentName'])['sampleDate'].idxmax()]
-            else:
-                latest_samples = machine_df.loc[machine_df.groupby('componentName')['sampleDate'].idxmax()]
-            
-            # Prepare display data
-            if unit_id == 'ALL':
-                display_df = latest_samples[['unitId', 'componentName', 'report_status', 'severity_score', 
-                                              'essays_broken', 'sampleDate']].copy()
-            else:
-                display_df = latest_samples[['componentName', 'report_status', 'severity_score', 
-                                              'essays_broken', 'sampleDate']].copy()
-            
-            # Format date
-            if 'sampleDate' in display_df.columns:
-                display_df['sampleDate'] = pd.to_datetime(display_df['sampleDate']).dt.strftime('%Y-%m-%d')
-            
-            # Create header
-            if unit_id != 'ALL':
-                machine_info = machine_df.iloc[0]
-                machine_type_display = str(machine_info.get('machineName', 'N/A')).title()
-                header = html.Div([
-                    html.H5(f"Machine: {unit_id.upper()}", className="mb-2"),
-                    html.P([
-                        f"Client: {machine_info.get('client', 'N/A').upper()} | ",
-                        f"Machine Type: {machine_type_display} | ",
-                        f"Total Components: {len(latest_samples)}"
-                    ], className="text-muted")
-                ])
-            else:
-                header = html.Div([
-                    html.H5(f"Showing all machines ({len(machine_df['unitId'].unique())} machines, {len(latest_samples)} components)", className="mb-2")
-                ])
-            
-            # Create table
-            table = create_machine_detail_table(display_df)
-            
-            return header, table
+            return chart, indicator_text
             
         except Exception as e:
-            return "", f"Error: {str(e)}"
+            logger.error(f"Error updating component distribution: {str(e)}")
+            from plotly.graph_objects import Figure
+            return Figure(), f"Error: {str(e)}"
     
     
-    # Navigation: Update component dropdown based on equipment selection
+    # ========================================
+    # SECTION 3: Quick Navigation
+    # ========================================
+    
     @app.callback(
-        Output('nav-component-selector', 'options'),
+        [Output('nav-component-selector', 'options'),
+         Output('nav-component-selector', 'disabled'),
+         Output('nav-to-report-button', 'disabled')],
         [Input('nav-equipment-selector', 'value'),
          Input('client-selector', 'value')]
     )
-    def update_nav_component_options(unit_id, client):
-        """Update component options for navigation."""
+    def update_nav_options(unit_id, client):
+        """
+        Update navigation dropdowns (OIL-M-05).
+        """
         if not unit_id or not client:
-            return []
+            return [], True, True
         
         settings = get_settings()
-        reports_file = settings.get_classified_reports_path(client)
+        reports_file = settings.get_classified_reports_path(client.lower())
         
         if not reports_file.exists():
-            return []
+            return [], True, True
         
         try:
             df = safe_read_parquet(reports_file)
             df = df[df['unitId'] == unit_id]
             
             components = sorted(df['componentName'].unique().tolist())
-            return [{'label': c.title(), 'value': c} for c in components]
+            component_options = [{'label': c.title(), 'value': c} for c in components]
+            
+            return component_options, False, False
             
         except:
-            return []
+            return [], True, True
     
     
-    # SECTION 3: Component-Level Distribution Charts
     @app.callback(
-        [Output('component-status-pie-chart', 'figure'),
-         Output('component-status-histogram', 'figure')],
-        [Input('client-selector', 'value'),
-         Input('status-filter', 'value')]
-    )
-    def update_component_distributions(client, status_filter):
-        """Update component-level distribution charts."""
-        if not client:
-            from plotly.graph_objects import Figure
-            return Figure(), Figure()
-        
-        settings = get_settings()
-        reports_file = settings.get_classified_reports_path(client)
-        
-        if not reports_file.exists():
-            from plotly.graph_objects import Figure
-            return Figure(), Figure()
-        
-        try:
-            df = safe_read_parquet(reports_file)
-            
-            # Get latest sample for each machine-component combination
-            latest_components = df.loc[df.groupby(['unitId', 'componentName'])['sampleDate'].idxmax()]
-            
-            # Apply status filter
-            if status_filter:
-                latest_components = latest_components[latest_components['report_status'].isin(status_filter)]
-            
-            # Component status pie chart
-            status_counts = latest_components['report_status'].value_counts()
-            
-            pie_fig = go.Figure(data=[go.Pie(
-                labels=status_counts.index,
-                values=status_counts.values,
-                marker=dict(colors=[STATUS_COLORS.get(s, '#999999') for s in status_counts.index]),
-                hole=0.4,
-                textinfo='label+percent+value',
-                textfont=dict(size=14)
-            )])
-            
-            pie_fig.update_layout(
-                title="Component Status Distribution",
-                title_font_size=16,
-                showlegend=True,
-                height=400
-            )
-            
-            # Component status histogram – reports per component, colored by status
-            histogram_fig = px.histogram(
-                latest_components,
-                x='componentName',
-                color='report_status',
-                color_discrete_map=STATUS_COLORS,
-                title="Reports per Component by Status",
-                barmode='stack'
-            )
-            
-            histogram_fig.update_layout(
-                xaxis_title="Component",
-                yaxis_title="Number of Reports",
-                showlegend=True,
-                height=400,
-                xaxis_tickangle=-45
-            )
-            
-            return pie_fig, histogram_fig
-            
-        except Exception as e:
-            from plotly.graph_objects import Figure
-            return Figure(), Figure()
-    
-    
-    # SECTION 4: Critical Components Analysis
-    @app.callback(
-        Output('critical-components-container', 'children'),
-        [Input('client-selector', 'value'),
-         Input('status-filter', 'value')]
-    )
-    def update_critical_components(client, status_filter):
-        """Update critical components table with AI recommendations."""
-        if not client:
-            return html.Div("Please select a client", className="text-muted p-3")
-        
-        settings = get_settings()
-        reports_file = settings.get_classified_reports_path(client)
-        
-        if not reports_file.exists():
-            return html.Div("No reports data available", className="text-warning p-3")
-        
-        try:
-            df = safe_read_parquet(reports_file)
-            
-            # Get latest sample for each machine-component
-            latest_components = df.loc[df.groupby(['unitId', 'componentName'])['sampleDate'].idxmax()]
-            
-            # Filter to critical components (Anormal or Alerta)
-            critical = latest_components[latest_components['report_status'].isin(['Anormal', 'Alerta'])]
-            
-            # Apply status filter if specified
-            if status_filter:
-                critical = critical[critical['report_status'].isin(status_filter)]
-            
-            if critical.empty:
-                return dbc.Alert(
-                    "✅ No critical components found. All systems operating normally!",
-                    color="success"
-                )
-            
-            # Sort by severity (Anormal first, then by severity score)
-            critical = critical.sort_values(
-                by=['report_status', 'severity_score'],
-                ascending=[True, False]  # Anormal < Alerta alphabetically, so True puts Anormal first
-            )
-            
-            # Create expandable sections for each critical component
-            components = []
-            
-            for idx, row in critical.iterrows():
-                status_color = 'danger' if row['report_status'] == 'Anormal' else 'warning'
-                status_icon = '🔴' if row['report_status'] == 'Anormal' else '🟡'
-                
-                # Apply formatting to display names
-                unit_display = str(row['unitId']).upper()
-                component_display = str(row['componentName']).title()
-                
-                # Create component card
-                card = dbc.Card([
-                    dbc.CardHeader([
-                        html.Div([
-                            html.Span(f"{status_icon} ", style={'fontSize': '1.2em'}),
-                            html.Strong(f"{unit_display} - {component_display}"),
-                            html.Span(
-                                f" {row['report_status']}",
-                                className=f"badge bg-{status_color} ms-2"
-                            ),
-                            html.Span(
-                                f" Score: {row.get('severity_score', 0)}",
-                                className="badge bg-secondary ms-2"
-                            ),
-                            html.Span(
-                                f" Essays Broken: {row.get('essays_broken', 0)}",
-                                className="badge bg-info ms-2"
-                            )
-                        ])
-                    ]),
-                    dbc.CardBody([
-                        html.P([
-                            html.Strong("Sample Date: "),
-                            pd.to_datetime(row['sampleDate']).strftime('%Y-%m-%d') if pd.notna(row['sampleDate']) else 'N/A'
-                        ]),
-                        html.Hr(),
-                        html.H6("🤖 AI Recommendation:", className="mb-2"),
-                        html.Div(
-                            row.get('ai_recommendation', 'No AI recommendation available'),
-                            style={'whiteSpace': 'pre-wrap'}
-                        )
-                    ])
-                ], className="mb-3", color=status_color, outline=True)
-                
-                components.append(card)
-            
-            return html.Div([
-                html.P(f"Found {len(critical)} components requiring attention:", className="fw-bold mb-3"),
-                html.Div(components)
-            ])
-            
-        except Exception as e:
-            return html.Div(f"Error: {str(e)}", className="text-danger p-3")
-    
-    
-    # NAVIGATION: Handle "Navigate to Report" button
-    @app.callback(
-        [Output('navigation-state', 'data'),
-         Output('oil-internal-tabs', 'value')],
+        [Output('oil-internal-tabs', 'value'),
+         Output('navigation-state', 'data', allow_duplicate=True)],
         [Input('nav-to-report-button', 'n_clicks')],
         [State('nav-equipment-selector', 'value'),
          State('nav-component-selector', 'value'),
          State('client-selector', 'value')],
         prevent_initial_call=True
     )
-    def navigate_to_report(n_clicks, equipo, component, client):
-        """Navigate to Report Detail tab within Oil section with pre-filled filters."""
-        if not n_clicks or not all([equipo, component, client]):
+    def navigate_to_report_detail(n_clicks, equipo, component, client):
+        """
+        Navigate to Report Detail tab (OIL-M-05).
+        
+        Switches to the report-detail tab and pre-populates equipment and component selectors.
+        """
+        if not n_clicks or not equipo or not component or not client:
             raise PreventUpdate
         
-        # Get familia (machineName) for the selected equipment
+        logger.info(f"Navigation requested: equipment={equipo}, component={component}, client={client}")
+        
+        # Fetch familia (machine type) from data
         settings = get_settings()
-        reports_file = settings.get_classified_reports_path(client)
+        reports_file = settings.get_classified_reports_path(client.lower())
         
-        if not reports_file.exists():
-            raise PreventUpdate
+        familia = None
+        if reports_file.exists():
+            try:
+                df = safe_read_parquet(reports_file)
+                machine_data = df[df['unitId'] == equipo]
+                if not machine_data.empty:
+                    familia = machine_data.iloc[0]['machineName']
+                    logger.info(f"Found familia: {familia} for equipment: {equipo}")
+            except Exception as e:
+                logger.error(f"Error fetching familia: {str(e)}")
         
-        try:
-            df = safe_read_parquet(reports_file)
-            equipo_data = df[df['unitId'] == equipo]
-            
-            if equipo_data.empty:
-                raise PreventUpdate
-            
-            familia = equipo_data.iloc[0]['machineName']
-            
-            # Prepare navigation state
-            nav_state = {
-                'familia': familia,
-                'equipo': equipo,
-                'component': component,
-                'client': client
-            }
-            
-            # Switch to Report Detail internal tab within Oil section
-            return nav_state, 'report-detail'
-            
-        except Exception as e:
-            raise PreventUpdate
+        # Create navigation state with familia, equipo, and component
+        nav_state = {
+            'equipo': equipo,
+            'component': component
+        }
+        
+        # Add familia if found
+        if familia:
+            nav_state['familia'] = familia
+        
+        logger.info(f"Switching to report-detail tab with navigation state: {nav_state}")
+        
+        # Switch to report-detail tab and set navigation state
+        return 'report-detail', nav_state

@@ -1,7 +1,7 @@
 """
 Reports Detail tab for Multi-Technical-Alerts dashboard.
 
-Displays sample-level analysis with radar charts and time series.
+Displays sample-level analysis with evidence tables, radar charts, and time series.
 """
 
 from dash import dcc, html
@@ -12,115 +12,122 @@ def create_reports_tab() -> dbc.Container:
     """
     Create Tab 3: Reports Detail Analysis.
     
-    Features:
-    - 4-level filter hierarchy: Client → Familia → Equipo → Componente
-    - Auto-loads most recent sample on page load
-    - Radar charts by GroupElement
-    - Value analysis table
-    - Time series chart with threshold lines
-    - AI recommendations display
-    - Historical comparison table
+    Features (following OIL-R requirements):
+    - OIL-R-01: Sticky report identity header
+    - OIL-R-02: Decision summary (status, severity, breached essays)
+    - OIL-R-03: Evidence tables AND radar charts
+    - OIL-R-04: Separate AI diagnosis from action
+    - OIL-R-05: User-selectable time-series (with breached essays pre-selected)
+    - OIL-R-06: Delta summary comparison
     
     Returns:
         Bootstrap container with tab layout
     """
     return dbc.Container([
-        html.H3("Reports Detail Analysis", className="mt-4 mb-3"),
+        html.H3("Análisis Detallado de Reportes", className="mt-4 mb-3"),
         html.Hr(),
         
-        # 4-Level Filter Hierarchy
-        dbc.Card([
-            dbc.CardHeader("Filter Hierarchy", className="fw-bold"),
-            dbc.CardBody([
-                dbc.Row([
-                    # Level 2: Familia (Machine Type)
-                    dbc.Col([
-                        html.Label("Familia (Machine Type):", className="fw-bold"),
-                        dcc.Dropdown(
-                            id='reports-familia-selector',
-                            placeholder='Select machine type...',
-                            className="mb-3"
-                        )
-                    ], width=3),
-                    
-                    # Level 3: Equipo (Unit ID)
-                    dbc.Col([
-                        html.Label("Equipo (Unit ID):", className="fw-bold"),
-                        dcc.Dropdown(
-                            id='reports-equipo-selector',
-                            placeholder='Select equipment...',
-                            className="mb-3"
-                        )
-                    ], width=3),
-                    
-                    # Level 4: Componente
-                    dbc.Col([
-                        html.Label("Componente:", className="fw-bold"),
-                        dcc.Dropdown(
-                            id='reports-component-selector',
-                            placeholder='Select component...',
-                            className="mb-3"
-                        )
-                    ], width=3),
-                    
-                    # Sample Date
-                    dbc.Col([
-                        html.Label("Sample Date:", className="fw-bold"),
-                        dcc.Dropdown(
-                            id='reports-date-selector',
-                            placeholder='Select date...',
-                            className="mb-3"
-                        )
-                    ], width=3)
+        # STICKY REPORT IDENTITY HEADER (OIL-R-01)
+        html.Div([
+            dbc.Card([
+                dbc.CardBody([
+                    # Filter Row
+                    dbc.Row([
+                        dbc.Col([
+                            html.Label("Familia:", className="fw-bold mb-1", style={'fontSize': '0.9rem'}),
+                            dcc.Dropdown(
+                                id='reports-familia-selector',
+                                placeholder='Seleccionar tipo de máquina...',
+                                className="mb-2"
+                            )
+                        ], width=3),
+                        dbc.Col([
+                            html.Label("Equipo:", className="fw-bold mb-1", style={'fontSize': '0.9rem'}),
+                            dcc.Dropdown(
+                                id='reports-equipo-selector',
+                                placeholder='Seleccionar equipo...',
+                                className="mb-2"
+                            )
+                        ], width=3),
+                        dbc.Col([
+                            html.Label("Componente:", className="fw-bold mb-1", style={'fontSize': '0.9rem'}),
+                            dcc.Dropdown(
+                                id='reports-component-selector',
+                                placeholder='Seleccionar componente...',
+                                className="mb-2"
+                            )
+                        ], width=3),
+                        dbc.Col([
+                            html.Label("Fecha de Muestra:", className="fw-bold mb-1", style={'fontSize': '0.9rem'}),
+                            dcc.Dropdown(
+                                id='reports-date-selector',
+                                placeholder='Seleccionar fecha...',
+                                className="mb-2"
+                            )
+                        ], width=3)
+                    ]),
+                    # Report Identity Row (populated by callback)
+                    html.Div(id='reports-identity-display')
                 ])
-            ])
-        ], className="mb-4"),
+            ], className="mb-2")
+        ], style={
+            'position': 'sticky',
+            'top': '0',
+            'zIndex': '1000',
+            'backgroundColor': '#f8f9fa',
+            'paddingTop': '10px',
+            'paddingBottom': '10px'
+        }),
         
-        # Sample information card
+        # DECISION SUMMARY SECTION (OIL-R-02)
         dbc.Card([
-            dbc.CardHeader("Sample Information", className="fw-bold"),
+            dbc.CardHeader("🎯 Resumen de Decisión", className="fw-bold bg-primary text-white"),
             dbc.CardBody(
-                html.Div(id='reports-sample-info-display')
+                html.Div(id='reports-decision-summary')
             )
         ], className="mb-4"),
         
-        # SECTION 1: Analysis Section - Radar charts with tables per GroupElement
+        # AI RECOMMENDATION SECTION (OIL-R-04) - Plain text display
         dbc.Card([
-            dbc.CardHeader("📊 Report Analysis", className="fw-bold"),
-            dbc.CardBody([
-                html.Div(id='reports-radar-charts-container')  # Contains grouped sections
-            ])
-        ], className="mb-4"),
-        
-        # SECTION 2: AI Recommendations (below analysis)
-        dbc.Card([
-            dbc.CardHeader("🤖 AI Recommendation", className="fw-bold"),
+            dbc.CardHeader("🤖 Análisis y Recomendación de IA", className="fw-bold bg-info text-white"),
             dbc.CardBody(
-                html.Div(id='reports-ai-recommendation-display')
+                html.Div(id='reports-ai-diagnosis')  # Single plain text display
             )
         ], className="mb-4"),
         
-        # SECTION 3: Time Series Analysis
+        # EVIDENCE ANALYSIS SECTION (OIL-R-03) - Tables AND Radar Charts
         dbc.Card([
-            dbc.CardHeader("📈 Time Series Analysis", className="fw-bold"),
+            dbc.CardHeader("📊 Análisis de Evidencia por Ensayo", className="fw-bold"),
             dbc.CardBody([
-                html.Label("Select Essays to Plot:", className="fw-bold mb-2"),
+                html.P("Evidencia agrupada por categoría de ensayo (tablas + gráficos radiales)", className="text-muted mb-3"),
+                html.Div(id='reports-evidence-container')  # Contains both tables and radar charts
+            ])
+        ], className="mb-4"),
+        
+        # TIME SERIES ANALYSIS (OIL-R-05) - User-selectable
+        dbc.Card([
+            dbc.CardHeader("📈 Análisis de Series Temporales", className="fw-bold"),
+            dbc.CardBody([
+                html.P("Los ensayos fuera de límite están preseleccionados por defecto. Puede modificar la selección a continuación.", 
+                       className="text-muted mb-2"),
+                html.Label("Seleccionar Ensayos para Graficar:", className="fw-bold mb-2"),
                 dcc.Dropdown(
                     id='reports-essays-selector',
                     multi=True,
-                    placeholder='Select essays (up to 6)...',
+                    placeholder='Seleccionar ensayos (hasta 6)...',
                     className="mb-3"
                 ),
                 dcc.Graph(id='reports-time-series-chart')
             ])
         ], className="mb-4"),
         
-        # SECTION 4: Historical Comparison
+        # DELTA SUMMARY COMPARISON (OIL-R-06)
         dbc.Card([
-            dbc.CardHeader("🔄 Comparison with Previous Reports", className="fw-bold"),
+            dbc.CardHeader("🔄 Análisis de Cambios vs Reporte Anterior", className="fw-bold"),
             dbc.CardBody(
-                html.Div(id='reports-historical-comparison')
+                html.Div(id='reports-delta-summary')
             )
         ], className="mb-4")
         
     ], fluid=True)
+        
