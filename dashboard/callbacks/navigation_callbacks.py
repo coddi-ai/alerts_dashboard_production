@@ -186,16 +186,18 @@ def register_navigation_callbacks(app: dash.Dash) -> None:
         [Output('section-content', 'children'),
          Output({'type': 'nav-button', 'index': ALL}, 'className')],
         [Input('active-section-store', 'data'),
-         Input('user-info-store', 'data')],
+         Input('user-info-store', 'data'),
+         Input('client-selector', 'value')],
         [State({'type': 'nav-button', 'index': ALL}, 'id')]
     )
-    def update_section_content(active_section, user_data, button_ids):
+    def update_section_content(active_section, user_data, selected_client, button_ids):
         """
         Update content when active section changes.
         
         Args:
             active_section: Currently active section ID
             user_data: User information from session
+            selected_client: Client selected in the top-bar dropdown
             button_ids: List of all button IDs
         
         Returns:
@@ -205,8 +207,11 @@ def register_navigation_callbacks(app: dash.Dash) -> None:
         if not active_section:
             active_section = 'overview-general'
         
-        # Get client from user data or use default
-        if user_data and 'clients' in user_data and user_data['clients']:
+        # Use the client-selector dropdown value (respects admin switching clients)
+        if selected_client:
+            client = selected_client.lower()
+            logger.info(f"Using client from client-selector dropdown: {client}")
+        elif user_data and 'clients' in user_data and user_data['clients']:
             client = user_data['clients'][0].lower()
             logger.info(f"Using client from user data: {client}")
         else:
