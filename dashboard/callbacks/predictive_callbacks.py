@@ -134,18 +134,25 @@ def register_callbacks(app):
         failure_modes = get_failure_modes_dict(component)
 
         # Classify status (same logic as _render_component_overview)
+        # Saludable: avg_ranking_30d < 30 AND max_fm_30d < 50
+        # Alerta: 30 <= avg_ranking_30d < 60 OR 50 <= max_fm_30d < 80
+        # Crítico: avg_ranking_30d >= 60 OR max_fm_30d >= 80
         latest = df_latest.copy()
-        p80_30d = float(latest["avg_ranking_30d"].quantile(0.80))
         latest["status"] = "Saludable"
-        latest.loc[latest["avg_ranking_30d"] >= p80_30d, "status"] = "Alerta"
         latest.loc[
-            (latest["ranking"] > 80) & (latest["avg_ranking_30d"] >= p80_30d),
+            (latest["avg_ranking_30d"] >= 30) | (latest["max_fm_30d"] >= 50),
+            "status",
+        ] = "Alerta"
+        latest.loc[
+            (latest["avg_ranking_30d"] >= 60) | (latest["max_fm_30d"] >= 80),
             "status",
         ] = "Crítica"
 
-        # Sort by selected column descending
-        if sort_col in latest.columns:
-            sorted_df = latest.sort_values(sort_col, ascending=False)
+        # Sort by selected column descending (use 30d version for failure modes)
+        fm_keys = list(failure_modes.keys())
+        actual_sort_col = f"{sort_col}_30d" if sort_col in fm_keys and f"{sort_col}_30d" in latest.columns else sort_col
+        if actual_sort_col in latest.columns:
+            sorted_df = latest.sort_values(actual_sort_col, ascending=False)
         else:
             sorted_df = latest.sort_values("avg_ranking_30d", ascending=False)
 
@@ -179,11 +186,15 @@ def register_callbacks(app):
                     if not row.empty:
                         row = row.iloc[0]
                         ranking_val = float(row.get("ranking", 0))
+                        avg_30d = float(row.get("avg_ranking_30d", ranking_val))
+                        max_fm = float(row.get("max_fm_30d", 0))
                         ranking_text = f"{ranking_val:.0f}/100"
-                        if ranking_val >= 70:
+                        # Status: Crítico >= 60 OR max_fm >= 80
+                        #         Alerta >= 30 OR max_fm >= 50
+                        if avg_30d >= 60 or max_fm >= 80:
                             status_text = "Crítica"
                             status_color = "#e24b4a"
-                        elif ranking_val >= 40:
+                        elif avg_30d >= 30 or max_fm >= 50:
                             status_text = "Alerta"
                             status_color = "#ef9f27"
                         else:
@@ -302,7 +313,7 @@ def register_callbacks(app):
 
         row = row.iloc[0]
         fm_keys = list(failure_modes.keys())
-        fm_scores = {k: float(row[k]) if k in row.index and pd.notna(row[k]) else 0.0 for k in fm_keys}
+        fm_scores = {k: float(row[f"{k}_30d"]) if f"{k}_30d" in row.index and pd.notna(row[f"{k}_30d"]) else 0.0 for k in fm_keys}
         return max(fm_scores, key=fm_scores.get) if fm_scores else (fm_keys[0] if fm_keys else None)
 
     # ══════════════════════════════════════════════════════════════════════════
