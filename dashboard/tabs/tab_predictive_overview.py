@@ -82,6 +82,20 @@ def _load_component_data(filepath: Path, component: str):
     new_cols["avg_ranking_30d"] = latest_rolling["ranking_30d"].values if "ranking_30d" in latest_rolling.columns else df_latest["ranking"].values
     new_cols["avg_ranking_60d"] = latest_rolling["ranking_60d"].values if "ranking_60d" in latest_rolling.columns else df_latest["ranking"].values
     new_cols["ranking_acum_90d"] = latest_rolling["ranking_90d"].values if "ranking_90d" in latest_rolling.columns else df_latest["ranking"].values
+
+    # Compute max failure mode 30d average per unit (for status classification)
+    fm_30d_cols = [f"{col}_30d" for col in fm_keys if f"{col}_30d" in latest_rolling.columns]
+    if fm_30d_cols:
+        new_cols["max_fm_30d"] = latest_rolling[fm_30d_cols].max(axis=1).values
+        # Also merge individual FM rolling columns (30d, 60d, 90d) for display
+        for col in fm_keys:
+            for suffix in ["_30d", "_60d", "_90d"]:
+                col_name = f"{col}{suffix}"
+                if col_name in latest_rolling.columns:
+                    new_cols[col_name] = latest_rolling[col_name].values
+    else:
+        new_cols["max_fm_30d"] = 0.0
+
     df_latest = df_latest.assign(**new_cols)
 
     # Previous ranking (second-to-last date)
@@ -167,6 +181,17 @@ def _failure_table(sorted_df, sort_col, failure_modes):
     fm_keys = list(failure_modes.keys())
     fm_labels = list(failure_modes.values())
 
+    # Determine which FM suffix to use based on selected period
+    # "ranking" (Hoy) → raw values, "avg_ranking_30d" → _30d, etc.
+    _fm_suffix_map = {
+        "ranking": "",              # Hoy → raw values
+        "avg_ranking_30d": "_30d",
+        "avg_ranking_60d": "_60d",
+        "ranking_acum_90d": "_90d",
+    }
+    # If sort_col is a FM key, keep current period (default 30d)
+    fm_suffix = _fm_suffix_map.get(sort_col, "_30d")
+
     def _th(label, col_id):
         is_active = col_id == sort_col
         return html.Th(
@@ -222,7 +247,9 @@ def _failure_table(sorted_df, sort_col, failure_modes):
         ]
 
         for key in fm_keys:
-            val = float(r[key]) if key in r.index and pd.notna(r[key]) else 0.0
+            # Use the column matching the selected period
+            col_name = f"{key}{fm_suffix}" if fm_suffix else key
+            val = float(r[col_name]) if col_name in r.index and pd.notna(r[col_name]) else 0.0
             style = _score_cell_style(val)
             is_sort = key == sort_col
             cells.append(html.Td(
@@ -245,15 +272,20 @@ def _render_component_overview(df_latest, prev_ranking, component: str):
     """Render overview content for a specific component."""
     failure_modes = get_failure_modes_dict(component)
 
-    # Status classification
+    # Status classification (fixed thresholds)
     latest = df_latest.copy()
-    p80_30d = float(latest["avg_ranking_30d"].quantile(0.80))
     avg_ranking = float(latest["ranking"].mean())
 
+    # Saludable: avg_ranking_30d < 30 AND max_fm_30d < 50
+    # Alerta: 30 <= avg_ranking_30d < 60 OR 50 <= max_fm_30d < 80
+    # Crítico: avg_ranking_30d >= 60 OR max_fm_30d >= 80
     latest["status"] = "Saludable"
-    latest.loc[latest["avg_ranking_30d"] >= p80_30d, "status"] = "Alerta"
     latest.loc[
-        (latest["ranking"] > 80) & (latest["avg_ranking_30d"] >= p80_30d),
+        (latest["avg_ranking_30d"] >= 30) | (latest["max_fm_30d"] >= 50),
+        "status",
+    ] = "Alerta"
+    latest.loc[
+        (latest["avg_ranking_30d"] >= 60) | (latest["max_fm_30d"] >= 80),
         "status",
     ] = "Crítica"
 
@@ -273,9 +305,9 @@ def _render_component_overview(df_latest, prev_ranking, component: str):
         ], style={"marginBottom": "16px"}),
         create_kpi_row([
             create_kpi_card(f"{avg_ranking:.1f}", "Ranking Flota", "fas fa-tachometer-alt", "primary", "promedio actual"),
-            create_kpi_card(n_critical, "Unidades Críticas", "fas fa-exclamation-triangle", "danger", "unidades > P80 + >80"),
-            create_kpi_card(n_alert, "Unidades en Alerta", "fas fa-exclamation-circle", "warning", "unidades > P80"),
-            create_kpi_card(n_healthy, "Unidades Saludables", "fas fa-check-circle", "success", "bajo umbral"),
+            create_kpi_card(n_critical, "Unidades Críticas", "fas fa-exclamation-triangle", "danger", "media 30d ≥60 ó modo falla ≥80"),
+            create_kpi_card(n_alert, "Unidades en Alerta", "fas fa-exclamation-circle", "warning", "media 30d ≥30 ó modo falla ≥50"),
+            create_kpi_card(n_healthy, "Unidades Saludables", "fas fa-check-circle", "success", "media 30d <30 y modos falla <50"),
         ])
     ])
 
@@ -284,8 +316,10 @@ def _render_component_overview(df_latest, prev_ranking, component: str):
     for _, r in latest.sort_values("avg_ranking_30d", ascending=False).iterrows():
         score = r["ranking"]
         delta = score - prev_ranking.get(r["Unit"], score)
+        # Use 30d averages for failure mode drivers (consistent with status classification)
         drivers = sorted(
-            [(failure_modes[c], r[c]) for c in failure_modes if c in r.index and pd.notna(r[c])],
+            [(failure_modes[c], float(r[f"{c}_30d"])) for c in failure_modes
+             if f"{c}_30d" in r.index and pd.notna(r[f"{c}_30d"])],
             key=lambda x: x[1], reverse=True,
         )[:3]
         cards.append(_priority_card(

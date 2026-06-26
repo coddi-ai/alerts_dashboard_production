@@ -127,15 +127,15 @@ def create_comparative_bars(unit_row, df_latest, failure_modes):
     fm_keys = list(failure_modes.keys())
     fm_labels = [failure_modes[k] for k in fm_keys]
     
-    # Valores del equipo seleccionado
+    # Valores del equipo seleccionado (use 30d averages for consistency)
     unit_vals = [
-        float(unit_row[k]) if k in unit_row.index and pd.notna(unit_row[k]) else 0.0
+        float(unit_row[f"{k}_30d"]) if f"{k}_30d" in unit_row.index and pd.notna(unit_row[f"{k}_30d"]) else 0.0
         for k in fm_keys
     ]
     
-    # Valores promedio de la flota
+    # Valores promedio de la flota (use 30d averages)
     fleet_vals = [
-        float(df_latest[k].mean()) if k in df_latest.columns else 0.0
+        float(df_latest[f"{k}_30d"].mean()) if f"{k}_30d" in df_latest.columns else 0.0
         for k in fm_keys
     ]
     
@@ -209,15 +209,15 @@ def create_radar_comparison(unit_row, df_latest, failure_modes):
     fm_labels = [failure_modes[k] for k in failure_modes.keys()]
     fm_keys = list(failure_modes.keys())
 
-    # Valores del equipo seleccionado
+    # Valores del equipo seleccionado (use 30d averages for consistency)
     fm_vals = [
-        float(unit_row[k]) if k in unit_row.index and pd.notna(unit_row[k]) else 0.0
+        float(unit_row[f"{k}_30d"]) if f"{k}_30d" in unit_row.index and pd.notna(unit_row[f"{k}_30d"]) else 0.0
         for k in fm_keys
     ]
 
-    # Valores promedio de la flota
+    # Valores promedio de la flota (use 30d averages)
     avg_vals = [
-        float(df_latest[k].mean()) if k in df_latest.columns else 0.0
+        float(df_latest[f"{k}_30d"].mean()) if f"{k}_30d" in df_latest.columns else 0.0
         for k in fm_keys
     ]
 

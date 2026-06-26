@@ -61,6 +61,10 @@ def _load_component_data(filepath: Path, component: str):
     df = pd.read_csv(filepath)
     df["Fecha"] = pd.to_datetime(df["Fecha"])
 
+    # Get failure mode keys for this component
+    failure_modes = get_failure_modes_dict(component)
+    fm_keys = list(failure_modes.keys())
+
     # Compute rolling averages (concat at once to avoid fragmentation)
     df_sorted = df.sort_values(["Unit", "Fecha"]).copy()
     rolling_cols = {
@@ -71,13 +75,25 @@ def _load_component_data(filepath: Path, component: str):
             lambda x: x.rolling(90, min_periods=1).mean()
         ),
     }
+    # Also compute 30d rolling for each failure mode (for status classification)
+    for fm in fm_keys:
+        if fm in df_sorted.columns:
+            rolling_cols[f"{fm}_30d"] = df_sorted.groupby("Unit")[fm].transform(
+                lambda x: x.rolling(30, min_periods=1).mean()
+            )
     df_sorted = pd.concat([df_sorted, pd.DataFrame(rolling_cols, index=df_sorted.index)], axis=1)
 
     # Latest snapshot
     df_latest = df_sorted.sort_values("Fecha").groupby("Unit").last().reset_index()
+
+    # Compute max failure mode 30d average per unit
+    fm_30d_cols = [f"{fm}_30d" for fm in fm_keys if f"{fm}_30d" in df_latest.columns]
+    max_fm_30d = df_latest[fm_30d_cols].max(axis=1) if fm_30d_cols else 0.0
+
     df_latest = df_latest.assign(
         avg_ranking_30d=df_latest["ranking_30d"],
         ranking_acum_90d=df_latest["ranking_90d"],
+        max_fm_30d=max_fm_30d,
     )
 
     return df_sorted, df_latest
@@ -467,11 +483,17 @@ def render_initial_content(unit, df, df_latest, component="motor"):
     failure_modes = get_failure_modes_dict(component)
 
     latest = df_latest.copy()
-    p80_90d = float(latest["ranking_acum_90d"].quantile(0.80)) if "ranking_acum_90d" in latest.columns else 50.0
+    # Status classification (fixed thresholds)
+    # Saludable: avg_ranking_30d < 30 AND max_fm_30d < 50
+    # Alerta: 30 <= avg_ranking_30d < 60 OR 50 <= max_fm_30d < 80
+    # Crítico: avg_ranking_30d >= 60 OR max_fm_30d >= 80
     latest["status"] = "Saludable"
-    latest.loc[latest["ranking_acum_90d"] >= p80_90d, "status"] = "Alerta"
     latest.loc[
-        (latest["ranking"] > 80) & (latest["ranking_acum_90d"] >= p80_90d),
+        (latest["avg_ranking_30d"] >= 30) | (latest["max_fm_30d"] >= 50),
+        "status",
+    ] = "Alerta"
+    latest.loc[
+        (latest["avg_ranking_30d"] >= 60) | (latest["max_fm_30d"] >= 80),
         "status",
     ] = "Crítica"
 
@@ -485,9 +507,9 @@ def render_initial_content(unit, df, df_latest, component="motor"):
         return html.Div(html.P("No hay datos disponibles.", className="text-muted text-center", style={"padding": "40px"}))
     row = row.iloc[0]
 
-    # Dominant failure mode
+    # Dominant failure mode (use 30d averages for consistency)
     fm_keys = list(failure_modes.keys())
-    fm_scores = {k: float(row[k]) if k in row.index and pd.notna(row[k]) else 0.0 for k in fm_keys}
+    fm_scores = {k: float(row[f"{k}_30d"]) if f"{k}_30d" in row.index and pd.notna(row[f"{k}_30d"]) else 0.0 for k in fm_keys}
     dominant_mode = max(fm_scores, key=fm_scores.get) if fm_scores else fm_keys[0]
     dominant_label = failure_modes[dominant_mode]
 
@@ -506,7 +528,7 @@ def render_initial_content(unit, df, df_latest, component="motor"):
     ]
 
     # Fleet charts
-    scatter_fig = create_fleet_scatter(latest, unit, STATUS_COLORS, p80_90d)
+    scatter_fig = create_fleet_scatter(latest, unit, STATUS_COLORS, 30.0)
     bar_fig = create_comparative_bars(row, latest, failure_modes)
 
     return html.Div([
