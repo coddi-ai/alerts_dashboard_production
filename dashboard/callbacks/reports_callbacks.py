@@ -1253,6 +1253,7 @@ def create_report_identity_display(sample):
     Create sticky report identity display (OIL-R-01).
     
     Shows: client, machine/unit, component, sample date, report status, severity score.
+    Includes component horómetro when available.
     """
     if sample is None or sample.empty:
         return html.Div()
@@ -1262,6 +1263,15 @@ def create_report_identity_display(sample):
         'Alerta': 'warning',
         'Normal': 'success'
     }.get(sample.get('report_status', 'Normal'), 'secondary')
+    
+    # Build component hours display
+    comp_hours_display = 'N/A'
+    comp_hours_val = sample.get('componentHours')
+    if comp_hours_val is not None and not (isinstance(comp_hours_val, float) and pd.isna(comp_hours_val)):
+        try:
+            comp_hours_display = f"{float(comp_hours_val):,.0f} hrs"
+        except (ValueError, TypeError):
+            comp_hours_display = 'N/A'
     
     return dbc.Row([
         dbc.Col([
@@ -1281,7 +1291,13 @@ def create_report_identity_display(sample):
                 html.Small("Componente", className="text-muted d-block"),
                 html.Strong(str(sample.get('componentName', 'N/A')).title())
             ])
-        ], width=3),
+        ], width=2),
+        dbc.Col([
+            html.Div([
+                html.Small("Horómetro Comp.", className="text-muted d-block"),
+                html.Strong(comp_hours_display, style={'color': '#17a2b8'})
+            ])
+        ], width=1),
         dbc.Col([
             html.Div([
                 html.Small("Fecha de Muestra", className="text-muted d-block"),

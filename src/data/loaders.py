@@ -107,6 +107,64 @@ def load_emin_data(file_path: str | Path) -> pd.DataFrame:
     return df
 
 
+def load_component_hours(file_path: str | Path) -> pd.DataFrame:
+    """
+    Load cleaned component hours (horómetro) from Parquet file.
+    
+    The file contains component-level usage hours per sample, with cleaned values
+    that interpolate missing readings.
+    
+    Args:
+        file_path: Path to cleaned_component_hours.parquet
+    
+    Returns:
+        DataFrame with columns: client, unitId, componentName, sampleDate,
+        componentHours, componentHours_cleaned
+    """
+    file_path = Path(file_path)
+    logger.info(f"Loading component hours from {file_path}")
+    
+    if not file_path.exists():
+        logger.warning(f"Component hours file not found: {file_path}")
+        return pd.DataFrame()
+    
+    df = safe_read_parquet(file_path)
+    
+    if df.empty:
+        logger.warning("Component hours dataframe is empty")
+        return pd.DataFrame()
+    
+    # Ensure sampleDate is datetime
+    if 'sampleDate' in df.columns:
+        df['sampleDate'] = pd.to_datetime(df['sampleDate'])
+    
+    logger.info(f"Loaded {len(df)} component hours records ({df['unitId'].nunique()} units, {df['componentName'].nunique()} components)")
+    return df
+
+
+def get_latest_component_hours(file_path: str | Path) -> pd.DataFrame:
+    """
+    Get the most recent component hours for each unit+component combination.
+    
+    Args:
+        file_path: Path to cleaned_component_hours.parquet
+    
+    Returns:
+        DataFrame with the latest horómetro reading per unit+component
+    """
+    df = load_component_hours(file_path)
+    
+    if df.empty:
+        return pd.DataFrame()
+    
+    # Get latest sample per unit+component
+    idx = df.groupby(['unitId', 'componentName'])['sampleDate'].idxmax()
+    latest = df.loc[idx].copy()
+    
+    logger.info(f"Got latest component hours: {len(latest)} records")
+    return latest
+
+
 def load_stewart_limits(file_path: str | Path) -> Dict:
     """
     Load pre-computed Stewart Limits from Parquet file.

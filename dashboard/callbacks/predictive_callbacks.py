@@ -5,6 +5,8 @@ Predictive callbacks - handles internal tab switching and evidence interactivity
 from dash import html, dcc, Input, Output, State, no_update
 import pandas as pd
 from src.utils.logger import get_logger
+from config.settings import get_settings
+from src.data.loaders import get_latest_component_hours
 from dashboard.components.predictive_config import (
     get_failure_modes_dict,
     get_failure_mode_options,
@@ -203,6 +205,61 @@ def register_callbacks(app):
 
         component_label = (component or "").title()
 
+        # ── Load component horómetro (at last evidence date) ──
+        horometro_text = "—"
+        horometro_date = ""
+        if client and component:
+            settings = get_settings()
+            allowed = [c.upper() for c in settings.component_hours_allowed_clients]
+            if client.upper() in allowed:
+                comp_hours_file = settings.get_component_hours_path(client.lower())
+                if comp_hours_file.exists():
+                    try:
+                        from src.data.loaders import load_component_hours
+                        import re as _re
+                        all_hours = load_component_hours(comp_hours_file)
+                        if not all_hours.empty:
+                            # Normalize unit IDs (T_09 vs T_9)
+                            def _norm_uid(uid):
+                                m = _re.match(r'^([A-Za-z]+_)0*(\d+)$', str(uid))
+                                return f"{m.group(1)}{m.group(2)}" if m else str(uid)
+
+                            unit_norm = _norm_uid(selected_unit)
+                            all_hours['_uid_norm'] = all_hours['unitId'].apply(_norm_uid)
+
+                            # Get last evidence date
+                            components_map = _discover_components(client)
+                            filepath = components_map.get(component)
+                            last_ev_date = None
+                            if filepath:
+                                df_ev, _ = _load_evidence_component(filepath, component)
+                                if df_ev is not None:
+                                    df_ev_unit = df_ev[df_ev["Unit"] == selected_unit]
+                                    if not df_ev_unit.empty:
+                                        last_ev_date = df_ev_unit["Fecha"].max()
+
+                            unit_hours = all_hours[
+                                (all_hours['_uid_norm'] == unit_norm) &
+                                (all_hours['componentName'] == component)
+                            ].copy()
+
+                            if not unit_hours.empty and last_ev_date is not None:
+                                unit_hours['date_diff'] = abs(unit_hours['sampleDate'] - last_ev_date)
+                                closest = unit_hours.sort_values('date_diff').iloc[0]
+                                hrs = closest['componentHours_cleaned']
+                                date_val = closest['sampleDate']
+                                if pd.notna(hrs):
+                                    horometro_text = f"{hrs:,.0f} hrs"
+                                if pd.notna(date_val):
+                                    horometro_date = pd.to_datetime(date_val).strftime('%d %b %Y')
+                            elif not unit_hours.empty:
+                                latest_row = unit_hours.sort_values('sampleDate').iloc[-1]
+                                hrs = latest_row['componentHours_cleaned']
+                                if pd.notna(hrs):
+                                    horometro_text = f"{hrs:,.0f} hrs"
+                    except Exception as e:
+                        logger.warning(f"Could not load component hours for banner: {e}")
+
         return html.Div([
             html.Div([
                 html.Div([
@@ -225,8 +282,22 @@ def register_callbacks(app):
                         }),
                     ]),
                 ], style={"display": "flex", "alignItems": "center"}),
-                # Status badge on the right
+                # Status badges on the right (ranking + horómetro + estado)
                 html.Div([
+                    # Horómetro badge
+                    html.Div([
+                        html.Div("Horómetro", style={
+                            "fontSize": "10px", "textTransform": "uppercase",
+                            "letterSpacing": "0.5px", "opacity": "0.8", "marginBottom": "4px"
+                        }),
+                        html.Div(horometro_text, style={
+                            "fontSize": "20px", "fontWeight": "700"
+                        }),
+                        html.Div(horometro_date, style={
+                            "fontSize": "9px", "opacity": "0.7", "marginTop": "2px"
+                        }) if horometro_date else None,
+                    ], style={"textAlign": "center", "marginRight": "20px"}),
+                    # Ranking badge
                     html.Div([
                         html.Div("Ranking Actual", style={
                             "fontSize": "10px", "textTransform": "uppercase",
@@ -281,7 +352,7 @@ def register_callbacks(app):
         if df is None:
             return html.Div(html.P("No hay datos disponibles.", className="text-muted text-center", style={"padding": "40px"}))
 
-        return render_initial_content(selected_unit, df, df_latest, component)
+        return render_initial_content(selected_unit, df, df_latest, component, client)
 
     # ══════════════════════════════════════════════════════════════════════════
     # EVIDENCE: Set default failure mode when unit changes
@@ -342,3 +413,49 @@ def register_callbacks(app):
             return html.Div(html.P("No hay datos disponibles.", className="text-muted text-center", style={"padding": "40px"}))
 
         return render_detailed_evidence(selected_unit, df, df_latest, selected_failure_mode, component)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # EVIDENCE: Oil chart update (when user changes variable selection)
+    # ══════════════════════════════════════════════════════════════════════════
+
+    @app.callback(
+        Output("predictive-oil-chart-container", "children"),
+        Input("predictive-oil-var-selector", "value"),
+        State("predictive-oil-range-store", "data"),
+        State("predictive-ev-unit", "value"),
+        State("predictive-ev-client-store", "data"),
+        State("predictive-ev-component-store", "data"),
+        prevent_initial_call=False,
+    )
+    def update_oil_chart(selected_vars, oil_range, selected_unit, client, component):
+        """Update oil timeseries chart based on user-selected variables."""
+        from dashboard.components.predictive_charts import create_oil_timeseries_90d
+        from dashboard.components.predictive_config import OIL_LABELS, OIL_THRESHOLDS
+
+        if not selected_vars or not selected_unit or not client or not component:
+            return html.P("Seleccione al menos una variable de aceite.",
+                         className="text-muted", style={"fontSize": "13px", "padding": "20px", "textAlign": "center"})
+
+        components = _discover_components(client)
+        filepath = components.get(component)
+        if not filepath:
+            return html.P("No hay datos disponibles.", className="text-muted")
+
+        df, _ = _load_evidence_component(filepath, component)
+        if df is None:
+            return html.P("No hay datos disponibles.", className="text-muted")
+
+        df_unit = df[df["Unit"] == selected_unit].sort_values("Fecha")
+        if df_unit.empty:
+            return html.P("No hay datos para esta unidad.", className="text-muted")
+
+        # Always pass thresholds — the chart function shows limit lines when len(vars)==1
+        fig = create_oil_timeseries_90d(
+            df_unit, selected_vars, OIL_LABELS,
+            oil_thresholds=OIL_THRESHOLDS,
+            oil_range=oil_range,
+        )
+
+        if fig:
+            return dcc.Graph(figure=fig, config={"displayModeBar": False})
+        return html.P("No hay suficientes datos históricos.", className="text-muted", style={"fontSize": "13px"})

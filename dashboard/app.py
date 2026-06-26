@@ -60,6 +60,9 @@ import dashboard.callbacks.data_freshness_callbacks
 # Import predictive callbacks
 from dashboard.callbacks.predictive_callbacks import register_callbacks as register_predictive_callbacks
 
+# Import component hours callbacks
+from dashboard.callbacks.component_hours_callbacks import register_component_hours_callbacks
+
 
 def normalize_prefix(prefix: str | None) -> str:
     """
@@ -110,6 +113,7 @@ register_mantenciones_general_callbacks(app)
 register_overview_general_callbacks(app)
 register_health_index_callbacks(app)
 register_predictive_callbacks(app)
+register_component_hours_callbacks(app)
 
 
 if __name__ == '__main__':

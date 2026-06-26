@@ -216,6 +216,14 @@ def create_machine_detail_table(df: pd.DataFrame) -> dash_table.DataTable:
     if 'componentName' in df.columns:
         df['componentName'] = df['componentName'].str.title()
     
+    # Format component hours (horómetro) if available
+    if 'componentHours_cleaned' in df.columns:
+        df['horometro_display'] = df['componentHours_cleaned'].apply(
+            lambda x: f"{x:,.0f} hrs" if pd.notna(x) else 'N/A'
+        )
+    else:
+        df['horometro_display'] = 'N/A'
+    
     # Parse breached_essays to extract essay names from list of dictionaries
     if 'breached_essays' in df.columns:
         def extract_essay_names(x):
@@ -262,14 +270,22 @@ def create_machine_detail_table(df: pd.DataFrame) -> dash_table.DataTable:
     else:
         df['ai_text'] = 'N/A'
     
-    # Define columns: Component, Status, Sample Date, Essays Broken, AI Recommendation
+    # Define columns: Component, Status, Horómetro, Sample Date, Essays Broken, AI Recommendation
+    has_horometro = 'componentHours_cleaned' in df.columns
+    
     columns = [
         {'name': 'Componente', 'id': 'componentName'},
         {'name': 'Estado', 'id': 'report_status'},
+    ]
+    
+    if has_horometro:
+        columns.append({'name': 'Horómetro', 'id': 'horometro_display'})
+    
+    columns.extend([
         {'name': 'Fecha Muestra', 'id': 'sampleDate'},
         {'name': 'Ensayos Anormales', 'id': 'essays_broken_names'},
         {'name': 'Recomendación IA', 'id': 'ai_text'}
-    ]
+    ])
     
     return dash_table.DataTable(
         id='machine-detail-table',

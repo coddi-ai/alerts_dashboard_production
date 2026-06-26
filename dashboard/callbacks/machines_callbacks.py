@@ -11,6 +11,7 @@ import plotly.graph_objects as go
 from pathlib import Path
 from config.settings import get_settings
 from src.utils.file_utils import safe_read_parquet
+from src.data.loaders import get_latest_component_hours
 from src.utils.logger import get_logger
 from dashboard.components.charts import (
     create_machine_status_donut, 
@@ -214,6 +215,23 @@ def register_machines_callbacks(app):
                 display_df['breached_essays'] = latest_samples['breached_essays']
             if 'ai_recommendation' in latest_samples.columns:
                 display_df['ai_recommendation'] = latest_samples['ai_recommendation']
+            
+            # Merge component hours (horómetro) if available for this client
+            comp_hours_allowed = [c.upper() for c in settings.component_hours_allowed_clients]
+            if client.upper() in comp_hours_allowed:
+                comp_hours_file = settings.get_component_hours_path(client.lower())
+                if comp_hours_file.exists():
+                    try:
+                        latest_hours = get_latest_component_hours(comp_hours_file)
+                        if not latest_hours.empty:
+                            unit_hours = latest_hours[latest_hours['unitId'] == unit_id][['componentName', 'componentHours_cleaned']].copy()
+                            if not unit_hours.empty:
+                                display_df = display_df.merge(
+                                    unit_hours, on='componentName', how='left'
+                                )
+                                logger.info(f"Merged {len(unit_hours)} component hours for {unit_id}")
+                    except Exception as e:
+                        logger.warning(f"Could not load component hours: {e}")
             
             # Format date
             display_df['sampleDate'] = pd.to_datetime(display_df['sampleDate']).dt.strftime('%Y-%m-%d')

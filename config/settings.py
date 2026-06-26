@@ -75,6 +75,10 @@ class Settings(BaseSettings):
         default=["CDA"],
         description="Clients with access to the Predictive module"
     )
+    component_hours_allowed_clients: List[str] = Field(
+        default=["CDA", "ENEX"],
+        description="Clients with access to the Component Hours (Horómetro) module"
+    )
     
     @field_validator("logs_dir", mode="before")
     @classmethod
@@ -146,6 +150,10 @@ class Settings(BaseSettings):
     def get_stewart_limits_path(self, client: str) -> Path:
         """Get Stewart limits path for oil technique."""
         return self.get_technique_file('oil', 'golden', client, 'stewart_limits.parquet')
+    
+    def get_component_hours_path(self, client: str) -> Path:
+        """Get cleaned component hours path for oil technique."""
+        return self.get_technique_file('oil', 'golden', client, 'cleaned_component_hours.parquet')
     
     # Telemetry-specific convenience methods
     def get_telemetry_gps_path(self, client: str) -> Path:
