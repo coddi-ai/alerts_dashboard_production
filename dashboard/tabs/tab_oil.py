@@ -57,13 +57,13 @@ def create_layout() -> html.Div:
                     className='custom-tab',
                     selected_className='custom-tab--selected'
                 ),
-                dcc.Tab(
-                    label='Horómetro de Componentes',
-                    value='component-hours',
-                    className='custom-tab',
-                    selected_className='custom-tab--selected',
-                    id='oil-tab-component-hours'
-                )
+                # dcc.Tab(
+                #     label='Horómetro de Componentes',
+                #     value='component-hours',
+                #     className='custom-tab',
+                #     selected_className='custom-tab--selected',
+                #     id='oil-tab-component-hours'
+                # )
             ],
             className='mb-4'
         ),

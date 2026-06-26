@@ -150,7 +150,7 @@ def _driver_bar(name: str, value: float):
     ], className="driver-row")
 
 
-def _priority_card(unit, score, acum_30d, delta, status, drivers):
+def _priority_card(unit, score, acum_30d, delta, status, drivers, horometro_text="—"):
     colors = _status_colors(status)
 
     if delta > 1:
@@ -170,7 +170,16 @@ def _priority_card(unit, score, acum_30d, delta, status, drivers):
             html.Span(f"{score:.0f}", className="pc-score"),
             html.Span(delta_txt, className=delta_cls),
         ], className="pc-score-row"),
-        html.Div(f"Prom 30d: {acum_30d:.1f}", className="pc-acum"),
+        html.Div([
+            html.Span(f"Prom 30d: {acum_30d:.1f}", className="pc-acum"),
+            html.Span([
+                html.I(className="fas fa-clock", style={"fontSize": "10px", "marginRight": "4px", "opacity": "0.7"}),
+                horometro_text,
+            ], style={
+                "fontSize": "11px", "color": "#0891B2", "fontWeight": "600",
+                "display": "inline-flex", "alignItems": "center",
+            }),
+        ], style={"display": "flex", "justifyContent": "space-between", "alignItems": "center", "marginBottom": "8px"}),
         html.Div("Factores principales", className="drivers-label"),
         *[_driver_bar(name, val) for name, val in drivers],
     ], className="priority-card",
@@ -268,7 +277,7 @@ def _failure_table(sorted_df, sort_col, failure_modes):
 
 # ── Component Overview Renderer ───────────────────────────────────────────────
 
-def _render_component_overview(df_latest, prev_ranking, component: str):
+def _render_component_overview(df_latest, prev_ranking, component: str, client: str = None):
     """Render overview content for a specific component."""
     failure_modes = get_failure_modes_dict(component)
 
@@ -311,7 +320,40 @@ def _render_component_overview(df_latest, prev_ranking, component: str):
         ])
     ])
 
-    # Priority cards
+    # Priority cards — load horómetro data
+    import re as _re
+    horometro_map = {}  # {unit_normalized: hours_text}
+    if client:
+        try:
+            from src.data.loaders import load_component_hours
+            settings = get_settings()
+            allowed = [c.upper() for c in settings.component_hours_allowed_clients]
+            if client.upper() in allowed:
+                comp_hours_file = settings.get_component_hours_path(client.lower())
+                if comp_hours_file.exists():
+                    all_hours = load_component_hours(comp_hours_file)
+                    if not all_hours.empty:
+                        def _norm_uid(uid):
+                            m = _re.match(r'^([A-Za-z]+_)0*(\d+)$', str(uid))
+                            return f"{m.group(1)}{m.group(2)}" if m else str(uid)
+
+                        comp_hours = all_hours[all_hours['componentName'] == component].copy()
+                        if not comp_hours.empty:
+                            comp_hours['_uid_norm'] = comp_hours['unitId'].apply(_norm_uid)
+                            idx = comp_hours.groupby('_uid_norm')['sampleDate'].idxmax()
+                            latest_hours = comp_hours.loc[idx]
+                            for _, row_h in latest_hours.iterrows():
+                                uid = row_h['_uid_norm']
+                                hrs = row_h['componentHours_cleaned']
+                                if pd.notna(hrs):
+                                    horometro_map[uid] = f"{hrs:,.0f} h"
+        except Exception as e:
+            logger.warning(f"Could not load component hours for overview cards: {e}")
+
+    def _norm_uid_simple(uid):
+        m = _re.match(r'^([A-Za-z]+_)0*(\d+)$', str(uid))
+        return f"{m.group(1)}{m.group(2)}" if m else str(uid)
+
     cards = []
     for _, r in latest.sort_values("avg_ranking_30d", ascending=False).iterrows():
         score = r["ranking"]
@@ -322,10 +364,13 @@ def _render_component_overview(df_latest, prev_ranking, component: str):
              if f"{c}_30d" in r.index and pd.notna(r[f"{c}_30d"])],
             key=lambda x: x[1], reverse=True,
         )[:3]
+        unit_norm = _norm_uid_simple(r["Unit"])
+        horo_text = horometro_map.get(unit_norm, "—")
         cards.append(_priority_card(
             unit=r["Unit"], score=score,
             acum_30d=float(r["avg_ranking_30d"]),
             delta=delta, status=r["status"], drivers=drivers,
+            horometro_text=horo_text,
         ))
 
     priority = html.Div([
@@ -421,4 +466,4 @@ def layout(client: str, component: str):
                    className="text-muted", style={"padding": "40px", "textAlign": "center"})
         ])
 
-    return _render_component_overview(df_latest, prev_ranking, component)
+    return _render_component_overview(df_latest, prev_ranking, component, client)

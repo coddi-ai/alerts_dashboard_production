@@ -46,7 +46,7 @@ def layout(client: str, component: str):
 
     # Build overview content
     if df_latest is not None and not df_latest.empty:
-        overview_content = _render_component_overview(df_latest, prev_ranking, component)
+        overview_content = _render_component_overview(df_latest, prev_ranking, component, client)
     else:
         overview_content = html.P(f"No hay datos de resumen para {component}.",
                                   className="text-muted text-center", style={"padding": "40px"})

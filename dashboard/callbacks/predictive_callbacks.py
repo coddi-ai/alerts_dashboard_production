@@ -54,7 +54,7 @@ def register_callbacks(app):
             if df_latest is None or df_latest.empty:
                 return html.P(f"No hay datos disponibles para {component}.", className="text-muted text-center")
 
-            return _render_component_overview(df_latest, prev_ranking, component)
+            return _render_component_overview(df_latest, prev_ranking, component, client)
 
         else:
             # Render evidence shell (interactive parts handled by other callbacks)
