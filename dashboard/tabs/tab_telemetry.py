@@ -26,7 +26,10 @@ def create_layout(client: str = 'cda') -> html.Div:
                     "Monitoreo de salud de flota basado en telemetría multi-técnica",
                     className="text-muted"
                 )
-            ])
+            ]),
+            dbc.Col([
+                html.Div(id='telemetry-reference-date', className="text-end")
+            ], width="auto", className="d-flex align-items-center")
         ], className="mb-4"),
 
         # Client restriction notice

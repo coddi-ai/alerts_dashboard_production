@@ -640,6 +640,20 @@ def load_oil_classified(client: str) -> pd.DataFrame:
 # TELEMETRY HEALTH DASHBOARD LOADERS
 # ========================================
 
+def _filter_latest_week(df: pd.DataFrame) -> pd.DataFrame:
+    """Filter DataFrame to only the latest year/week partition."""
+    if df.empty:
+        return df
+    if 'year' in df.columns and 'week' in df.columns:
+        # Convert categorical to numeric if needed (from Hive partitioning)
+        year_col = df['year'].astype(int)
+        week_col = df['week'].astype(int)
+        latest_year = year_col.max()
+        latest_week = week_col[year_col == latest_year].max()
+        df = df[(year_col == latest_year) & (week_col == latest_week)]
+    return df
+
+
 def load_telemetry_unit_health(client: str) -> pd.DataFrame:
     """
     Load unit health assessments from golden layer.
@@ -663,6 +677,7 @@ def load_telemetry_unit_health(client: str) -> pd.DataFrame:
 
     try:
         df = safe_read_parquet(base)
+        df = _filter_latest_week(df)
         logger.info(f"Loaded {len(df)} unit health records")
         return df
     except Exception as e:
@@ -693,6 +708,7 @@ def load_telemetry_system_health(client: str) -> pd.DataFrame:
 
     try:
         df = safe_read_parquet(base)
+        df = _filter_latest_week(df)
         logger.info(f"Loaded {len(df)} system health records")
         return df
     except Exception as e:
@@ -720,6 +736,7 @@ def load_telemetry_deviation_results(client: str) -> pd.DataFrame:
 
     try:
         df = safe_read_parquet(base)
+        df = _filter_latest_week(df)
         logger.info(f"Loaded {len(df)} deviation results")
         return df
     except Exception as e:
@@ -747,6 +764,7 @@ def load_telemetry_events(client: str) -> pd.DataFrame:
 
     try:
         df = safe_read_parquet(base)
+        df = _filter_latest_week(df)
         logger.info(f"Loaded {len(df)} event records")
         return df
     except Exception as e:
@@ -774,6 +792,7 @@ def load_telemetry_trends(client: str) -> pd.DataFrame:
 
     try:
         df = safe_read_parquet(base)
+        df = _filter_latest_week(df)
         logger.info(f"Loaded {len(df)} trend results")
         return df
     except Exception as e:
@@ -811,6 +830,32 @@ def load_telemetry_baselines(client: str) -> pd.DataFrame:
     except Exception as e:
         logger.error(f"Error loading telemetry baselines: {e}")
         return pd.DataFrame()
+
+
+def load_telemetry_manifest(client: str) -> dict:
+    """
+    Load pipeline manifest (latest.json) indicating the most recent evaluation.
+
+    Returns dict with keys: evaluation_week, evaluation_year, execution_timestamp,
+    silver_weeks_available, baseline_version. Returns empty dict if not found.
+    """
+    if client.lower() != 'cda':
+        return {}
+
+    manifest_path = Path(f"data/telemetry/golden/{client.lower()}/latest.json")
+    if not manifest_path.exists():
+        logger.warning(f"Telemetry manifest not found: {manifest_path}")
+        return {}
+
+    try:
+        import json
+        with open(manifest_path, 'r', encoding='utf-8') as f:
+            manifest = json.load(f)
+        logger.info(f"Loaded manifest: week {manifest.get('evaluation_week')}/{manifest.get('evaluation_year')}")
+        return manifest
+    except Exception as e:
+        logger.error(f"Error loading telemetry manifest: {e}")
+        return {}
 
 
 def load_telemetry_limits(client: str) -> pd.DataFrame:

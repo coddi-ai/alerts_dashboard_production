@@ -22,6 +22,7 @@ from src.data.loaders import (
     load_telemetry_events,
     load_telemetry_trends,
     load_telemetry_limits,
+    load_telemetry_manifest,
     load_silver_telemetry_week,
     load_telemetry_ai_comments,
 )
@@ -45,6 +46,39 @@ from dashboard.tabs.tab_telemetry_unit_detail import create_telemetry_unit_detai
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+# ===================================================================
+# REFERENCE DATE INDICATOR
+# ===================================================================
+
+@callback(
+    Output('telemetry-reference-date', 'children'),
+    Input('telemetry-health-tabs', 'value'),
+    State('client-selector', 'value'),
+)
+def update_reference_date(active_tab, client):
+    """Show the evaluation week/date the dashboard is referencing."""
+    if not client:
+        raise PreventUpdate
+
+    manifest = load_telemetry_manifest(client)
+    if manifest:
+        week = manifest.get('evaluation_week', '?')
+        year = manifest.get('evaluation_year', '?')
+        ts = manifest.get('execution_timestamp', '')
+        date_str = ts[:10] if ts else ''
+        return html.Div([
+            html.Small([
+                html.I(className="fas fa-calendar-alt me-1"),
+                f"Semana {week}/{year}"
+            ], className="d-block text-muted"),
+            html.Small([
+                html.I(className="fas fa-sync-alt me-1"),
+                f"Actualizado: {date_str}"
+            ], className="text-muted") if date_str else html.Span()
+        ])
+    return html.Small("Sin datos de referencia", className="text-muted")
 
 
 # ===================================================================
@@ -683,16 +717,45 @@ def _kpi_table(kpi: dict) -> html.Div:
     )
 
 
-def _load_recent_telemetry(client: str, unit: str, weeks: int = 8) -> pd.DataFrame:
+def _load_recent_telemetry(client: str, unit: str, weeks: int = 4) -> pd.DataFrame:
     """Load recent silver telemetry data for a unit.
 
-    Searches up to `weeks` weeks back from today to find available data.
+    Uses the pipeline manifest (latest.json) to anchor on the correct evaluation
+    week, then loads backwards from there. Falls back to datetime.now() if
+    manifest is unavailable.
     """
-    now = datetime.now()
-    all_data = []
+    manifest = load_telemetry_manifest(client)
 
-    for i in range(weeks):
-        target = now - timedelta(weeks=i)
+    # Determine anchor point
+    if manifest and 'evaluation_week' in manifest and 'evaluation_year' in manifest:
+        anchor_week = manifest['evaluation_week']
+        anchor_year = manifest['evaluation_year']
+        # If manifest provides available weeks, use them directly
+        available_weeks = manifest.get('silver_weeks_available', [])
+        if available_weeks:
+            all_data = []
+            for w in sorted(available_weeks, reverse=True)[:weeks]:
+                week_df = load_silver_telemetry_week(client, w, anchor_year)
+                if not week_df.empty:
+                    unit_df = week_df[week_df['Unit'] == unit]
+                    if not unit_df.empty:
+                        all_data.append(unit_df)
+            if all_data:
+                combined = pd.concat(all_data, ignore_index=True)
+                if 'Fecha' in combined.columns:
+                    combined = combined.sort_values('Fecha')
+                return combined
+    else:
+        anchor_week = datetime.now().isocalendar()[1]
+        anchor_year = datetime.now().isocalendar()[0]
+
+    # Walk backwards from anchor week
+    all_data = []
+    from datetime import date
+    anchor_date = date.fromisocalendar(anchor_year, anchor_week, 1)
+
+    for i in range(weeks + 4):  # Extra buffer to handle gaps
+        target = anchor_date - timedelta(weeks=i)
         week_num = target.isocalendar()[1]
         year_num = target.isocalendar()[0]
 
@@ -701,12 +764,11 @@ def _load_recent_telemetry(client: str, unit: str, weeks: int = 8) -> pd.DataFra
             unit_df = week_df[week_df['Unit'] == unit]
             if not unit_df.empty:
                 all_data.append(unit_df)
-                # Stop after finding 4 weeks of data
-                if len(all_data) >= 4:
+                if len(all_data) >= weeks:
                     break
 
     if not all_data:
-        logger.warning(f"No silver telemetry found for unit={unit} in last {weeks} weeks")
+        logger.warning(f"No silver telemetry found for unit={unit} anchored at week {anchor_week}/{anchor_year}")
         return pd.DataFrame()
 
     combined = pd.concat(all_data, ignore_index=True)
