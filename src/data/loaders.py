@@ -389,19 +389,11 @@ def load_alerts_data(client: str) -> pd.DataFrame:
     Load consolidated alerts data for a specific client.
     
     Args:
-        client: Client identifier (e.g., 'cda')
+        client: Client identifier (e.g., 'cda', 'emin')
     
     Returns:
         DataFrame with alerts data including derived columns (has_telemetry, has_tribology, Month)
-    
-    Note:
-        This feature is currently only available for CDA client.
     """
-    # CDA-only check
-    if client.lower() != 'cda':
-        logger.warning(f"Alerts dashboard is only available for CDA client. Requested: {client}")
-        return pd.DataFrame()
-    
     file_path = Path(f"data/alerts/golden/{client.lower()}/consolidated_alerts.csv")
     logger.info(f"Loading alerts data from {file_path}")
     
@@ -443,10 +435,6 @@ def load_telemetry_values(client: str) -> pd.DataFrame:
     Returns:
         DataFrame with telemetry values (Fecha, Unit, sensor columns)
     """
-    if client.lower() != 'cda':
-        logger.warning(f"Telemetry data is only available for CDA client. Requested: {client}")
-        return pd.DataFrame()
-    
     file_path = Path(f"data/telemetry/silver/{client.lower()}/telemetry_values_wide.parquet")
     logger.info(f"Loading telemetry values from {file_path}")
     
@@ -475,10 +463,6 @@ def load_telemetry_states(client: str) -> pd.DataFrame:
     Returns:
         DataFrame with telemetry states (Fecha, Unit, Estado, EstadoCarga)
     """
-    if client.lower() != 'cda':
-        logger.warning(f"Telemetry states is only available for CDA client. Requested: {client}")
-        return pd.DataFrame()
-    
     file_path = Path(f"data/telemetry/silver/{client.lower()}/telemetry_states.parquet")
     logger.info(f"Loading telemetry states from {file_path}")
     
@@ -507,10 +491,6 @@ def load_telemetry_limits(client: str) -> pd.DataFrame:
     Returns:
         DataFrame with limits (Unit, Feature, Estado, EstadoCarga, Limit_Lower, Limit_Upper)
     """
-    if client.lower() != 'cda':
-        logger.warning(f"Telemetry limits is only available for CDA client. Requested: {client}")
-        return pd.DataFrame()
-    
     file_path = Path(f"data/telemetry/silver/{client.upper()}/limits_config.parquet")
     logger.info(f"Loading telemetry limits from {file_path}")
     
@@ -538,10 +518,6 @@ def load_telemetry_alerts_metadata(client: str) -> pd.DataFrame:
     Returns:
         DataFrame with alerts metadata (AlertID, Trigger, etc.)
     """
-    if client.lower() != 'cda':
-        logger.warning(f"Telemetry alerts metadata is only available for CDA client. Requested: {client}")
-        return pd.DataFrame()
-    
     file_path = Path(f"data/telemetry/golden/{client.lower()}/alerts_data.csv")
     logger.info(f"Loading telemetry alerts metadata from {file_path}")
     
@@ -570,10 +546,6 @@ def load_component_mapping(client: str) -> pd.DataFrame:
     Returns:
         DataFrame with Component, PrimaryFeature, System, SubSystem, Meaning, RelatedFeatures
     """
-    if client.lower() != 'cda':
-        logger.warning(f"Component mapping is only available for CDA client. Requested: {client}")
-        return pd.DataFrame()
-    
     file_path = Path(f"data/telemetry/golden/{client.lower()}/component_mapping.parquet")
     logger.info(f"Loading component mapping from {file_path}")
     
@@ -601,10 +573,6 @@ def load_feature_names(client: str) -> Dict[str, str]:
     Returns:
         Dictionary mapping feature codes to Spanish names
     """
-    if client.lower() != 'cda':
-        logger.warning(f"Feature names is only available for CDA client. Requested: {client}")
-        return {}
-    
     file_path = Path("data/telemetry/features_mapping_name.json")
     logger.info(f"Loading feature names from {file_path}")
     
@@ -640,10 +608,6 @@ def load_telemetry_alerts_detail_golden(client: str) -> pd.DataFrame:
         - {Feature}_Value: Sensor values
         - {Feature}_{Kind}_Limit: Limit values (Upper/Lower)
     """
-    if client.lower() != 'cda':
-        logger.warning(f"Telemetry alerts detail is only available for CDA client. Requested: {client}")
-        return pd.DataFrame()
-    
     file_path = Path(f"data/telemetry/golden/{client.lower()}/alerts_detail_wide_with_gps.csv")
     logger.info(f"Loading telemetry alerts detail from golden layer: {file_path}")
     
@@ -672,10 +636,6 @@ def load_oil_classified(client: str) -> pd.DataFrame:
     Returns:
         DataFrame with classified oil samples (sampleNumber, essay columns, report_status, etc.)
     """
-    if client.lower() != 'cda':
-        logger.warning(f"Oil classified data is only available for CDA client. Requested: {client}")
-        return pd.DataFrame()
-    
     file_path = Path(f"data/oil/golden/{client.lower()}/classified.parquet")
     logger.info(f"Loading oil classified data from {file_path}")
     
@@ -722,10 +682,6 @@ def load_telemetry_unit_health(client: str) -> pd.DataFrame:
     Returns:
         DataFrame with unit-level health (overall_status, priority_score, executive_summary, etc.)
     """
-    if client.lower() != 'cda':
-        logger.warning(f"Telemetry unit health only available for CDA client. Requested: {client}")
-        return pd.DataFrame()
-
     base = Path(f"data/telemetry/golden/{client.lower()}/unit_health")
     logger.info(f"Loading telemetry unit health from {base}")
 
@@ -753,10 +709,6 @@ def load_telemetry_system_health(client: str) -> pd.DataFrame:
     Returns:
         DataFrame with system-level health (system_score, system_status, explanation, etc.)
     """
-    if client.lower() != 'cda':
-        logger.warning(f"Telemetry system health only available for CDA client. Requested: {client}")
-        return pd.DataFrame()
-
     base = Path(f"data/telemetry/golden/{client.lower()}/system_health")
     logger.info(f"Loading telemetry system health from {base}")
 
@@ -784,9 +736,6 @@ def load_telemetry_deviation_results(client: str) -> pd.DataFrame:
     Returns:
         DataFrame with per-signal deviation risk scores and abnormal percentages
     """
-    if client.lower() != 'cda':
-        return pd.DataFrame()
-
     base = Path(f"data/telemetry/golden/{client.lower()}/technique_results/deviation")
     if not base.exists():
         logger.warning(f"Deviation results path not found: {base}")
@@ -812,9 +761,6 @@ def load_telemetry_events(client: str) -> pd.DataFrame:
     Returns:
         DataFrame with abnormal episodes (duration, severity, classification)
     """
-    if client.lower() != 'cda':
-        return pd.DataFrame()
-
     base = Path(f"data/telemetry/golden/{client.lower()}/technique_results/events")
     if not base.exists():
         logger.warning(f"Events path not found: {base}")
@@ -840,9 +786,6 @@ def load_telemetry_trends(client: str) -> pd.DataFrame:
     Returns:
         DataFrame with trend significance, slopes, and interpretations
     """
-    if client.lower() != 'cda':
-        return pd.DataFrame()
-
     base = Path(f"data/telemetry/golden/{client.lower()}/technique_results/trend")
     if not base.exists():
         logger.warning(f"Trend results path not found: {base}")
@@ -868,9 +811,6 @@ def load_telemetry_baselines(client: str) -> pd.DataFrame:
     Returns:
         DataFrame with percentile thresholds per model_specification/signal/state
     """
-    if client.lower() != 'cda':
-        return pd.DataFrame()
-
     baselines_dir = Path(f"data/telemetry/silver/{client.lower()}/baselines")
     if not baselines_dir.exists():
         logger.warning(f"Baselines directory not found: {baselines_dir}")
@@ -897,9 +837,6 @@ def load_telemetry_manifest(client: str) -> dict:
     Returns dict with keys: evaluation_week, evaluation_year, execution_timestamp,
     silver_weeks_available, baseline_version. Returns empty dict if not found.
     """
-    if client.lower() != 'cda':
-        return {}
-
     manifest_path = Path(f"data/telemetry/golden/{client.lower()}/latest.json")
     if not manifest_path.exists():
         logger.warning(f"Telemetry manifest not found: {manifest_path}")
@@ -926,9 +863,6 @@ def load_telemetry_limits(client: str) -> pd.DataFrame:
     Returns:
         DataFrame with percentile thresholds (P2, P5, P95, P98 at minimum)
     """
-    if client.lower() != 'cda':
-        return pd.DataFrame()
-
     # Try limits directory first (new schema)
     limits_dir = Path(f"data/telemetry/silver/{client.lower()}/limits")
     if limits_dir.exists():
@@ -957,9 +891,6 @@ def load_silver_telemetry_week(client: str, week: int, year: int) -> pd.DataFram
     Returns:
         DataFrame with raw sensor data (wide format with states)
     """
-    if client.lower() != 'cda':
-        return pd.DataFrame()
-
     file_path = Path(f"data/telemetry/silver/{client.lower()}/Telemetry_Wide_With_States/Week{week:02d}Year{year}.parquet")
 
     if not file_path.exists():
@@ -987,9 +918,6 @@ def load_telemetry_ai_comments(client: str, level: str) -> pd.DataFrame:
         DataFrame with AI comments for the specified level.
         Returns empty DataFrame if data not available.
     """
-    if client.lower() != 'cda':
-        return pd.DataFrame()
-
     base = Path(f"data/telemetry/golden/{client.lower()}/ai_comments")
     if not base.exists():
         return pd.DataFrame()
@@ -1030,10 +958,6 @@ def load_maintenance_week(client: str, week: str) -> pd.DataFrame:
     Returns:
         DataFrame with maintenance records for the week
     """
-    if client.lower() != 'cda':
-        logger.warning(f"Maintenance data is only available for CDA client. Requested: {client}")
-        return pd.DataFrame()
-    
     file_path = Path(f"data/mantentions/golden/{client.lower()}/{week}.csv")
     logger.info(f"Loading maintenance data from {file_path}")
     
