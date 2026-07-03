@@ -1,7 +1,7 @@
 # Data Contracts - Oil Analysis Data Product
 
-**Version**: 2.3  
-**Last Updated**: May 13, 2026  
+**Version**: 2.4  
+**Last Updated**: July 1, 2026  
 **Owner**: Oil Analysis Data Product Team
 
 ---
@@ -35,7 +35,10 @@ This document defines the data contracts for the Oil Analysis Data Product, spec
 1. **Historical**: One-time bulk processing with Stewart Limits calculation
 2. **Incremental**: Daily processing using existing Stewart Limits
 
-**Key Enhancements (v2.3)**:
+**Key Enhancements (v2.4)**:
+- **Site Field**: Location where the machine operates (per client source)
+- **Lab Date Field**: Date sample was processed at laboratory
+- **Anomaly Type Classification**: ML-predicted anomaly reason for non-Normal reports
 - **Oil-Hour Stratification**: Separate limits for fresh (<1000h) vs aged (>=1000h) oil
 - **Evolution Ratio Limits**: Normalized concentration per oil hour for early trend detection
 - **Fallback Behavior**: Graceful degradation when stratified limits unavailable
@@ -169,6 +172,8 @@ S3: s3://{BUCKET}/MultiTechnique Alerts/oil/silver/{CLIENT}.parquet
 | `client` | string | Client identifier | 'CDA', 'EMIN' |
 | `sampleNumber` | string | Unique sample ID | 'CDA-2024-001' |
 | `sampleDate` | date | Sample collection date | '2024-01-15' |
+| `labDate` | date | Date sample processed at laboratory | '2024-01-17' |
+| `site` | string | Location where the machine works | 'Área Mina' |
 | `unitId` | string | Equipment unit ID | 'CAT-001' |
 | `machineName` | string | Normalized machine type | 'camion', 'pala' |
 | `machineModel` | string | Machine model | 'CAT 797F' |
@@ -229,6 +234,26 @@ else:
 - `oilMeter` null or ≤ 0 → `evolution_ratio` = null
 - Do **not** replace null ratios with zero (distorts percentile calculations)
 
+### Site Field (v2.4)
+
+**Source per client**:
+| Client | Source | Default |
+|--------|--------|---------|
+| CDA | Static | "Área Mina" |
+| EMIN | Static | "Área Mina" |
+| ENEX | Bronze column "Site" | "Área Mina" (if null) |
+
+### Lab Date Field (v2.4)
+
+**Source per client**:
+| Client | Bronze Column |
+|--------|--------------|
+| CDA | "Fecha de laboratorio" |
+| EMIN | "dateOfEntryIntoLaboratory" |
+| ENEX | "Date Diagnosed" |
+
+**Format**: datetime (YYYY-MM-DD)
+
 ### Quality Rules
 
 ✅ Valid date formats (YYYY-MM-DD)  
@@ -275,6 +300,7 @@ S3: s3://{BUCKET}/MultiTechnique Alerts/oil/golden/{client}/
 | `severity_score` | int | Total points from ALL breached essays | 14 |
 | `desgaste_score` | int | Points from ONLY Desgaste essays (NEW) | 8 |
 | `report_status` | string | Overall report status (based on desgaste_score) | 'Normal', 'Alerta', 'Anormal' |
+| `anomalyType` | string | Predicted anomaly reason (only for non-Normal reports) | 'Normal', 'Desgaste de Componentes', 'Contaminación Lubricante' |
 | `ai_recommendation` | string | AI-generated maintenance advice | 'Se recomienda...' |
 | `ai_analysis` | string | AI analysis of breached essays | 'Niveles elevados de...' |
 | **Oil-Hour Stratification (v2.3)** | | | |
@@ -412,6 +438,13 @@ GE_1000 (aged oil):
   threshold_critic: 80.0
 ```
 
+**Oil-Age Constraint** 🆕:
+- **Rule**: `GE_1000 thresholds >= LT_1000 thresholds` for all essay/threshold combinations
+- **Rationale**: Aged oil naturally accumulates more wear particles and contaminants, so thresholds should be higher (more permissive)
+- **Enforcement**: Automatically applied during calculation - if calculated `GE_1000 < LT_1000`, the system adjusts `GE_1000` upward to equal `LT_1000`
+- **Example**: If calculated limits show `LT_1000: 50.0` and `GE_1000: 45.0`, the system adjusts to `GE_1000: 50.0`
+- **Verification**: Use `python verify_oil_age_constraint.py` to check compliance
+
 **Sample Count**: ~900-1500 limit combinations per client (3x previous due to stratification)
 
 ---
@@ -534,6 +567,48 @@ AWS_S3_PREFIX=MultiTechnique Alerts/oil/
 ---
 
 ## 📝 Change Log
+
+### Version 2.4 (July 1, 2026) - SITE, LAB DATE & ANOMALY TYPE CLASSIFICATION
+**Major Feature**: New metadata fields and ML-based anomaly reason classification
+
+#### Silver Layer Additions
+- **`site`**: Location where the machine operates
+  - CDA/EMIN: Default value "Área Mina"
+  - ENEX: Extracted from bronze "Site" column, fallback to "Área Mina"
+  
+- **`labDate`**: Date the sample was processed at the laboratory
+  - CDA: From bronze "Fecha de laboratorio"
+  - EMIN: From bronze "dateOfEntryIntoLaboratory"
+  - ENEX: From bronze "Date Diagnosed"
+
+#### Golden Layer Additions
+- **`anomalyType`**: Predicted anomaly reason for non-Normal reports
+  - Values: 'Normal' (default for Normal reports), or one of:
+    - 'Desgaste de Componentes'
+    - 'Contaminación Lubricante'
+    - 'Código ISO 4406 - Sílice'
+    - 'Contaminación Sílice - Desgaste'
+    - 'Contaminación Agua'
+    - 'Combustión Deficiente - Desgaste'
+    - 'Dilución Combustible'
+  - Only predicted when `report_status` != 'Normal'
+  - Uses DecisionTreeClassifier trained on external lab data
+  - Model artifact: `models/anomaly_type_tree.joblib`
+  - Training columns: `models/anomaly_type_columns.joblib`
+  - Training script: `scripts/train_anomaly_model.py`
+
+#### New Files
+- `src/ai/anomaly_model.py`: Training and inference for anomaly type model
+- `scripts/train_anomaly_model.py`: CLI script to train/retrain the model
+- `models/anomaly_type_tree.joblib`: Trained model artifact
+- `models/anomaly_type_columns.joblib`: Feature column alignment artifact
+
+#### Migration Notes
+- Backward compatible: Old tools can ignore new columns
+- Model must be trained before running pipeline: `python scripts/train_anomaly_model.py`
+- If model not found, `anomalyType` defaults to 'Normal' for all samples
+
+---
 
 ### Version 2.3 (May 13, 2026) - OIL-HOUR STRATIFIED STEWART LIMITS + EVOLUTION RATIO LIMITS
 **Major Feature**: Oil-Hour Stratification and Evolution Ratio Analysis

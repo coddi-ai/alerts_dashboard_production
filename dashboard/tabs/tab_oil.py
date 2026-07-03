@@ -57,6 +57,12 @@ def create_layout() -> html.Div:
                     className='custom-tab',
                     selected_className='custom-tab--selected'
                 ),
+                dcc.Tab(
+                    label='Cumplimiento Laboratorio',
+                    value='lab-compliance',
+                    className='custom-tab',
+                    selected_className='custom-tab--selected'
+                ),
                 # dcc.Tab(
                 #     label='Horómetro de Componentes',
                 #     value='component-hours',

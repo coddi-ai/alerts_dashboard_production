@@ -68,6 +68,16 @@ def get_essay_limits(comp_limits, essay, oil_hour_range):
     return None
 
 
+def _format_anomaly_type(anomaly_val):
+    """Format anomaly type for display, handling missing/Normal gracefully."""
+    if anomaly_val is None or (isinstance(anomaly_val, float) and pd.isna(anomaly_val)):
+        return "—"
+    val = str(anomaly_val).strip()
+    if not val or val == 'Normal':
+        return "—"
+    return val
+
+
 def calculate_breached_essays_from_data(sample, limits, client, machine, component):
     """
     Calculate breached essays dynamically from sample data and Stewart Limits.
@@ -448,8 +458,8 @@ def register_reports_callbacks(app):
             # 2. Decision Summary (OIL-R-02) - with data quality check
             decision_summary = create_decision_summary(sample, limits, client, familia, component)
             
-            # 3. Evidence Tables AND Radar Charts (OIL-R-03)
-            evidence_container = create_evidence_tables_and_radar(sample, limits, df)
+            # 3. Evidence Tables only (radar removed July 2026)
+            evidence_container = create_evidence_tables_only(sample, limits, df)
             
             # 4. AI Recommendation (OIL-R-04) - Plain text display
             ai_recommendation, _ = create_ai_diagnosis_and_action(sample)
@@ -634,6 +644,310 @@ def register_reports_callbacks(app):
         except Exception as e:
             logger.exception(f"Error in update_time_series: {e}")
             return Figure()
+
+    # ========================================
+    # 9-Chart Time Series Grid (July 2026)
+    # ========================================
+
+    # Define 9 standard oil analysis chart pairings (viscosity included)
+    TIME_SERIES_CHARTS = [
+        {'title': 'Hierro & PQ', 'essays': ['Hierro', 'Índice PQ']},
+        {'title': 'Cobre & Estaño', 'essays': ['Cobre', 'Estaño']},
+        {'title': 'Cromo & Aluminio', 'essays': ['Cromo', 'Aluminio']},
+        {'title': 'Plomo & Níquel', 'essays': ['Plomo', 'Níquel']},
+        {'title': 'Silicio & Potasio', 'essays': ['Silicio', 'Potasio']},
+        {'title': 'Sodio & Agua', 'essays': ['Sodio', 'Agua']},
+        {'title': 'Viscocidad', 'essays': ['Viscocidad']},
+        {'title': 'Hollín & Oxidación', 'essays': ['Hollín', 'Oxidación']},
+        {'title': 'Combustible & Refrigerante', 'essays': ['Combustible', 'Refrigerante']},
+    ]
+
+    @app.callback(
+        Output('reports-time-series-grid', 'children'),
+        [Input('reports-component-selector', 'value'),
+         Input('reports-equipo-selector', 'value'),
+         Input('reports-date-range-picker', 'start_date'),
+         Input('reports-date-range-picker', 'end_date'),
+         Input('client-selector', 'value')],
+        prevent_initial_call=True
+    )
+    def update_time_series_grid(component, equipo, start_date, end_date, client):
+        """
+        Generate 9-chart time series grid for oil analysis trends.
+        
+        Uses DatePickerRange for filtering. Shows only upper condemnation limit.
+        """
+        from plotly.subplots import make_subplots
+        import plotly.graph_objects as go
+        from dash import dcc
+        from datetime import datetime
+        from dateutil.relativedelta import relativedelta
+
+        if not all([component, equipo, client]):
+            return html.P("Seleccione equipo y componente para ver tendencias", className="text-muted")
+
+        settings = get_settings()
+        reports_file = settings.get_classified_reports_path(client)
+        limits_file = settings.get_stewart_limits_path(client)
+
+        if not reports_file.exists():
+            return html.P("No hay datos disponibles", className="text-muted")
+
+        try:
+            df = safe_read_parquet(reports_file)
+            limits = load_stewart_limits(limits_file) if limits_file.exists() else None
+
+            # Filter to equipment + component
+            history = df[(df['unitId'] == equipo) & (df['componentName'] == component)].copy()
+            if history.empty:
+                return html.P("Sin historial para este equipo/componente", className="text-muted")
+
+            history['sampleDate'] = pd.to_datetime(history['sampleDate'])
+            history = history.sort_values('sampleDate')
+
+            # Apply date range filter
+            if start_date:
+                history = history[history['sampleDate'] >= pd.to_datetime(start_date)]
+            if end_date:
+                history = history[history['sampleDate'] <= pd.to_datetime(end_date)]
+
+            if history.empty:
+                return html.P("Sin datos en el rango seleccionado", className="text-muted")
+
+            # Get limits for this component
+            comp_limits = {}
+            oil_hour_range = 'UNKNOWN'
+            if limits:
+                familia = history.iloc[0].get('machineName', '')
+                component_normalized = history.iloc[0].get('componentNameNormalized', component)
+                comp_limits = limits.get(client, {}).get(familia, {}).get(component_normalized, {})
+                oil_hour_range = history.iloc[-1].get('oilHourRange', 'UNKNOWN')
+
+            # Generate 9 charts in a 3x3 grid
+            chart_elements = []
+            for chart_config in TIME_SERIES_CHARTS:
+                essays = chart_config['essays']
+                title = chart_config['title']
+
+                # Check if any essay has data
+                available_essays = [e for e in essays if e in history.columns and history[e].notna().any()]
+                if not available_essays:
+                    # Show empty placeholder
+                    chart_elements.append(
+                        dbc.Col([
+                            dbc.Card([
+                                dbc.CardBody([
+                                    html.H6(title, className="text-muted text-center mb-2", style={'fontSize': '0.85rem'}),
+                                    html.P("Sin datos", className="text-muted text-center small")
+                                ])
+                            ], className="h-100")
+                        ], md=4, className="mb-3")
+                    )
+                    continue
+
+                # Create figure with secondary y-axis if 2 essays
+                fig = go.Figure()
+                colors = ['#1f77b4', '#ff7f0e']
+
+                for idx, essay in enumerate(available_essays):
+                    essay_values = history[essay].dropna()
+                    if essay_values.empty:
+                        continue
+                    essay_dates = history.loc[essay_values.index, 'sampleDate']
+
+                    fig.add_trace(go.Scatter(
+                        x=essay_dates,
+                        y=essay_values,
+                        mode='lines+markers',
+                        name=essay,
+                        line=dict(color=colors[idx % 2], width=2),
+                        marker=dict(size=4),
+                    ))
+
+                    # Show ONLY upper condemnation limit (threshold_critic)
+                    essay_limits = get_essay_limits(comp_limits, essay, oil_hour_range)
+                    if essay_limits and 'threshold_critic' in essay_limits:
+                        critic_val = essay_limits['threshold_critic']
+                        fig.add_hline(
+                            y=critic_val,
+                            line=dict(color='#dc3545', width=1.5, dash='dash'),
+                            annotation_text=f"Límite {essay}" if len(available_essays) > 1 else "Límite",
+                            annotation_position="top right",
+                            annotation_font=dict(size=8, color='#dc3545'),
+                        )
+
+                fig.update_layout(
+                    title=dict(text=title, font=dict(size=12), x=0.5, xanchor='center'),
+                    height=220,
+                    margin=dict(l=40, r=15, t=35, b=30),
+                    showlegend=True,
+                    legend=dict(
+                        orientation='h', yanchor='bottom', y=-0.35,
+                        xanchor='center', x=0.5, font=dict(size=9)
+                    ),
+                    xaxis=dict(tickfont=dict(size=9)),
+                    yaxis=dict(tickfont=dict(size=9)),
+                    hovermode='x unified',
+                    plot_bgcolor='white',
+                    paper_bgcolor='white'
+                )
+                fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor='#f0f0f0')
+                fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor='#f0f0f0')
+
+                chart_elements.append(
+                    dbc.Col([
+                        dcc.Graph(figure=fig, config={'displayModeBar': False})
+                    ], md=4, className="mb-3")
+                )
+
+            if not chart_elements:
+                return html.P("Sin datos de ensayos disponibles", className="text-muted")
+
+            return dbc.Row(chart_elements)
+
+        except Exception as e:
+            logger.exception(f"Error in update_time_series_grid: {e}")
+            return html.P(f"Error: {str(e)}", className="text-danger")
+
+    # ========================================
+    # Advanced Analytics - Variable Options
+    # ========================================
+    @app.callback(
+        Output('advanced-analytics-variables', 'options'),
+        [Input('reports-component-selector', 'value'),
+         Input('reports-equipo-selector', 'value'),
+         Input('client-selector', 'value')],
+        prevent_initial_call=True
+    )
+    def populate_advanced_analytics_options(component, equipo, client):
+        """Populate available variables for advanced analytics."""
+        if not all([component, equipo, client]):
+            return []
+        settings = get_settings()
+        reports_file = settings.get_classified_reports_path(client)
+        if not reports_file.exists():
+            return []
+        try:
+            df = safe_read_parquet(reports_file)
+            history = df[(df['unitId'] == equipo) & (df['componentName'] == component)]
+            if history.empty:
+                return []
+            # Find numeric essay columns that have data
+            essay_cols = ['Hierro', 'Cromo', 'Aluminio', 'Cobre', 'Plomo', 'Níquel',
+                          'Plata', 'Estaño', 'Titanio', 'Vanadio', 'Manganeso',
+                          'Silicio', 'Potasio', 'Sodio', 'Zinc', 'Bario', 'Boro',
+                          'Calcio', 'Molibdeno', 'Magnesio', 'Fósforo', 'Viscocidad',
+                          'Índice PQ', 'Numero Total Basico', 'Oxidación', 'Agua',
+                          'Refrigerante', 'Combustible', 'Hollín']
+            available = [c for c in essay_cols if c in history.columns and history[c].notna().any()]
+            return [{'label': c, 'value': c} for c in available]
+        except:
+            return []
+
+    # ========================================
+    # Advanced Analytics - Generate Chart
+    # ========================================
+    @app.callback(
+        Output('advanced-analytics-chart-container', 'children'),
+        [Input('advanced-analytics-generate', 'n_clicks')],
+        [State('advanced-analytics-variables', 'value'),
+         State('advanced-analytics-show-limits', 'value'),
+         State('reports-component-selector', 'value'),
+         State('reports-equipo-selector', 'value'),
+         State('reports-date-range-picker', 'start_date'),
+         State('reports-date-range-picker', 'end_date'),
+         State('client-selector', 'value')],
+        prevent_initial_call=True
+    )
+    def generate_advanced_analytics(n_clicks, variables, show_limits_val,
+                                     component, equipo, start_date, end_date, client):
+        """Generate custom trend chart for selected variables."""
+        import plotly.graph_objects as go
+        from dash import dcc
+
+        if not n_clicks or not variables or not all([component, equipo, client]):
+            raise PreventUpdate
+
+        settings = get_settings()
+        reports_file = settings.get_classified_reports_path(client)
+        limits_file = settings.get_stewart_limits_path(client)
+
+        if not reports_file.exists():
+            return html.P("Sin datos", className="text-muted")
+
+        try:
+            df = safe_read_parquet(reports_file)
+            limits = load_stewart_limits(limits_file) if limits_file.exists() else None
+
+            history = df[(df['unitId'] == equipo) & (df['componentName'] == component)].copy()
+            if history.empty:
+                return html.P("Sin historial", className="text-muted")
+
+            history['sampleDate'] = pd.to_datetime(history['sampleDate'])
+            history = history.sort_values('sampleDate')
+
+            if start_date:
+                history = history[history['sampleDate'] >= pd.to_datetime(start_date)]
+            if end_date:
+                history = history[history['sampleDate'] <= pd.to_datetime(end_date)]
+
+            if history.empty:
+                return html.P("Sin datos en el rango seleccionado", className="text-muted")
+
+            # Limits
+            comp_limits = {}
+            oil_hour_range = 'UNKNOWN'
+            if limits:
+                familia = history.iloc[0].get('machineName', '')
+                comp_norm = history.iloc[0].get('componentNameNormalized', component)
+                comp_limits = limits.get(client, {}).get(familia, {}).get(comp_norm, {})
+                oil_hour_range = history.iloc[-1].get('oilHourRange', 'UNKNOWN')
+
+            show_limits = 'show' in (show_limits_val or [])
+            colors_cycle = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
+                            '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
+
+            fig = go.Figure()
+            for idx, var in enumerate(variables[:10]):
+                vals = history[var].dropna()
+                if vals.empty:
+                    continue
+                dates = history.loc[vals.index, 'sampleDate']
+                color = colors_cycle[idx % len(colors_cycle)]
+
+                fig.add_trace(go.Scatter(
+                    x=dates, y=vals, mode='lines+markers', name=var,
+                    line=dict(color=color, width=2), marker=dict(size=5)
+                ))
+
+                # Upper condemnation limit
+                if show_limits:
+                    essay_lims = get_essay_limits(comp_limits, var, oil_hour_range)
+                    if essay_lims and 'threshold_critic' in essay_lims:
+                        fig.add_hline(
+                            y=essay_lims['threshold_critic'],
+                            line=dict(color=color, width=1.5, dash='dash'),
+                            annotation_text=f"Lím. {var}",
+                            annotation_position="top right",
+                            annotation_font=dict(size=8, color=color),
+                        )
+
+            fig.update_layout(
+                title="Analítica Avanzada - Tendencia Personalizada",
+                height=400,
+                margin=dict(l=50, r=20, t=50, b=40),
+                hovermode='x unified',
+                legend=dict(orientation='h', yanchor='bottom', y=-0.25, xanchor='center', x=0.5),
+                plot_bgcolor='white', paper_bgcolor='white'
+            )
+            fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor='#f0f0f0')
+            fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor='#f0f0f0')
+
+            return dcc.Graph(figure=fig, config={'displayModeBar': True})
+
+        except Exception as e:
+            logger.exception(f"Error in advanced analytics: {e}")
+            return html.P(f"Error: {str(e)}", className="text-danger")
 
 
 # Helper functions
@@ -1365,7 +1679,7 @@ def create_decision_summary(sample, limits, client, machine, component):
         days_since = f"{int(days_prev)} d\u00edas"
     
     main_summary = dbc.Row([
-        # Simplified metrics: Status | Essays Broken | Breached Essays
+        # Simplified metrics: Status | Anomaly | Essays Broken | Breached Essays
         dbc.Col([
             dbc.Card([
                 dbc.CardBody([
@@ -1385,21 +1699,31 @@ def create_decision_summary(sample, limits, client, machine, component):
                                 html.H4(html.Span(sample.get('report_status', 'N/A'), 
                                        className=f"badge bg-{status_color}"))
                             ])
-                        ], width=4),
+                        ], width=3),
+                        dbc.Col([
+                            html.Div([
+                                html.Small("Anomalía Detectada", className="text-muted d-block mb-1"),
+                                html.P(
+                                    _format_anomaly_type(sample.get('anomalyType')),
+                                    className="mb-0 fw-bold",
+                                    style={'fontSize': '0.9rem'}
+                                )
+                            ])
+                        ], width=3),
                         dbc.Col([
                             html.Div([
                                 html.Small("Ensayos Fuera de L\u00edmite", className="text-muted d-block mb-1"),
                                 html.H3(f"{essays_broken_count}", 
                                        className=f"text-{status_color}")
                             ])
-                        ], width=4),
+                        ], width=3),
                         dbc.Col([
                             html.Div([
                                 html.Small("Ensayos Cr\u00edticos", className="text-muted d-block mb-1"),
                                 html.P(breached_text, className="mb-0", 
                                       style={'fontSize': '0.9rem', 'fontWeight': 'bold'})
                             ])
-                        ], width=4)
+                        ], width=3)
                     ])
                 ])
             ], color="light")
@@ -1597,6 +1921,10 @@ def create_evidence_tables(sample, limits, df):
     except Exception as e:
         logger.exception(f"Error creating evidence tables: {e}")
         return html.P(f"Error: {str(e)}", className="text-danger")
+
+
+# Alias: tables-only evidence (radar removed July 2026)
+create_evidence_tables_only = create_evidence_tables
 
 
 def create_evidence_tables_and_radar(sample, limits, df):

@@ -45,6 +45,9 @@ import dashboard.callbacks.telemetry_callbacks
 # Import oil callbacks (uses @callback decorator, auto-registered on import)
 import dashboard.callbacks.oil_callbacks
 
+# Import lab compliance callbacks (uses @callback decorator, auto-registered on import)
+import dashboard.callbacks.lab_compliance_callbacks
+
 # Import menace control callbacks (uses @callback decorator, auto-registered on import)
 import dashboard.callbacks.menace_control_callbacks
 

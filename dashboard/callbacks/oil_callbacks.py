@@ -8,6 +8,7 @@ from dash import callback, Input, Output, State
 from dashboard.tabs.tab_machines import create_machines_tab
 from dashboard.tabs.tab_reports import create_reports_tab
 from dashboard.tabs.tab_component_hours import create_component_hours_tab
+from dashboard.tabs.tab_lab_compliance import create_lab_compliance_tab
 from config.settings import get_settings
 from dash import html
 from src.utils.logger import get_logger
@@ -39,6 +40,9 @@ def render_oil_tab_content(active_tab, client):
 
     if active_tab == 'report-detail':
         return create_reports_tab()
+
+    if active_tab == 'lab-compliance':
+        return create_lab_compliance_tab()
 
     if active_tab == 'component-hours':
         # Check if client has access to component hours
