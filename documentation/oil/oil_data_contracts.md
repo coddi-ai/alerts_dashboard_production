@@ -1,7 +1,7 @@
 # Data Contracts - Oil Analysis Data Product
 
-**Version**: 2.4  
-**Last Updated**: July 1, 2026  
+**Version**: 2.5  
+**Last Updated**: July 7, 2026  
 **Owner**: Oil Analysis Data Product Team
 
 ---
@@ -35,9 +35,10 @@ This document defines the data contracts for the Oil Analysis Data Product, spec
 1. **Historical**: One-time bulk processing with Stewart Limits calculation
 2. **Incremental**: Daily processing using existing Stewart Limits
 
-**Key Enhancements (v2.4)**:
+**Key Enhancements (v2.5)**:
+- **Three-Date Model**: sampleDate (withdrawal), labDate (arrival at lab), reportDate (diagnosis)
+- **Normal Report Defaults**: Default recommendation text for Normal samples and machines
 - **Site Field**: Location where the machine operates (per client source)
-- **Lab Date Field**: Date sample was processed at laboratory
 - **Anomaly Type Classification**: ML-predicted anomaly reason for non-Normal reports
 - **Oil-Hour Stratification**: Separate limits for fresh (<1000h) vs aged (>=1000h) oil
 - **Evolution Ratio Limits**: Normalized concentration per oil hour for early trend detection
@@ -171,8 +172,9 @@ S3: s3://{BUCKET}/MultiTechnique Alerts/oil/silver/{CLIENT}.parquet
 |--------|------|-------------|---------|
 | `client` | string | Client identifier | 'CDA', 'EMIN' |
 | `sampleNumber` | string | Unique sample ID | 'CDA-2024-001' |
-| `sampleDate` | date | Sample collection date | '2024-01-15' |
-| `labDate` | date | Date sample processed at laboratory | '2024-01-17' |
+| `sampleDate` | date | Sample collection/withdrawal date | '2024-01-15' |
+| `labDate` | date | Date sample arrives at laboratory | '2024-01-16' |
+| `reportDate` | date | Date sample is diagnosed/reported | '2024-01-17' |
 | `site` | string | Location where the machine works | 'Área Mina' |
 | `unitId` | string | Equipment unit ID | 'CAT-001' |
 | `machineName` | string | Normalized machine type | 'camion', 'pala' |
@@ -243,13 +245,24 @@ else:
 | EMIN | Static | "Área Mina" |
 | ENEX | Bronze column "Site" | "Área Mina" (if null) |
 
-### Lab Date Field (v2.4)
+### Lab Date Field (v2.5)
 
-**Source per client**:
+**Source per client** (date sample arrives at laboratory):
+| Client | Bronze Column | Notes |
+|--------|--------------|-------|
+| CDA | N/A | Uses "Fecha de laboratorio" (same as reportDate) |
+| EMIN | "dateOfEntryIntoLaboratory" | |
+| ENEX | "Date Received" | |
+
+**Format**: datetime (YYYY-MM-DD)
+
+### Report Date Field (v2.5)
+
+**Source per client** (date sample is diagnosed/reported):
 | Client | Bronze Column |
 |--------|--------------|
 | CDA | "Fecha de laboratorio" |
-| EMIN | "dateOfEntryIntoLaboratory" |
+| EMIN | "validResult_evaluationDate" |
 | ENEX | "Date Diagnosed" |
 
 **Format**: datetime (YYYY-MM-DD)
@@ -300,8 +313,8 @@ S3: s3://{BUCKET}/MultiTechnique Alerts/oil/golden/{client}/
 | `severity_score` | int | Total points from ALL breached essays | 14 |
 | `desgaste_score` | int | Points from ONLY Desgaste essays (NEW) | 8 |
 | `report_status` | string | Overall report status (based on desgaste_score) | 'Normal', 'Alerta', 'Anormal' |
-| `anomalyType` | string | Predicted anomaly reason (only for non-Normal reports) | 'Normal', 'Desgaste de Componentes', 'Contaminación Lubricante' |
-| `ai_recommendation` | string | AI-generated maintenance advice | 'Se recomienda...' |
+| `anomalyType` | string | Predicted anomaly reason | 'Normal', 'Desgaste de Componentes', 'Contaminación Lubricante' |
+| `ai_recommendation` | string | AI-generated maintenance advice (always present) | 'Se recomienda...' |
 | `ai_analysis` | string | AI analysis of breached essays | 'Niveles elevados de...' |
 | **Oil-Hour Stratification (v2.3)** | | | |
 | `limit_source` | string | Which limit was used for classification | 'oil_hour_stratified', 'fallback_global', 'missing' |
@@ -382,13 +395,14 @@ S3: s3://{BUCKET}/MultiTechnique Alerts/oil/golden/{client}/
   - Alerta: 6 <= machine_score < 10
   - Anormal: machine_score >= 10
 
-**Machine-Level AI Recommendations** 🤖 **NEW FEATURE**:
-- Generated automatically for machines with `overall_status` = 'Alerta' or 'Anormal'
+**Machine-Level AI Recommendations** 🤖:
+- Generated automatically for ALL machines regardless of status
+- For 'Alerta' or 'Anormal' machines: AI-generated holistic equipment assessment
+- For 'Normal' machines: Default message confirming normal operation
 - Provides holistic equipment assessment considering all components
 - Takes into account component criticality weights
 - Recommends prioritized maintenance actions
-- Skipped for machines with 'Normal' status (returns null)
-- Uses OpenAI GPT-4o-mini with specialized mechanical engineering prompt
+- Uses OpenAI GPT-4o-mini with specialized mechanical engineering prompt for non-Normal machines
 
 **Sample Count**: ~200-250 machines per client
 
@@ -561,12 +575,44 @@ AWS_S3_PREFIX=MultiTechnique Alerts/oil/
 - ✅ Every sample has essay_status for all essays
 - ✅ Every sample has report_status
 - ✅ essay_score matches essay classifications
-- ✅ AI recommendations present for Alerta/Anormal reports
+- ✅ AI recommendations present for ALL reports (default for Normal, AI-generated for others)
 - ✅ Machine status aggregations match classified reports
 
 ---
 
 ## 📝 Change Log
+
+### Version 2.5 (July 7, 2026) - DATE REFACTORING & NORMAL REPORT DEFAULTS
+**Major Feature**: Three-date model and default recommendations for Normal samples/machines
+
+#### Silver Layer Changes
+- **`labDate`**: **MEANING CHANGED** — Now represents date sample arrives at laboratory (previously was date diagnosed)
+  - CDA: No separate field available, uses reportDate value
+  - EMIN: From bronze "dateOfEntryIntoLaboratory" (unchanged source)
+  - ENEX: From bronze "Date Received" (previously used "Date Diagnosed")
+
+- **`reportDate`**: **NEW FIELD** — Date sample is diagnosed/reported
+  - CDA: From bronze "Fecha de laboratorio"
+  - EMIN: From bronze "validResult_evaluationDate"
+  - ENEX: From bronze "Date Diagnosed"
+
+#### Golden Layer Changes
+- **`ai_recommendation`**: Now always populated for all samples
+  - Normal samples: Default text about permissible wear/contamination levels
+  - Alerta/Anormal samples: AI-generated recommendation (unchanged)
+
+- **`anomalyType`**: Unchanged — 'Normal' for Normal reports, predicted for non-Normal
+
+- **`machine_ai_recommendation`**: Now always populated for all machines
+  - Normal machines: Default text confirming normal operation
+  - Alerta/Anormal machines: AI-generated recommendation (unchanged)
+
+#### Migration Notes
+- **Breaking change**: `labDate` meaning has changed. Consumers that previously used `labDate` as "diagnosis date" should now use `reportDate`
+- `reportDate` is a new required column in Silver layer
+- Normal samples/machines now have non-null `ai_recommendation`/`machine_ai_recommendation`
+
+---
 
 ### Version 2.4 (July 1, 2026) - SITE, LAB DATE & ANOMALY TYPE CLASSIFICATION
 **Major Feature**: New metadata fields and ML-based anomaly reason classification

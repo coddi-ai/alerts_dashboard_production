@@ -1,11 +1,9 @@
 """
-Callbacks for the Laboratory Compliance KPIs tab.
+Lab Compliance callbacks — July 2026 v3.
 
-Handles:
-- Date range initialization from available data
-- KPI card calculations (within/outside deadline, average delay)
-- Weekly evolution chart of average laboratory delay
-- Distribution of samples outside deadline by unit
+KPIs: Transit Time (labDate - sampleDate), Lab Time (reportDate - labDate).
+Edge case: if Lab Time has no positive values → use Diagnostic Time (reportDate - sampleDate).
+Visualization: Weekly grouped bar chart.
 """
 
 from dash import callback, Input, Output, State, no_update
@@ -17,51 +15,64 @@ from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-DEADLINE_DAYS = 2
 
-
-def _load_lab_compliance_data(client: str) -> pd.DataFrame:
+def _load_compliance_data(client: str) -> pd.DataFrame:
     """
-    Load classified reports and compute lab delay.
+    Load data and compute Transit Time and Lab Time.
 
-    Returns DataFrame with columns: sampleDate, labDate, unitId, lab_delay_days, within_deadline
-    Only includes rows where both dates are valid.
+    Returns DataFrame with: sampleDate, labDate, reportDate, unitId,
+                            transit_time, lab_time, diagnostic_time
     """
     if not client:
         return pd.DataFrame()
 
     settings = get_settings()
-    reports_path = settings.get_classified_reports_path(client.lower())
-
-    if not reports_path.exists():
-        logger.warning(f"Classified reports not found: {reports_path}")
+    path = settings.get_classified_reports_path(client.lower())
+    if not path.exists():
         return pd.DataFrame()
 
-    df = safe_read_parquet(reports_path)
+    df = safe_read_parquet(path)
     if df.empty:
         return pd.DataFrame()
 
-    # Ensure datetime types
-    df['sampleDate'] = pd.to_datetime(df['sampleDate'], errors='coerce')
-    df['labDate'] = pd.to_datetime(df['labDate'], errors='coerce')
+    df['sampleDate'] = pd.to_datetime(df['sampleDate'], errors='coerce', utc=True).dt.tz_localize(None)
 
-    # Filter out rows with missing dates
-    df = df.dropna(subset=['sampleDate', 'labDate'])
+    if 'labDate' in df.columns:
+        df['labDate'] = pd.to_datetime(df['labDate'], errors='coerce', utc=True).dt.tz_localize(None)
+    else:
+        df['labDate'] = pd.NaT
 
-    if df.empty:
-        return pd.DataFrame()
+    if 'reportDate' in df.columns:
+        df['reportDate'] = pd.to_datetime(df['reportDate'], errors='coerce', utc=True).dt.tz_localize(None)
+    else:
+        df['reportDate'] = pd.NaT
 
-    # Calculate lab delay in days
-    df['lab_delay_days'] = (df['labDate'] - df['sampleDate']).dt.days
-    df['within_deadline'] = df['lab_delay_days'] <= DEADLINE_DAYS
+    # Need at least sampleDate
+    df = df.dropna(subset=['sampleDate'])
 
-    return df[['sampleDate', 'labDate', 'unitId', 'lab_delay_days', 'within_deadline']].copy()
+    # Transit Time = labDate - sampleDate (may be NaN if labDate missing)
+    df['transit_time'] = (df['labDate'] - df['sampleDate']).dt.days
+    # Lab Time = reportDate - labDate (may be NaN)
+    df['lab_time'] = (df['reportDate'] - df['labDate']).dt.days
+    # Diagnostic Time = reportDate - sampleDate (fallback)
+    df['diagnostic_time'] = (df['reportDate'] - df['sampleDate']).dt.days
+
+    cols = ['sampleDate', 'labDate', 'reportDate', 'unitId',
+            'transit_time', 'lab_time', 'diagnostic_time']
+    return df[[c for c in cols if c in df.columns]].copy()
+
+
+def _has_positive_lab_time(df: pd.DataFrame) -> bool:
+    """Check if Lab Time has any positive values."""
+    if 'lab_time' not in df.columns:
+        return False
+    valid = df['lab_time'].dropna()
+    return (valid > 0).any()
 
 
 # ========================================
 # DATE RANGE INITIALIZATION
 # ========================================
-
 @callback(
     [Output('lab-compliance-date-range', 'min_date_allowed'),
      Output('lab-compliance-date-range', 'max_date_allowed'),
@@ -70,144 +81,141 @@ def _load_lab_compliance_data(client: str) -> pd.DataFrame:
     [Input('oil-internal-tabs', 'value'),
      Input('client-selector', 'value')]
 )
-def init_lab_compliance_date_range(active_tab, client):
-    """Initialize date picker range based on available data."""
+def init_date_range(active_tab, client):
     if active_tab != 'lab-compliance' or not client:
         return no_update, no_update, no_update, no_update
 
-    df = _load_lab_compliance_data(client)
+    df = _load_compliance_data(client)
     if df.empty:
         return no_update, no_update, no_update, no_update
 
-    min_date = df['sampleDate'].min().date()
-    max_date = df['sampleDate'].max().date()
-
-    # Default: last 6 months
-    default_start = max(min_date, (pd.Timestamp(max_date) - pd.DateOffset(months=6)).date())
-
-    return min_date, max_date, default_start, max_date
+    min_d = df['sampleDate'].min().date()
+    max_d = df['sampleDate'].max().date()
+    start = max(min_d, (pd.Timestamp(max_d) - pd.DateOffset(months=6)).date())
+    return min_d, max_d, start, max_d
 
 
 # ========================================
 # KPI CARDS
 # ========================================
-
 @callback(
-    [Output('lab-compliance-within-deadline', 'children'),
-     Output('lab-compliance-outside-deadline', 'children'),
-     Output('lab-compliance-avg-delay', 'children')],
+    [Output('lab-kpi-1-title', 'children'),
+     Output('lab-kpi-1-value', 'children'),
+     Output('lab-kpi-2-title', 'children'),
+     Output('lab-kpi-2-value', 'children'),
+     Output('lab-kpi-total-samples', 'children')],
     [Input('lab-compliance-date-range', 'start_date'),
      Input('lab-compliance-date-range', 'end_date'),
      Input('client-selector', 'value')],
     [State('oil-internal-tabs', 'value')]
 )
-def update_lab_compliance_kpis(start_date, end_date, client, active_tab):
-    """Update KPI cards based on date range selection."""
+def update_kpis(start_date, end_date, client, active_tab):
+    defaults = ("Tiempo de Tránsito Prom.", "—", "Tiempo de Laboratorio Prom.", "—", "—")
     if active_tab != 'lab-compliance' or not client:
-        return "—", "—", "—"
+        return defaults
 
-    df = _load_lab_compliance_data(client)
+    df = _load_compliance_data(client)
     if df.empty:
-        return "0", "0", "—"
+        return defaults
 
-    # Apply date filter
     if start_date:
         df = df[df['sampleDate'] >= pd.Timestamp(start_date)]
     if end_date:
         df = df[df['sampleDate'] <= pd.Timestamp(end_date)]
-
     if df.empty:
-        return "0", "0", "—"
+        return defaults
 
-    within = df['within_deadline'].sum()
-    outside = (~df['within_deadline']).sum()
-    avg_delay = df['lab_delay_days'].mean()
+    total = str(len(df))
+    use_split = _has_positive_lab_time(df)
 
-    return str(int(within)), str(int(outside)), f"{avg_delay:.1f}"
+    if use_split:
+        transit_avg = df['transit_time'].dropna().mean()
+        lab_avg = df['lab_time'].dropna().mean()
+        return ("Tiempo de Tránsito Prom.", f"{transit_avg:.1f}" if pd.notna(transit_avg) else "—",
+                "Tiempo de Laboratorio Prom.", f"{lab_avg:.1f}" if pd.notna(lab_avg) else "—",
+                total)
+    else:
+        diag_avg = df['diagnostic_time'].dropna().mean()
+        return ("Tiempo Diagnóstico Prom.", f"{diag_avg:.1f}" if pd.notna(diag_avg) else "—",
+                "(Lab Time no disponible)", "—",
+                total)
 
 
 # ========================================
-# WEEKLY EVOLUTION CHART
+# WEEKLY BAR CHART
 # ========================================
-
 @callback(
-    Output('lab-compliance-weekly-chart', 'figure'),
+    [Output('lab-compliance-weekly-chart', 'figure'),
+     Output('lab-weekly-chart-title', 'children')],
     [Input('lab-compliance-date-range', 'start_date'),
      Input('lab-compliance-date-range', 'end_date'),
      Input('client-selector', 'value')],
     [State('oil-internal-tabs', 'value')]
 )
-def update_weekly_evolution_chart(start_date, end_date, client, active_tab):
-    """Update weekly trend chart of average lab delay."""
-    empty_fig = go.Figure()
-    empty_fig.update_layout(
-        xaxis_title="Semana",
-        yaxis_title="Demora Promedio (días)",
-        template="plotly_white",
-        margin=dict(l=40, r=20, t=30, b=40)
-    )
-    empty_fig.add_annotation(
-        text="Sin datos disponibles",
-        xref="paper", yref="paper",
-        x=0.5, y=0.5, showarrow=False,
-        font=dict(size=16, color="gray")
-    )
+def update_weekly_chart(start_date, end_date, client, active_tab):
+    empty = _empty_fig("Sin datos disponibles")
+    default_title = "Comparación Semanal"
 
     if active_tab != 'lab-compliance' or not client:
-        return empty_fig
+        return empty, default_title
 
-    df = _load_lab_compliance_data(client)
+    df = _load_compliance_data(client)
     if df.empty:
-        return empty_fig
+        return empty, default_title
 
-    # Apply date filter
     if start_date:
         df = df[df['sampleDate'] >= pd.Timestamp(start_date)]
     if end_date:
         df = df[df['sampleDate'] <= pd.Timestamp(end_date)]
-
     if df.empty:
-        return empty_fig
+        return empty, default_title
 
-    # Aggregate by week
     df['week'] = df['sampleDate'].dt.to_period('W').apply(lambda r: r.start_time)
-    weekly = df.groupby('week')['lab_delay_days'].mean().reset_index()
-    weekly.columns = ['week', 'avg_delay']
+    use_split = _has_positive_lab_time(df)
 
     fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=weekly['week'],
-        y=weekly['avg_delay'],
-        mode='lines+markers',
-        name='Demora Promedio',
-        line=dict(color='#0d6efd', width=2),
-        marker=dict(size=5)
-    ))
 
-    # Add deadline reference line
-    fig.add_hline(
-        y=DEADLINE_DAYS,
-        line_dash="dash",
-        line_color="red",
-        annotation_text=f"Plazo ({DEADLINE_DAYS} días)",
-        annotation_position="top right"
-    )
+    if use_split:
+        weekly = df.groupby('week').agg(
+            transit=('transit_time', 'mean'),
+            lab=('lab_time', 'mean')
+        ).reset_index()
+
+        fig.add_trace(go.Bar(
+            x=weekly['week'], y=weekly['transit'],
+            name='Tiempo de Tránsito', marker_color='#0d6efd'
+        ))
+        fig.add_trace(go.Bar(
+            x=weekly['week'], y=weekly['lab'],
+            name='Tiempo de Laboratorio', marker_color='#6610f2'
+        ))
+        title = "Comparación Semanal: Tiempo de Tránsito vs Tiempo de Laboratorio"
+    else:
+        weekly = df.groupby('week').agg(
+            diagnostic=('diagnostic_time', 'mean')
+        ).reset_index()
+
+        fig.add_trace(go.Bar(
+            x=weekly['week'], y=weekly['diagnostic'],
+            name='Tiempo Diagnóstico', marker_color='#fd7e14'
+        ))
+        title = "Evolución Semanal: Tiempo Diagnóstico (reportDate - sampleDate)"
 
     fig.update_layout(
+        barmode='group',
         xaxis_title="Semana",
-        yaxis_title="Demora Promedio (días)",
+        yaxis_title="Días (promedio)",
         template="plotly_white",
         margin=dict(l=40, r=20, t=30, b=40),
-        showlegend=False
+        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='center', x=0.5)
     )
 
-    return fig
+    return fig, title
 
 
 # ========================================
-# DISTRIBUTION BY UNIT CHART
+# UNIT DISTRIBUTION CHART
 # ========================================
-
 @callback(
     Output('lab-compliance-unit-chart', 'figure'),
     [Input('lab-compliance-date-range', 'start_date'),
@@ -215,66 +223,54 @@ def update_weekly_evolution_chart(start_date, end_date, client, active_tab):
      Input('client-selector', 'value')],
     [State('oil-internal-tabs', 'value')]
 )
-def update_unit_distribution_chart(start_date, end_date, client, active_tab):
-    """Update bar chart of samples outside deadline by unit."""
-    empty_fig = go.Figure()
-    empty_fig.update_layout(
-        xaxis_title="Unidad",
-        yaxis_title="Muestras Fuera de Plazo",
-        template="plotly_white",
-        margin=dict(l=40, r=20, t=30, b=40)
-    )
-    empty_fig.add_annotation(
-        text="Sin datos disponibles",
-        xref="paper", yref="paper",
-        x=0.5, y=0.5, showarrow=False,
-        font=dict(size=16, color="gray")
-    )
-
+def update_unit_chart(start_date, end_date, client, active_tab):
+    empty = _empty_fig("Sin datos disponibles")
     if active_tab != 'lab-compliance' or not client:
-        return empty_fig
+        return empty
 
-    df = _load_lab_compliance_data(client)
+    df = _load_compliance_data(client)
     if df.empty:
-        return empty_fig
+        return empty
 
-    # Apply date filter
     if start_date:
         df = df[df['sampleDate'] >= pd.Timestamp(start_date)]
     if end_date:
         df = df[df['sampleDate'] <= pd.Timestamp(end_date)]
+    if df.empty:
+        return empty
 
-    # Only samples outside deadline
-    df_outside = df[~df['within_deadline']]
+    use_split = _has_positive_lab_time(df)
 
-    if df_outside.empty:
-        empty_fig.data = []
-        empty_fig.layout.annotations = []
-        empty_fig.add_annotation(
-            text="Todas las muestras dentro de plazo",
-            xref="paper", yref="paper",
-            x=0.5, y=0.5, showarrow=False,
-            font=dict(size=16, color="green")
-        )
-        return empty_fig
+    if use_split:
+        col = 'transit_time'
+        ylabel = "Demora Tránsito Prom. (días)"
+    else:
+        col = 'diagnostic_time'
+        ylabel = "Demora Diagnóstico Prom. (días)"
 
-    # Count by unit, top 20
-    unit_counts = df_outside.groupby('unitId').size().reset_index(name='count')
-    unit_counts = unit_counts.sort_values('count', ascending=False).head(20)
+    by_unit = df.groupby('unitId')[col].mean().dropna().sort_values(ascending=False).head(20)
 
     fig = go.Figure()
     fig.add_trace(go.Bar(
-        x=unit_counts['unitId'],
-        y=unit_counts['count'],
-        marker_color='#dc3545'
+        x=by_unit.index, y=by_unit.values,
+        marker_color='#0d6efd'
     ))
-
     fig.update_layout(
         xaxis_title="Unidad",
-        yaxis_title="Muestras Fuera de Plazo",
+        yaxis_title=ylabel,
         template="plotly_white",
-        margin=dict(l=40, r=20, t=30, b=60),
-        xaxis_tickangle=-45
+        margin=dict(l=40, r=20, t=30, b=60)
     )
+    return fig
 
+
+def _empty_fig(text: str) -> go.Figure:
+    fig = go.Figure()
+    fig.update_layout(
+        template="plotly_white",
+        margin=dict(l=40, r=20, t=30, b=40)
+    )
+    fig.add_annotation(text=text, xref="paper", yref="paper",
+                       x=0.5, y=0.5, showarrow=False,
+                       font=dict(size=16, color="gray"))
     return fig

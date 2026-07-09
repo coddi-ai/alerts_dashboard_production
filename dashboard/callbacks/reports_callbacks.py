@@ -19,6 +19,64 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def _parse_breached_essays(breached_value):
+    """
+    Parse breached_essays field from either numpy array or JSON string format.
+    
+    The breached_essays field may be stored as:
+    - A numpy array of dicts (when read from Parquet with list/struct columns)
+    - A JSON string (legacy format)
+    - None or NaN
+    
+    Returns:
+        List of dicts with essay info, or empty list
+    """
+    import numpy as np
+    
+    if breached_value is None:
+        return []
+    if isinstance(breached_value, float) and pd.isna(breached_value):
+        return []
+    
+    # Handle numpy array (Parquet stores list-of-struct as ndarray)
+    if isinstance(breached_value, (np.ndarray, list)):
+        return list(breached_value)
+    
+    # Handle JSON string
+    if isinstance(breached_value, str):
+        try:
+            return json.loads(breached_value)
+        except (json.JSONDecodeError, ValueError):
+            return []
+    
+    return []
+
+
+def _extract_essay_names_from_breached(breached_list):
+    """
+    Extract essay names from breached_essays list.
+    
+    Handles both formats:
+    - List of dicts: [{'essay': 'Hierro', 'group': 'Desgaste', ...}, ...]
+    - List of strings: ['Hierro', 'Cobre', ...]
+    
+    Returns:
+        List of essay name strings
+    """
+    if not breached_list:
+        return []
+    
+    names = []
+    for item in breached_list:
+        if isinstance(item, dict):
+            essay_name = item.get('essay', '')
+            if essay_name:
+                names.append(essay_name)
+        elif isinstance(item, str):
+            names.append(item)
+    return names
+
+
 def get_essay_limits(comp_limits, essay, oil_hour_range):
     """
     Get essay limits with oil-hour stratification fallback logic (v2.3).
@@ -98,12 +156,21 @@ def calculate_breached_essays_from_data(sample, limits, client, machine, compone
     if not limits or not sample is not None:
         return []
     
-    # Normalize component name (remove left/right position indicators)
-    component_normalized = component.lower()
-    for suffix in [' izquierdo', ' derecho', ' izquierda', ' derecha']:
-        if component_normalized.endswith(suffix):
-            component_normalized = component_normalized[:-len(suffix)].strip()
-            break
+    # Use componentNameNormalized from sample if available (preferred),
+    # otherwise fall back to manual normalization
+    component_normalized = None
+    if hasattr(sample, 'get'):
+        comp_norm = sample.get('componentNameNormalized')
+        if comp_norm is not None and not (isinstance(comp_norm, float) and pd.isna(comp_norm)):
+            component_normalized = str(comp_norm).lower().strip()
+    
+    if not component_normalized:
+        # Fallback: manual normalization (remove position indicators)
+        component_normalized = component.lower()
+        for suffix in [' izquierdo', ' derecho', ' izquierda', ' derecha', ' delantero', ' trasero']:
+            if component_normalized.endswith(suffix):
+                component_normalized = component_normalized[:-len(suffix)].strip()
+                break
     
     # Get limits for this specific component
     if client not in limits or machine not in limits[client] or component_normalized not in limits[client][machine]:
@@ -468,13 +535,9 @@ def register_reports_callbacks(app):
             essay_options = get_essay_options(df)
             
             # Pre-select breached essays (up to 6) - use calculated if stored is empty
-            breached_essays = []
-            breached_value = sample.get('breached_essays')
-            if breached_value is not None and not (isinstance(breached_value, float) and pd.isna(breached_value)):
-                try:
-                    breached_essays = json.loads(breached_value)
-                except:
-                    breached_essays = []
+            breached_essays = _extract_essay_names_from_breached(
+                _parse_breached_essays(sample.get('breached_essays'))
+            )
             
             # Fallback: calculate from data if empty
             if not breached_essays and limits:
@@ -745,9 +808,12 @@ def register_reports_callbacks(app):
                     )
                     continue
 
-                # Create figure with secondary y-axis if 2 essays
+                # Create figure
                 fig = go.Figure()
                 colors = ['#1f77b4', '#ff7f0e']
+
+                # Collect limits for deduplication
+                limit_entries = []  # [(value, essay_name), ...]
 
                 for idx, essay in enumerate(available_essays):
                     essay_values = history[essay].dropna()
@@ -764,17 +830,29 @@ def register_reports_callbacks(app):
                         marker=dict(size=4),
                     ))
 
-                    # Show ONLY upper condemnation limit (threshold_critic)
+                    # Collect upper condemnation limit (threshold_critic)
                     essay_limits = get_essay_limits(comp_limits, essay, oil_hour_range)
                     if essay_limits and 'threshold_critic' in essay_limits:
-                        critic_val = essay_limits['threshold_critic']
-                        fig.add_hline(
-                            y=critic_val,
-                            line=dict(color='#dc3545', width=1.5, dash='dash'),
-                            annotation_text=f"Límite {essay}" if len(available_essays) > 1 else "Límite",
-                            annotation_position="top right",
-                            annotation_font=dict(size=8, color='#dc3545'),
-                        )
+                        limit_entries.append((essay_limits['threshold_critic'], essay))
+
+                # Consolidate duplicate limits (same value → one line, combined label)
+                limit_by_value = {}
+                for val, name in limit_entries:
+                    rounded_val = round(val, 2)
+                    limit_by_value.setdefault(rounded_val, []).append(name)
+
+                for val, names in limit_by_value.items():
+                    if len(names) > 1:
+                        label = " y ".join(names) + " Límite"
+                    else:
+                        label = f"Límite {names[0]}" if len(available_essays) > 1 else "Límite"
+                    fig.add_hline(
+                        y=val,
+                        line=dict(color='#dc3545', width=1.5, dash='dash'),
+                        annotation_text=label,
+                        annotation_position="top right",
+                        annotation_font=dict(size=8, color='#dc3545'),
+                    )
 
                 fig.update_layout(
                     title=dict(text=title, font=dict(size=12), x=0.5, xanchor='center'),
@@ -1642,14 +1720,9 @@ def create_decision_summary(sample, limits, client, machine, component):
         'Normal': 'success'
     }.get(sample.get('report_status', 'Normal'), 'secondary')
     
-    # Parse stored breached essays
-    stored_breached_essays = []
-    breached_value = sample.get('breached_essays')
-    if breached_value is not None and not (isinstance(breached_value, float) and pd.isna(breached_value)):
-        try:
-            stored_breached_essays = json.loads(breached_value)
-        except:
-            stored_breached_essays = []
+    # Parse stored breached essays (handles numpy array and JSON string formats)
+    stored_breached_raw = _parse_breached_essays(sample.get('breached_essays'))
+    stored_breached_essays = _extract_essay_names_from_breached(stored_breached_raw)
     
     # Calculate breached essays from actual data
     calculated_breached_essays = calculate_breached_essays_from_data(sample, limits, client, machine, component) if limits else []
@@ -1810,13 +1883,9 @@ def create_evidence_tables(sample, limits, df):
         oil_hour_range = sample.get('oilHourRange', 'UNKNOWN')
         
         # Parse breached essays
-        breached_essays = []
-        breached_value = sample.get('breached_essays')
-        if breached_value is not None and not (isinstance(breached_value, float) and pd.isna(breached_value)):
-            try:
-                breached_essays = json.loads(breached_value)
-            except:
-                breached_essays = []
+        breached_essays = _extract_essay_names_from_breached(
+            _parse_breached_essays(sample.get('breached_essays'))
+        )
         
         # Create evidence tables by group
         tables = []
@@ -1977,13 +2046,9 @@ def create_evidence_tables_and_radar(sample, limits, df):
         oil_hour_range = sample.get('oilHourRange', 'UNKNOWN')
         
         # Parse breached essays
-        breached_essays = []
-        breached_value = sample.get('breached_essays')
-        if breached_value is not None and not (isinstance(breached_value, float) and pd.isna(breached_value)):
-            try:
-                breached_essays = json.loads(breached_value)
-            except:
-                breached_essays = []
+        breached_essays = _extract_essay_names_from_breached(
+            _parse_breached_essays(sample.get('breached_essays'))
+        )
         
         # Create combined sections (tables + radar charts) by group
         sections = []

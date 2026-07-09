@@ -1,11 +1,12 @@
 """
-Laboratory Compliance KPIs Tab for Oil Analysis.
+Laboratory Compliance Tab — July 2026 v3.
 
-Provides compliance view for laboratory processing times:
-- KPI cards: samples within/outside deadline, average delay
-- Weekly trend chart of average lab delay
-- Distribution of samples outside deadline by unit
-- Date range selector filtering all views
+KPIs:
+- Transit Time: labDate - sampleDate
+- Lab Time: reportDate - labDate
+- Edge case: if Lab Time has no positive values → show Diagnostic Time (reportDate - sampleDate)
+
+Visualization: Weekly grouped bar chart (Transit Time vs Lab Time side-by-side).
 """
 
 from dash import dcc, html
@@ -18,9 +19,7 @@ def create_lab_compliance_tab() -> dbc.Container:
         html.H3("Cumplimiento de Laboratorio", className="mt-4 mb-3"),
         html.Hr(),
 
-        # ========================================
         # Date Range Filter
-        # ========================================
         dbc.Row([
             dbc.Col([
                 html.Label("Rango de Fechas (Fecha de Muestra):", className="fw-bold small"),
@@ -34,65 +33,62 @@ def create_lab_compliance_tab() -> dbc.Container:
             ], md=6),
         ], className="mb-4 p-3 bg-light rounded"),
 
-        # ========================================
         # KPI Cards
-        # ========================================
         dbc.Row([
             dbc.Col([
                 dbc.Card([
                     dbc.CardBody([
-                        html.H6("Muestras Dentro de Plazo", className="text-muted mb-1"),
-                        html.H3(id='lab-compliance-within-deadline', children="—",
-                                className="text-success fw-bold mb-0"),
-                        html.Small("≤ 2 días", className="text-muted")
-                    ])
-                ], className="shadow-sm h-100")
-            ], md=4),
-            dbc.Col([
-                dbc.Card([
-                    dbc.CardBody([
-                        html.H6("Muestras Fuera de Plazo", className="text-muted mb-1"),
-                        html.H3(id='lab-compliance-outside-deadline', children="—",
-                                className="text-danger fw-bold mb-0"),
-                        html.Small("> 2 días", className="text-muted")
-                    ])
-                ], className="shadow-sm h-100")
-            ], md=4),
-            dbc.Col([
-                dbc.Card([
-                    dbc.CardBody([
-                        html.H6("Demora Promedio", className="text-muted mb-1"),
-                        html.H3(id='lab-compliance-avg-delay', children="—",
+                        html.H6(id='lab-kpi-1-title', children="Tiempo de Tránsito Prom.",
+                                className="text-muted mb-1"),
+                        html.H3(id='lab-kpi-1-value', children="—",
                                 className="text-primary fw-bold mb-0"),
-                        html.Small("días", className="text-muted")
+                        html.Small("días (labDate - sampleDate)", className="text-muted")
+                    ])
+                ], className="shadow-sm h-100")
+            ], md=4),
+            dbc.Col([
+                dbc.Card([
+                    dbc.CardBody([
+                        html.H6(id='lab-kpi-2-title', children="Tiempo de Laboratorio Prom.",
+                                className="text-muted mb-1"),
+                        html.H3(id='lab-kpi-2-value', children="—",
+                                className="text-info fw-bold mb-0"),
+                        html.Small("días (reportDate - labDate)", className="text-muted")
+                    ])
+                ], className="shadow-sm h-100")
+            ], md=4),
+            dbc.Col([
+                dbc.Card([
+                    dbc.CardBody([
+                        html.H6("Total Muestras", className="text-muted mb-1"),
+                        html.H3(id='lab-kpi-total-samples', children="—",
+                                className="text-secondary fw-bold mb-0"),
+                        html.Small("en el rango seleccionado", className="text-muted")
                     ])
                 ], className="shadow-sm h-100")
             ], md=4),
         ], className="mb-4"),
 
-        # ========================================
-        # Weekly Evolution Chart
-        # ========================================
+        # Weekly Bar Chart
         dbc.Row([
             dbc.Col([
                 dbc.Card([
-                    dbc.CardHeader("Evolución Semanal de Demora Promedio de Laboratorio"),
+                    dbc.CardHeader(id='lab-weekly-chart-title',
+                                   children="Comparación Semanal: Tiempo de Tránsito vs Tiempo de Laboratorio"),
                     dbc.CardBody([
                         dcc.Graph(id='lab-compliance-weekly-chart',
                                   config={'displayModeBar': False},
-                                  style={'height': '350px'})
+                                  style={'height': '400px'})
                     ])
                 ], className="shadow-sm")
             ], md=12)
         ], className="mb-4"),
 
-        # ========================================
-        # Distribution by Unit Chart
-        # ========================================
+        # Distribution by Unit
         dbc.Row([
             dbc.Col([
                 dbc.Card([
-                    dbc.CardHeader("Muestras Fuera de Plazo por Unidad"),
+                    dbc.CardHeader("Demora Promedio por Unidad"),
                     dbc.CardBody([
                         dcc.Graph(id='lab-compliance-unit-chart',
                                   config={'displayModeBar': False},
