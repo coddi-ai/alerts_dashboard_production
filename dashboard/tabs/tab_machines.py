@@ -107,6 +107,12 @@ def create_machines_tab() -> dbc.Container:
                 dcc.Loading(
                     html.Div(id='fleet-heatmap-table-container'),
                     type="circle"
+                ),
+                html.Small(
+                    "💡 La columna \"Días\" indica los días desde la última muestra de cada unidad. "
+                    "Valores superiores a 20 días se resaltan en rojo y deben ser revisados. "
+                    "Haga clic en una celda de componente para ir al detalle del reporte.",
+                    className="text-muted d-block mt-2"
                 )
             ])
         ], className="mb-4"),

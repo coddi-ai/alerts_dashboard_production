@@ -128,6 +128,20 @@ def create_reports_tab() -> dbc.Container:
         ], className="mb-4"),
 
         # ========================================
+        # COMMENT HISTORY (traceability by unit/component)
+        # ========================================
+        dbc.Card([
+            dbc.CardHeader("💬 Historial de Comentarios", className="fw-bold"),
+            dbc.CardBody([
+                html.P(
+                    "Historial de comentarios/recomendaciones para la unidad y componente seleccionados.",
+                    className="text-muted mb-3"
+                ),
+                html.Div(id='reports-comment-history-container')
+            ])
+        ], className="mb-4"),
+
+        # ========================================
         # ADVANCED ANALYTICS (new section)
         # ========================================
         dbc.Card([

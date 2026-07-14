@@ -19,64 +19,6 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def _parse_breached_essays(breached_value):
-    """
-    Parse breached_essays field from either numpy array or JSON string format.
-    
-    The breached_essays field may be stored as:
-    - A numpy array of dicts (when read from Parquet with list/struct columns)
-    - A JSON string (legacy format)
-    - None or NaN
-    
-    Returns:
-        List of dicts with essay info, or empty list
-    """
-    import numpy as np
-    
-    if breached_value is None:
-        return []
-    if isinstance(breached_value, float) and pd.isna(breached_value):
-        return []
-    
-    # Handle numpy array (Parquet stores list-of-struct as ndarray)
-    if isinstance(breached_value, (np.ndarray, list)):
-        return list(breached_value)
-    
-    # Handle JSON string
-    if isinstance(breached_value, str):
-        try:
-            return json.loads(breached_value)
-        except (json.JSONDecodeError, ValueError):
-            return []
-    
-    return []
-
-
-def _extract_essay_names_from_breached(breached_list):
-    """
-    Extract essay names from breached_essays list.
-    
-    Handles both formats:
-    - List of dicts: [{'essay': 'Hierro', 'group': 'Desgaste', ...}, ...]
-    - List of strings: ['Hierro', 'Cobre', ...]
-    
-    Returns:
-        List of essay name strings
-    """
-    if not breached_list:
-        return []
-    
-    names = []
-    for item in breached_list:
-        if isinstance(item, dict):
-            essay_name = item.get('essay', '')
-            if essay_name:
-                names.append(essay_name)
-        elif isinstance(item, str):
-            names.append(item)
-    return names
-
-
 def get_essay_limits(comp_limits, essay, oil_hour_range):
     """
     Get essay limits with oil-hour stratification fallback logic (v2.3).
@@ -156,21 +98,12 @@ def calculate_breached_essays_from_data(sample, limits, client, machine, compone
     if not limits or not sample is not None:
         return []
     
-    # Use componentNameNormalized from sample if available (preferred),
-    # otherwise fall back to manual normalization
-    component_normalized = None
-    if hasattr(sample, 'get'):
-        comp_norm = sample.get('componentNameNormalized')
-        if comp_norm is not None and not (isinstance(comp_norm, float) and pd.isna(comp_norm)):
-            component_normalized = str(comp_norm).lower().strip()
-    
-    if not component_normalized:
-        # Fallback: manual normalization (remove position indicators)
-        component_normalized = component.lower()
-        for suffix in [' izquierdo', ' derecho', ' izquierda', ' derecha', ' delantero', ' trasero']:
-            if component_normalized.endswith(suffix):
-                component_normalized = component_normalized[:-len(suffix)].strip()
-                break
+    # Normalize component name (remove left/right position indicators)
+    component_normalized = component.lower()
+    for suffix in [' izquierdo', ' derecho', ' izquierda', ' derecha']:
+        if component_normalized.endswith(suffix):
+            component_normalized = component_normalized[:-len(suffix)].strip()
+            break
     
     # Get limits for this specific component
     if client not in limits or machine not in limits[client] or component_normalized not in limits[client][machine]:
@@ -535,9 +468,13 @@ def register_reports_callbacks(app):
             essay_options = get_essay_options(df)
             
             # Pre-select breached essays (up to 6) - use calculated if stored is empty
-            breached_essays = _extract_essay_names_from_breached(
-                _parse_breached_essays(sample.get('breached_essays'))
-            )
+            breached_essays = []
+            breached_value = sample.get('breached_essays')
+            if breached_value is not None and not (isinstance(breached_value, float) and pd.isna(breached_value)):
+                try:
+                    breached_essays = json.loads(breached_value)
+                except:
+                    breached_essays = []
             
             # Fallback: calculate from data if empty
             if not breached_essays and limits:
@@ -712,17 +649,16 @@ def register_reports_callbacks(app):
     # 9-Chart Time Series Grid (July 2026)
     # ========================================
 
-    # Define 9 standard oil analysis chart pairings (viscosity included)
+    # Define standard oil analysis chart pairings
     TIME_SERIES_CHARTS = [
         {'title': 'Hierro & PQ', 'essays': ['Hierro', 'Índice PQ']},
         {'title': 'Cobre & Estaño', 'essays': ['Cobre', 'Estaño']},
-        {'title': 'Cromo & Aluminio', 'essays': ['Cromo', 'Aluminio']},
-        {'title': 'Plomo & Níquel', 'essays': ['Plomo', 'Níquel']},
-        {'title': 'Silicio & Potasio', 'essays': ['Silicio', 'Potasio']},
-        {'title': 'Sodio & Agua', 'essays': ['Sodio', 'Agua']},
+        {'title': 'Cromo & Plomo', 'essays': ['Cromo', 'Plomo']},
+        {'title': 'Silicio & Aluminio', 'essays': ['Silicio', 'Aluminio']},
+        {'title': 'Sodio & Potasio', 'essays': ['Sodio', 'Potasio']},
+        {'title': 'Combustible & Agua', 'essays': ['Combustible', 'Agua']},
         {'title': 'Viscocidad', 'essays': ['Viscocidad']},
         {'title': 'Hollín & Oxidación', 'essays': ['Hollín', 'Oxidación']},
-        {'title': 'Combustible & Refrigerante', 'essays': ['Combustible', 'Refrigerante']},
     ]
 
     @app.callback(
@@ -885,6 +821,96 @@ def register_reports_callbacks(app):
 
         except Exception as e:
             logger.exception(f"Error in update_time_series_grid: {e}")
+            return html.P(f"Error: {str(e)}", className="text-danger")
+
+    # ========================================
+    # Comment History Table
+    # ========================================
+    @app.callback(
+        Output('reports-comment-history-container', 'children'),
+        [Input('reports-component-selector', 'value'),
+         Input('reports-equipo-selector', 'value'),
+         Input('client-selector', 'value')],
+        prevent_initial_call=True
+    )
+    def update_comment_history(component, equipo, client):
+        """Show historical comments/recommendations for the selected unit/component."""
+        if not all([component, equipo, client]):
+            return html.P("Seleccione equipo y componente para ver el historial de comentarios.",
+                          className="text-muted")
+
+        settings = get_settings()
+        reports_file = settings.get_classified_reports_path(client)
+        if not reports_file.exists():
+            return html.P("Sin datos", className="text-muted")
+
+        try:
+            df = safe_read_parquet(reports_file)
+            history = df[(df['unitId'] == equipo) & (df['componentName'] == component)].copy()
+            if history.empty:
+                return html.P("Sin historial para este equipo/componente", className="text-muted")
+
+            history['sampleDate'] = pd.to_datetime(history['sampleDate'])
+            history = history.sort_values('sampleDate', ascending=False)
+
+            # Build comment history table data
+            table_rows = []
+            for _, row in history.iterrows():
+                rec = row.get('ai_recommendation', None)
+                comment = str(rec) if pd.notna(rec) and rec else '—'
+                anomaly = row.get('anomalyType', None)
+                anomaly_str = str(anomaly) if pd.notna(anomaly) and anomaly != 'Normal' else '—'
+                table_rows.append({
+                    'reportId': str(row.get('sampleNumber', '—')),
+                    'date': row['sampleDate'].strftime('%Y-%m-%d'),
+                    'status': str(row.get('report_status', '—')),
+                    'anomalyType': anomaly_str,
+                    'comment': comment[:500],
+                })
+
+            if not table_rows:
+                return html.P("Sin comentarios disponibles", className="text-muted")
+
+            # Color map for status column
+            status_styles = []
+            for st, bg in [('Normal', '#d4edda'), ('Alerta', '#fff3cd'), ('Anormal', '#f8d7da')]:
+                status_styles.append({
+                    'if': {'filter_query': '{status} = "' + st + '"', 'column_id': 'status'},
+                    'backgroundColor': bg, 'fontWeight': 'bold'
+                })
+
+            return dash_table.DataTable(
+                columns=[
+                    {'name': 'ID Reporte', 'id': 'reportId'},
+                    {'name': 'Fecha', 'id': 'date'},
+                    {'name': 'Estado', 'id': 'status'},
+                    {'name': 'Anomalía', 'id': 'anomalyType'},
+                    {'name': 'Comentario / Recomendación', 'id': 'comment'},
+                ],
+                data=table_rows,
+                style_table={'overflowX': 'auto'},
+                style_cell={
+                    'textAlign': 'left', 'padding': '8px',
+                    'fontSize': '12px', 'whiteSpace': 'normal', 'height': 'auto'
+                },
+                style_header={
+                    'backgroundColor': '#6c757d', 'color': 'white',
+                    'fontWeight': 'bold', 'textAlign': 'center'
+                },
+                style_cell_conditional=[
+                    {'if': {'column_id': 'reportId'}, 'width': '12%'},
+                    {'if': {'column_id': 'date'}, 'width': '10%'},
+                    {'if': {'column_id': 'status'}, 'width': '8%', 'textAlign': 'center'},
+                    {'if': {'column_id': 'anomalyType'}, 'width': '15%'},
+                    {'if': {'column_id': 'comment'}, 'width': '55%', 'minWidth': '200px'},
+                ],
+                style_data_conditional=status_styles,
+                page_size=10,
+                sort_action='native',
+            )
+
+        except Exception as e:
+            logger.exception(f"Error in comment history: {e}")
             return html.P(f"Error: {str(e)}", className="text-danger")
 
     # ========================================
@@ -1720,9 +1746,14 @@ def create_decision_summary(sample, limits, client, machine, component):
         'Normal': 'success'
     }.get(sample.get('report_status', 'Normal'), 'secondary')
     
-    # Parse stored breached essays (handles numpy array and JSON string formats)
-    stored_breached_raw = _parse_breached_essays(sample.get('breached_essays'))
-    stored_breached_essays = _extract_essay_names_from_breached(stored_breached_raw)
+    # Parse stored breached essays
+    stored_breached_essays = []
+    breached_value = sample.get('breached_essays')
+    if breached_value is not None and not (isinstance(breached_value, float) and pd.isna(breached_value)):
+        try:
+            stored_breached_essays = json.loads(breached_value)
+        except:
+            stored_breached_essays = []
     
     # Calculate breached essays from actual data
     calculated_breached_essays = calculate_breached_essays_from_data(sample, limits, client, machine, component) if limits else []
@@ -1883,9 +1914,13 @@ def create_evidence_tables(sample, limits, df):
         oil_hour_range = sample.get('oilHourRange', 'UNKNOWN')
         
         # Parse breached essays
-        breached_essays = _extract_essay_names_from_breached(
-            _parse_breached_essays(sample.get('breached_essays'))
-        )
+        breached_essays = []
+        breached_value = sample.get('breached_essays')
+        if breached_value is not None and not (isinstance(breached_value, float) and pd.isna(breached_value)):
+            try:
+                breached_essays = json.loads(breached_value)
+            except:
+                breached_essays = []
         
         # Create evidence tables by group
         tables = []
@@ -2046,9 +2081,13 @@ def create_evidence_tables_and_radar(sample, limits, df):
         oil_hour_range = sample.get('oilHourRange', 'UNKNOWN')
         
         # Parse breached essays
-        breached_essays = _extract_essay_names_from_breached(
-            _parse_breached_essays(sample.get('breached_essays'))
-        )
+        breached_essays = []
+        breached_value = sample.get('breached_essays')
+        if breached_value is not None and not (isinstance(breached_value, float) and pd.isna(breached_value)):
+            try:
+                breached_essays = json.loads(breached_value)
+            except:
+                breached_essays = []
         
         # Create combined sections (tables + radar charts) by group
         sections = []

@@ -221,6 +221,9 @@ def register_machines_callbacks(app):
             df['sampleDate'] = pd.to_datetime(df['sampleDate'])
             latest = df.loc[df.groupby(['unitId', 'componentNameNormalized'])['sampleDate'].idxmax()]
 
+            # Also get ai_recommendation for tooltips
+            rec_col = 'ai_recommendation' if 'ai_recommendation' in latest.columns else None
+
             machine_file = settings.get_machine_status_path(client.lower())
             ms_map = {}
             if machine_file.exists():
@@ -245,20 +248,48 @@ def register_machines_callbacks(app):
             comp_cols = [c for c in pivot.columns if c != '__machine_status__']
             display_cols = [c for c in (selected_components or []) if c in comp_cols] or comp_cols
 
+            # Calculate days since last sample per unit
+            now = pd.Timestamp.now()
+            days_since_map = latest.groupby('unitId')['sampleDate'].max().apply(
+                lambda d: (now - d).days
+            )
+
             # Build table
             columns = [{'name': 'Unidad', 'id': 'unit_id'}]
+            columns.append({'name': 'Días', 'id': 'days_since', 'type': 'numeric'})
             for col in display_cols:
                 columns.append({'name': col.title(), 'id': col})
             columns.append({'name': 'ESTADO MÁQUINA', 'id': 'machine_status'})
 
+            # Build recommendation pivot for tooltips
+            rec_pivot = None
+            if rec_col:
+                rec_pivot = latest.pivot_table(
+                    index='unitId', columns='componentNameNormalized',
+                    values=rec_col, aggfunc='first'
+                ).reindex(index=pivot.index, columns=display_cols)
+
             records = []
+            tooltip_data = []
             for uid in pivot.index:
                 row = {'unit_id': uid}
+                row['days_since'] = int(days_since_map.get(uid, 0))
+                tip_row = {'unit_id': {'value': '', 'type': 'text'},
+                           'days_since': {'value': '', 'type': 'text'}}
                 for col in display_cols:
                     v = pivot.loc[uid, col]
                     row[col] = v if pd.notna(v) else ''
+                    # Tooltip: show recommendation if available
+                    comment = ''
+                    if rec_pivot is not None and col in rec_pivot.columns:
+                        rv = rec_pivot.loc[uid, col]
+                        if pd.notna(rv):
+                            comment = str(rv)[:300]
+                    tip_row[col] = {'value': comment, 'type': 'text'} if comment else {'value': '', 'type': 'text'}
                 row['machine_status'] = pivot.loc[uid, '__machine_status__']
+                tip_row['machine_status'] = {'value': '', 'type': 'text'}
                 records.append(row)
+                tooltip_data.append(tip_row)
 
             style_cond = []
             for col in display_cols:
@@ -275,9 +306,17 @@ def register_machines_callbacks(app):
                     'fontWeight': 'bold', 'textAlign': 'center', 'fontSize': '13px',
                     'borderLeft': '3px solid ' + _MACHINE_STATUS_BG[st],
                 })
+            # Flag days_since > 20 in red
+            style_cond.append({
+                'if': {'filter_query': '{days_since} > 20', 'column_id': 'days_since'},
+                'backgroundColor': '#f8d7da', 'color': '#721c24', 'fontWeight': 'bold'
+            })
 
             table = dash_table.DataTable(
                 id='fleet-heatmap-table', columns=columns, data=records,
+                tooltip_data=tooltip_data,
+                tooltip_duration=None,
+                css=[{'selector': '.dash-table-tooltip', 'rule': 'max-width: 400px; white-space: normal;'}],
                 style_table={'overflowX': 'auto'},
                 style_cell={'textAlign': 'center', 'padding': '6px 10px', 'fontSize': '11px',
                             'minWidth': '75px', 'whiteSpace': 'nowrap'},
@@ -285,6 +324,7 @@ def register_machines_callbacks(app):
                               'fontWeight': 'bold', 'textAlign': 'center', 'fontSize': '11px'},
                 style_cell_conditional=[
                     {'if': {'column_id': 'unit_id'}, 'textAlign': 'left', 'fontWeight': '600', 'minWidth': '80px'},
+                    {'if': {'column_id': 'days_since'}, 'minWidth': '55px', 'maxWidth': '65px'},
                     {'if': {'column_id': 'machine_status'}, 'minWidth': '110px'},
                 ],
                 style_data_conditional=style_cond,
@@ -408,6 +448,60 @@ def register_machines_callbacks(app):
             uid = table_data[selected_rows[0]]['unit_id']
             return uid, uid, {'unit_id': uid}
         except (KeyError, IndexError):
+            raise PreventUpdate
+
+    # ========================================
+    # Cell click → navigate to Report Detail
+    # ========================================
+    @app.callback(
+        [Output('oil-internal-tabs', 'value', allow_duplicate=True),
+         Output('navigation-state', 'data', allow_duplicate=True)],
+        [Input('fleet-heatmap-table', 'active_cell')],
+        [State('fleet-heatmap-table', 'data'),
+         State('client-selector', 'value')],
+        prevent_initial_call=True
+    )
+    def handle_cell_click_to_report(active_cell, table_data, client):
+        """Click on a unit/component cell → redirect to Report Detail for that sample."""
+        if not active_cell or not table_data or not client:
+            raise PreventUpdate
+
+        row_idx = active_cell.get('row')
+        col_id = active_cell.get('column_id')
+
+        # Only navigate for component cells (not unit_id, machine_status, or days_since)
+        if col_id in ('unit_id', 'machine_status', 'days_since', None):
+            raise PreventUpdate
+
+        row_data = table_data[row_idx]
+        unit_id = row_data.get('unit_id')
+        status_val = row_data.get(col_id, '')
+
+        # Only navigate if cell has a status value
+        if not status_val or status_val not in ('Normal', 'Alerta', 'Anormal'):
+            raise PreventUpdate
+
+        # col_id is componentNameNormalized — need original componentName for navigation
+        settings = get_settings()
+        path = settings.get_classified_reports_path(client.lower())
+        if not path.exists():
+            raise PreventUpdate
+
+        try:
+            df = safe_read_parquet(path)
+            # Find the matching component for this unit
+            unit_df = df[(df['unitId'] == unit_id) & (df['componentNameNormalized'] == col_id)]
+            if unit_df.empty:
+                raise PreventUpdate
+
+            component = unit_df.iloc[-1]['componentName']
+            familia = unit_df.iloc[0].get('machineName', None)
+
+            nav = {'equipo': unit_id, 'component': component}
+            if familia:
+                nav['familia'] = familia
+            return 'report-detail', nav
+        except Exception:
             raise PreventUpdate
 
     # ========================================
