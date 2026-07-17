@@ -306,9 +306,18 @@ def register_machines_callbacks(app):
                     'fontWeight': 'bold', 'textAlign': 'center', 'fontSize': '13px',
                     'borderLeft': '3px solid ' + _MACHINE_STATUS_BG[st],
                 })
-            # Flag days_since > 20 in red
+            # Days since last sample: 3-tier color thresholds
+            # < 20 days = green, 20-40 days = yellow, > 40 days = red
             style_cond.append({
-                'if': {'filter_query': '{days_since} > 20', 'column_id': 'days_since'},
+                'if': {'filter_query': '{days_since} < 20', 'column_id': 'days_since'},
+                'backgroundColor': '#d4edda', 'color': '#155724'
+            })
+            style_cond.append({
+                'if': {'filter_query': '{days_since} >= 20 && {days_since} <= 40', 'column_id': 'days_since'},
+                'backgroundColor': '#fff3cd', 'color': '#856404', 'fontWeight': 'bold'
+            })
+            style_cond.append({
+                'if': {'filter_query': '{days_since} > 40', 'column_id': 'days_since'},
                 'backgroundColor': '#f8d7da', 'color': '#721c24', 'fontWeight': 'bold'
             })
 

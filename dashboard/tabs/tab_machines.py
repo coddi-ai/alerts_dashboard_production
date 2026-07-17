@@ -110,7 +110,7 @@ def create_machines_tab() -> dbc.Container:
                 ),
                 html.Small(
                     "💡 La columna \"Días\" indica los días desde la última muestra de cada unidad. "
-                    "Valores superiores a 20 días se resaltan en rojo y deben ser revisados. "
+                    "Verde: < 20 días · Amarillo: 20–40 días · Rojo: > 40 días. "
                     "Haga clic en una celda de componente para ir al detalle del reporte.",
                     className="text-muted d-block mt-2"
                 )

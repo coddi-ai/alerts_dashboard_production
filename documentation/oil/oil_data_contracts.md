@@ -1,7 +1,7 @@
 # Data Contracts - Oil Analysis Data Product
 
-**Version**: 2.5  
-**Last Updated**: July 7, 2026  
+**Version**: 2.6  
+**Last Updated**: July 17, 2026  
 **Owner**: Oil Analysis Data Product Team
 
 ---
@@ -34,6 +34,12 @@ This document defines the data contracts for the Oil Analysis Data Product, spec
 **Processing Modes**:
 1. **Historical**: One-time bulk processing with Stewart Limits calculation
 2. **Incremental**: Daily processing using existing Stewart Limits
+
+**Key Enhancements (v2.6)**:
+- **Data Quality Fixes**: breached_essays serialized as JSON string for reliable Parquet storage
+- **Classification Transparency**: New `desgaste_essays_broken` and `classification_score` columns
+- **daysSincePrevious Nullable**: First samples use null instead of 0
+- **Data Contract Validation**: Pre-export validation catches field inconsistencies
 
 **Key Enhancements (v2.5)**:
 - **Three-Date Model**: sampleDate (withdrawal), labDate (arrival at lab), reportDate (diagnosis)
@@ -192,7 +198,7 @@ S3: s3://{BUCKET}/MultiTechnique Alerts/oil/silver/{CLIENT}.parquet
 | `oilWeight` | string | Oil weight | '15W-40' |
 | `previousSampleNumber` | string | Previous sample ID | 'CDA-2023-998' |
 | `previousSampleDate` | date | Previous sample date | '2023-12-20' |
-| `daysSincePrevious` | int | Days between samples | 26 |
+| `daysSincePrevious` | Int64 (nullable) | Days between samples (null for first sample) | 26, null |
 | `group_element` | string | Essay group | 'Desgaste', 'Contaminacion' |
 | **Oil-Hour Stratification (v2.3)** | | | |
 | `oilHourRange` | string | Oil age category | 'LT_1000', 'GE_1000', 'UNKNOWN' |
@@ -309,10 +315,12 @@ S3: s3://{BUCKET}/MultiTechnique Alerts/oil/golden/{client}/
 |--------|------|-------------|---------|
 | **Base Columns** | | (All Silver layer columns including oilHourRange and evolution_ratio columns) | |
 | `essay_status_{essay}` | string | Essay classification | 'Normal', 'Marginal', 'Condenatorio', 'Critico' |
-| `breached_essays` | list[dict] | Essays exceeding thresholds with group info | [{'essay': 'Hierro', 'group': 'Desgaste', 'points': 5}] |
+| `essays_broken` | int | Total count of essays exceeding thresholds | 3 |
+| `desgaste_essays_broken` | int | Count of essays with UseForClassification=1 (v2.6) | 2 |
+| `breached_essays` | string (JSON) | JSON-serialized list of breached essay details (v2.6) | '[{"essay": "Hierro", "group": "Desgaste", "points": 5}]' |
 | `severity_score` | int | Total points from ALL breached essays | 14 |
-| `desgaste_score` | int | Points from ONLY Desgaste essays (NEW) | 8 |
-| `report_status` | string | Overall report status (based on desgaste_score) | 'Normal', 'Alerta', 'Anormal' |
+| `classification_score` | int | Points from ONLY UseForClassification=1 essays (v2.6) | 8 |
+| `report_status` | string | Overall report status (based on classification_score) | 'Normal', 'Alerta', 'Anormal' |
 | `anomalyType` | string | Predicted anomaly reason | 'Normal', 'Desgaste de Componentes', 'Contaminación Lubricante' |
 | `ai_recommendation` | string | AI-generated maintenance advice (always present) | 'Se recomienda...' |
 | `ai_analysis` | string | AI analysis of breached essays | 'Niveles elevados de...' |
@@ -333,11 +341,17 @@ S3: s3://{BUCKET}/MultiTechnique Alerts/oil/golden/{client}/
 - `Critico`: Above 98th percentile (5 points)
 
 **Report Status Logic** ⚠️ **HIERARCHY RULE APPLIED**:
-- Only **Desgaste** (wear) essays affect report status
-- Contamination, additives, and physical-chemical essays are tracked but don't change status
-- `Normal`: desgaste_score < 3
-- `Alerta`: 3 <= desgaste_score < 9
-- `Anormal`: desgaste_score >= 9
+- Only essays with **UseForClassification=1** (primarily Desgaste/wear essays) affect report status
+- Other essays (Contaminante, Aditivo, Fisico Quimico) are tracked in `essays_broken` but don't change status
+- `classification_score` = sum of points from UseForClassification=1 essays only
+- `Normal`: classification_score < 3
+- `Alerta`: 3 <= classification_score < 9
+- `Anormal`: classification_score >= 9
+
+**Reading the classification columns**:
+- `essays_broken=3, desgaste_essays_broken=0` → 3 non-desgaste essays breached, status likely Normal
+- `essays_broken=3, desgaste_essays_broken=2` → 2 desgaste + 1 other essay breached
+- `breached_essays` contains full details: `json.loads(row['breached_essays'])` → list of dicts
 
 **Desgaste Essays** (affect report status):
 - Hierro, Cromo, Aluminio, Cobre, Plomo, Níquel, Plata, Estaño, Titanio, Vanadio, Manganeso
@@ -581,6 +595,48 @@ AWS_S3_PREFIX=MultiTechnique Alerts/oil/
 ---
 
 ## 📝 Change Log
+
+### Version 2.6 (July 17, 2026) - DATA QUALITY & CLASSIFICATION TRANSPARENCY
+**Major Feature**: Reliable serialization, nullable fields, and classification hierarchy transparency
+
+#### Silver Layer Changes
+- **`daysSincePrevious`**: **TYPE CHANGED** from `int` to nullable `Int64`
+  - First samples now have `null` instead of `0`
+  - Distinguishes "first sample" (null) from "same-day sample" (0)
+  - Timezone-naive enforcement prevents NaT from date arithmetic
+  - **Breaking**: Consumers checking `== 0` to detect first samples must now check `pd.isna()` / `IS NULL`
+
+#### Golden Layer Changes
+- **`breached_essays`**: **TYPE CHANGED** from `list[dict]` to `string` (JSON)
+  - Now serialized as a JSON string for reliable Parquet round-trip
+  - Consumers must call `json.loads()` to parse the list
+  - Empty value: `'[]'` (JSON empty array string)
+  - **Breaking**: Direct list access (e.g., `row['breached_essays'][0]`) no longer works
+
+- **`desgaste_essays_broken`**: **NEW COLUMN** (int)
+  - Count of breached essays that have `UseForClassification=1`
+  - Makes the hierarchy rule transparent: `essays_broken=3` with `desgaste_essays_broken=0` means 3 non-desgaste essays breached
+  - Always `<= essays_broken`
+
+- **`classification_score`**: **NEW COLUMN** (int)
+  - Severity points from ONLY essays with `UseForClassification=1`
+  - This is the score used for `report_status` determination
+  - Relationship: `classification_score <= severity_score`
+
+- **`essays_broken`**: **NOW DOCUMENTED** (int)
+  - Total count of ALL essays exceeding thresholds (regardless of UseForClassification flag)
+
+#### Data Contract Validation
+- New pre-export validation step catches inconsistencies before data reaches Golden layer
+- Validates: report_status vs classification_score, daysSincePrevious nullability, field relationships
+- Diagnostic warnings logged for breached_essays serialization issues
+
+#### Migration Notes
+- **Breaking change**: `breached_essays` is now a JSON string. Use `json.loads(row['breached_essays'])` to parse
+- **Breaking change**: `daysSincePrevious` is now nullable. Use `pd.isna()` instead of `== 0` for first sample detection
+- New columns (`desgaste_essays_broken`, `classification_score`) are additive — old consumers can ignore them
+
+---
 
 ### Version 2.5 (July 7, 2026) - DATE REFACTORING & NORMAL REPORT DEFAULTS
 **Major Feature**: Three-date model and default recommendations for Normal samples/machines

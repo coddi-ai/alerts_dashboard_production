@@ -19,6 +19,50 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def normalize_breached_essays(breached_value):
+    """
+    Normalize breached_essays to a list of essay names (strings).
+    
+    Handles both formats:
+    - v2.6+: JSON string containing list of dicts: '[{"essay": "Hierro", "group": "Desgaste", "points": 5}]'
+    - Legacy: List of strings: ["Hierro", "Cobre"]
+    
+    Args:
+        breached_value: Raw value from sample['breached_essays']
+    
+    Returns:
+        List of essay names (strings)
+    """
+    if breached_value is None or (isinstance(breached_value, float) and pd.isna(breached_value)):
+        return []
+    
+    # If it's a string, try to parse as JSON
+    if isinstance(breached_value, str):
+        try:
+            parsed = json.loads(breached_value)
+            # If parsed is a list of dicts, extract essay names
+            if isinstance(parsed, list) and len(parsed) > 0:
+                if isinstance(parsed[0], dict):
+                    return [item.get('essay', '') for item in parsed if isinstance(item, dict) and 'essay' in item]
+                else:
+                    # List of strings (legacy format)
+                    return parsed
+            return []
+        except (json.JSONDecodeError, TypeError):
+            return []
+    
+    # If it's already a list
+    if isinstance(breached_value, list):
+        if len(breached_value) > 0 and isinstance(breached_value[0], dict):
+            # List of dicts - extract essay names
+            return [item.get('essay', '') for item in breached_value if isinstance(item, dict) and 'essay' in item]
+        else:
+            # List of strings
+            return breached_value
+    
+    return []
+
+
 def get_essay_limits(comp_limits, essay, oil_hour_range):
     """
     Get essay limits with oil-hour stratification fallback logic (v2.3).
@@ -85,12 +129,15 @@ def calculate_breached_essays_from_data(sample, limits, client, machine, compone
     This function provides a fallback when the breached_essays field in the data
     is missing, null, or inconsistent with essays_broken count.
     
+    Uses the sample's componentNameNormalized for limit lookup to avoid
+    mismatches from manual normalization.
+    
     Args:
         sample: pandas Series with sample data
         limits: Stewart Limits dictionary structure
         client: Client name
         machine: Machine name (normalized)
-        component: Component name (normalized)
+        component: Component name (original — used as fallback only)
     
     Returns:
         List of essay names that breached their thresholds (Normal/Alert/Critic)
@@ -98,12 +145,16 @@ def calculate_breached_essays_from_data(sample, limits, client, machine, compone
     if not limits or not sample is not None:
         return []
     
-    # Normalize component name (remove left/right position indicators)
-    component_normalized = component.lower()
-    for suffix in [' izquierdo', ' derecho', ' izquierda', ' derecha']:
-        if component_normalized.endswith(suffix):
-            component_normalized = component_normalized[:-len(suffix)].strip()
-            break
+    # Use componentNameNormalized from the sample itself (most reliable)
+    component_normalized = sample.get('componentNameNormalized', None)
+    if not component_normalized or (isinstance(component_normalized, float) and pd.isna(component_normalized)):
+        # Fallback: manual normalization from original name
+        component_normalized = component.lower()
+        for suffix in [' izquierdo', ' derecho', ' izquierda', ' derecha',
+                       ' trasero', ' trasera', ' delantero', ' delantera']:
+            if component_normalized.endswith(suffix):
+                component_normalized = component_normalized[:-len(suffix)].strip()
+                break
     
     # Get limits for this specific component
     if client not in limits or machine not in limits[client] or component_normalized not in limits[client][machine]:
@@ -468,13 +519,7 @@ def register_reports_callbacks(app):
             essay_options = get_essay_options(df)
             
             # Pre-select breached essays (up to 6) - use calculated if stored is empty
-            breached_essays = []
-            breached_value = sample.get('breached_essays')
-            if breached_value is not None and not (isinstance(breached_value, float) and pd.isna(breached_value)):
-                try:
-                    breached_essays = json.loads(breached_value)
-                except:
-                    breached_essays = []
+            breached_essays = normalize_breached_essays(sample.get('breached_essays'))
             
             # Fallback: calculate from data if empty
             if not breached_essays and limits:
@@ -1747,13 +1792,7 @@ def create_decision_summary(sample, limits, client, machine, component):
     }.get(sample.get('report_status', 'Normal'), 'secondary')
     
     # Parse stored breached essays
-    stored_breached_essays = []
-    breached_value = sample.get('breached_essays')
-    if breached_value is not None and not (isinstance(breached_value, float) and pd.isna(breached_value)):
-        try:
-            stored_breached_essays = json.loads(breached_value)
-        except:
-            stored_breached_essays = []
+    stored_breached_essays = normalize_breached_essays(sample.get('breached_essays'))
     
     # Calculate breached essays from actual data
     calculated_breached_essays = calculate_breached_essays_from_data(sample, limits, client, machine, component) if limits else []
@@ -1775,11 +1814,14 @@ def create_decision_summary(sample, limits, client, machine, component):
     prev_date = "N/A"
     days_since = "N/A"
     prev_sample_date = sample.get('previousSampleDate')
-    if prev_sample_date is not None and not (isinstance(prev_sample_date, float) and pd.isna(prev_sample_date)):
+    has_previous = (prev_sample_date is not None
+                    and not (isinstance(prev_sample_date, float) and pd.isna(prev_sample_date))
+                    and pd.notna(prev_sample_date))
+    if has_previous:
         prev_date = pd.to_datetime(prev_sample_date).strftime('%Y-%m-%d')
     
     days_prev = sample.get('daysSincePrevious')
-    if days_prev is not None and not (isinstance(days_prev, float) and pd.isna(days_prev)):
+    if has_previous and days_prev is not None and not (isinstance(days_prev, float) and pd.isna(days_prev)):
         days_since = f"{int(days_prev)} d\u00edas"
     
     main_summary = dbc.Row([
@@ -1914,13 +1956,7 @@ def create_evidence_tables(sample, limits, df):
         oil_hour_range = sample.get('oilHourRange', 'UNKNOWN')
         
         # Parse breached essays
-        breached_essays = []
-        breached_value = sample.get('breached_essays')
-        if breached_value is not None and not (isinstance(breached_value, float) and pd.isna(breached_value)):
-            try:
-                breached_essays = json.loads(breached_value)
-            except:
-                breached_essays = []
+        breached_essays = normalize_breached_essays(sample.get('breached_essays'))
         
         # Create evidence tables by group
         tables = []
@@ -2081,13 +2117,7 @@ def create_evidence_tables_and_radar(sample, limits, df):
         oil_hour_range = sample.get('oilHourRange', 'UNKNOWN')
         
         # Parse breached essays
-        breached_essays = []
-        breached_value = sample.get('breached_essays')
-        if breached_value is not None and not (isinstance(breached_value, float) and pd.isna(breached_value)):
-            try:
-                breached_essays = json.loads(breached_value)
-            except:
-                breached_essays = []
+        breached_essays = normalize_breached_essays(sample.get('breached_essays'))
         
         # Create combined sections (tables + radar charts) by group
         sections = []
