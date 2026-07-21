@@ -124,6 +124,21 @@ def load_telemetry_snapshot(client: str) -> TelemetrySnapshot:
     return _load_snapshot_cached(normalized, _manifest_cache_key(manifest))
 
 
+def client_facing_manifest(manifest: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Return only evaluation metadata that is useful to a dashboard reader.
+
+    ``latest.json`` also contains pipeline implementation details such as
+    ``baseline_version``.  Those values remain available to the internal
+    snapshot/cache, but are deliberately excluded from client-facing labels.
+    """
+    payload = manifest or {}
+    return {
+        key: payload.get(key)
+        for key in ("evaluation_week", "evaluation_year", "execution_timestamp")
+        if payload.get(key) not in (None, "")
+    }
+
+
 def _latest_per_signal(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty or "signal" not in df.columns:
         return df.copy()

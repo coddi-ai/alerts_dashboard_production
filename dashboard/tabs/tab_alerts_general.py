@@ -27,6 +27,56 @@ def create_layout() -> html.Div:
     layout = html.Div([
         # Summary stats at the top
         html.Div(id='alerts-summary-stats', className="mb-3"),
+
+        # Shared report filters. These filters drive KPIs, charts and the table.
+        dbc.Card([
+            dbc.CardBody([
+                dbc.Row([
+                    dbc.Col([
+                        html.Label("Unidad", className="small fw-bold"),
+                        dcc.Dropdown(
+                            id="alerts-general-unit-filter",
+                            options=[], multi=True, clearable=True,
+                            placeholder="Todas las unidades"
+                        )
+                    ], md=3),
+                    dbc.Col([
+                        html.Label("Sistema", className="small fw-bold"),
+                        dcc.Dropdown(
+                            id="alerts-general-system-filter",
+                            options=[], multi=True, clearable=True,
+                            placeholder="Todos los sistemas"
+                        )
+                    ], md=3),
+                    dbc.Col([
+                        html.Label("Fuente", className="small fw-bold"),
+                        dcc.Dropdown(
+                            id="alerts-general-source-filter",
+                            options=[
+                                {"label": "Telemetría", "value": "Telemetría"},
+                                {"label": "Tribología", "value": "Tribología"},
+                                {"label": "Mixto", "value": "Mixto"},
+                            ], multi=True, clearable=True,
+                            placeholder="Todas las fuentes"
+                        )
+                    ], md=3),
+                    dbc.Col([
+                        html.Label("Evidencia disponible", className="small fw-bold"),
+                        dcc.Dropdown(
+                            id="alerts-general-evidence-filter",
+                            options=[
+                                {"label": "Telemetría", "value": "Telemetría"},
+                                {"label": "Tribología", "value": "Tribología"},
+                                {"label": "Telemetría + Tribología", "value": "Telemetría + Tribología"},
+                                {"label": "Sin evidencia", "value": "Sin evidencia"},
+                            ], multi=True, clearable=True,
+                            placeholder="Toda la evidencia"
+                        )
+                    ], md=3),
+                ], className="g-3"),
+                html.Div(id="alerts-general-filter-summary", className="small text-muted mt-2")
+            ])
+        ], className="shadow-sm mb-3"),
         
         # Date Range Filter
         dbc.Row([
@@ -156,6 +206,7 @@ def create_layout() -> html.Div:
                                 html.Div(id='alerts-table-container')
                             ]
                         )
+                        ,html.Div(id='alerts-general-selected-alert', className="mt-3 px-3 pb-3")
                     ], className="p-0")
                 ], className="shadow mb-4")
             ], md=9),
@@ -239,7 +290,8 @@ def create_layout() -> html.Div:
 def create_summary_stats_display(total_alerts: int, 
                                  total_units: int, 
                                  telemetry_pct: float, 
-                                 oil_pct: float) -> html.Div:
+                                 oil_pct: float,
+                                 mixed_count: int = 0) -> html.Div:
     """
     Create summary statistics display with semantic colors and clear hierarchy.
     
@@ -275,7 +327,7 @@ def create_summary_stats_display(total_alerts: int,
                         ], className="text-center")
                     ])
                 ], className="shadow-sm border-0", style={'backgroundColor': '#fff5f5'})
-            ], md=3),
+            ], style={'flex': '1 1 0', 'minWidth': '150px'}),
             
             # Affected Units - Info metric
             dbc.Col([
@@ -289,7 +341,7 @@ def create_summary_stats_display(total_alerts: int,
                         ], className="text-center")
                     ])
                 ], className="shadow-sm border-0", style={'backgroundColor': '#f0f8ff'})
-            ], md=3),
+            ], style={'flex': '1 1 0', 'minWidth': '150px'}),
             
             # Telemetry Coverage - Success metric
             dbc.Col([
@@ -303,9 +355,23 @@ def create_summary_stats_display(total_alerts: int,
                         ], className="text-center")
                     ])
                 ], className="shadow-sm border-0", style={'backgroundColor': '#f0fff4'})
-            ], md=3),
+            ], style={'flex': '1 1 0', 'minWidth': '150px'}),
             
-            # Oil Analysis Coverage - Warning metric
+        # Mixed alerts - purple metric
+        dbc.Col([
+            dbc.Card([
+                dbc.CardBody([
+                    html.Div([
+                            html.I(className="fas fa-code-branch fa-2x text-purple mb-2"),
+                            html.H6("Alertas Mixtas", className="text-muted text-uppercase mb-2",
+                                   style={'fontSize': '0.85rem', 'letterSpacing': '0.5px'}),
+                            html.H2(f"{mixed_count}", className="mb-0 fw-bold", style={'color': '#6f42c1'})
+                        ], className="text-center")
+                    ])
+                ], className="shadow-sm border-0", style={'backgroundColor': '#f5f0ff'})
+            ], style={'flex': '1 1 0', 'minWidth': '150px'}),
+
+            # Oil evidence coverage retained as a compact secondary metric
             dbc.Col([
                 dbc.Card([
                     dbc.CardBody([
@@ -317,7 +383,7 @@ def create_summary_stats_display(total_alerts: int,
                         ], className="text-center")
                     ])
                 ], className="shadow-sm border-0", style={'backgroundColor': '#fffcf0'})
-            ], md=3)
-        ], className="g-3 mb-4")
+            ], style={'flex': '1 1 0', 'minWidth': '150px'})
+        ], className="g-3 mb-4", style={'display': 'flex', 'flexWrap': 'wrap'})
     ])
 

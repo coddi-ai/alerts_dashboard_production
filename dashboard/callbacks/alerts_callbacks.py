@@ -36,8 +36,15 @@ from dashboard.components.alerts_charts import (
 )
 from dashboard.components.alerts_tables import (
     create_alerts_datatable,
+    create_alerts_report_table,
     create_alert_detail_card,
     create_maintenance_display
+)
+from dashboard.components.alerts_report import (
+    alert_summary,
+    filter_alert_rows,
+    prepare_alert_rows,
+    translate_alert_system,
 )
 from dashboard.tabs.tab_alerts_general import create_summary_stats_display, create_layout as create_general_layout
 from dashboard.tabs.tab_alerts_detail import (
@@ -165,16 +172,21 @@ def update_filters_from_clicks(unit_click, month_click, system_click, current_fi
         Output('alerts-month-distribution-chart', 'figure'),
         Output('alerts-system-distribution-chart', 'figure'),
         Output('alerts-summary-stats', 'children'),
-        Output('alerts-table-container', 'children')
+        Output('alerts-table-container', 'children'),
+        Output('alerts-general-filter-summary', 'children'),
     ],
     [
         Input('client-selector', 'value'),
         Input('alerts-filter-store', 'data'),
         Input('alerts-date-range-picker', 'start_date'),
-        Input('alerts-date-range-picker', 'end_date')
+        Input('alerts-date-range-picker', 'end_date'),
+        Input('alerts-general-unit-filter', 'value'),
+        Input('alerts-general-system-filter', 'value'),
+        Input('alerts-general-source-filter', 'value'),
+        Input('alerts-general-evidence-filter', 'value'),
     ]
 )
-def update_general_tab(client: str, filters: dict, start_date: str, end_date: str):
+def update_general_tab(client: str, filters: dict, start_date: str, end_date: str, units, systems, sources, evidence):
     """
     Update all components in the General Tab when client changes or filters are applied.
     
@@ -199,22 +211,21 @@ def update_general_tab(client: str, filters: dict, start_date: str, end_date: st
         logger.warning(f"No alerts data available for client: {client}")
         empty_fig = {'data': [], 'layout': {'title': 'No data available'}}
         empty_alert = dbc.Alert("No hay datos de alertas disponibles", color="warning")
-        return empty_fig, empty_fig, empty_fig, empty_alert, empty_alert
+        return empty_fig, empty_fig, empty_fig, empty_alert, empty_alert, ""
     
     try:
-        # Apply filters if present
-        filtered_df = alerts_df.copy()
-        
-        # Apply date range filter
-        if start_date or end_date:
-            if 'Timestamp' in filtered_df.columns:
-                filtered_df['Timestamp'] = pd.to_datetime(filtered_df['Timestamp'])
-                if start_date:
-                    filtered_df = filtered_df[filtered_df['Timestamp'] >= pd.to_datetime(start_date)]
-                if end_date:
-                    filtered_df = filtered_df[filtered_df['Timestamp'] <= pd.to_datetime(end_date) + pd.Timedelta(days=1)]
-                logger.info(f"After date range filter ({start_date} to {end_date}): {len(filtered_df)} rows")
-        
+        # Apply the same presentation filter set to KPIs, charts and table.
+        filtered_df = filter_alert_rows(
+            alerts_df,
+            unit=units,
+            system=systems,
+            source=sources,
+            evidence=evidence,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+        # Chart clicks remain compatible with the previous toggle filter store.
         if filters:
             if 'unit' in filters and filters['unit']:
                 filtered_df = filtered_df[filtered_df['UnitId'] == filters['unit']]
@@ -233,7 +244,7 @@ def update_general_tab(client: str, filters: dict, start_date: str, end_date: st
             logger.warning("No data after applying filters")
             empty_fig = {'data': [], 'layout': {'title': 'No hay datos con los filtros aplicados'}}
             empty_alert = dbc.Alert("No hay datos con los filtros aplicados", color="info")
-            return empty_fig, empty_fig, empty_fig, empty_alert, empty_alert
+            return empty_fig, empty_fig, empty_fig, empty_alert, empty_alert, "No hay alertas para los filtros seleccionados."
         
         # Create charts (using filtered data for visualization) - removed trigger_chart
         unit_chart = create_alerts_per_unit_chart(filtered_df)
@@ -241,24 +252,83 @@ def update_general_tab(client: str, filters: dict, start_date: str, end_date: st
         system_chart = create_system_distribution_pie_chart(filtered_df)
         
         # Calculate summary statistics
-        total_alerts = len(filtered_df)
-        total_units = filtered_df['UnitId'].nunique()
-        telemetry_pct = (filtered_df['has_telemetry'].sum() / total_alerts * 100) if total_alerts > 0 else 0
-        oil_pct = (filtered_df['has_tribology'].sum() / total_alerts * 100) if total_alerts > 0 else 0
-        
-        stats = create_summary_stats_display(total_alerts, total_units, telemetry_pct, oil_pct)
+        summary = alert_summary(filtered_df)
+        telemetry_pct = (summary['telemetry'] / summary['total'] * 100) if summary['total'] else 0
+        oil_pct = (summary['tribology'] / summary['total'] * 100) if summary['total'] else 0
+        stats = create_summary_stats_display(summary['total'], summary['units'], telemetry_pct, oil_pct, summary['mixed'])
         
         # Create table
-        table = create_alerts_datatable(filtered_df)
+        table = create_alerts_report_table(filtered_df)
         
-        logger.info(f"General tab updated successfully with {total_alerts} alerts")
-        return unit_chart, month_chart, system_chart, stats, table
+        latest = summary['latest'].strftime('%d/%m/%Y %H:%M') if pd.notna(summary['latest']) else '-'
+        filter_summary = f"Mostrando {summary['total']} alertas de {summary['units']} unidades · última alerta: {latest}"
+        logger.info(f"General tab updated successfully with {summary['total']} alerts")
+        return unit_chart, month_chart, system_chart, stats, table, filter_summary
     
     except Exception as e:
         logger.error(f"Error updating general tab: {e}")
         error_fig = {'data': [], 'layout': {'title': f'Error: {str(e)}'}}
         error_alert = dbc.Alert(f"Error al cargar datos: {str(e)}", color="danger")
-        return error_fig, error_fig, error_fig, error_alert, error_alert
+        return error_fig, error_fig, error_fig, error_alert, error_alert, f"Error: {str(e)}"
+
+
+@callback(
+    [
+        Output('alerts-general-unit-filter', 'options'),
+        Output('alerts-general-system-filter', 'options'),
+    ],
+    Input('client-selector', 'value'),
+)
+def populate_general_report_filters(client):
+    """Populate client-facing filter labels from the current alert snapshot."""
+    if not client:
+        raise PreventUpdate
+    frame = prepare_alert_rows(load_alerts_data(client))
+    if frame.empty:
+        return [], []
+    units = sorted(frame['UnitId'].dropna().astype(str).unique())
+    systems = sorted(frame['system_display'].dropna().astype(str).unique())
+    return ([{'label': unit, 'value': unit} for unit in units],
+            [{'label': system, 'value': system} for system in systems])
+
+
+@callback(
+    Output('alerts-general-selected-alert', 'children'),
+    Input('alerts-datatable', 'active_cell'),
+    State('alerts-datatable', 'derived_virtual_data'),
+    prevent_initial_call=True,
+)
+def render_selected_alert_summary(active_cell, table_data):
+    """Show a compact decision summary below the executive table."""
+    if not active_cell or not table_data:
+        return html.Div()
+    index = active_cell.get('row', 0)
+    if index >= len(table_data):
+        return html.Div()
+    row = table_data[index]
+    risk = str(row.get('Riesgo', 'Sin clasificación')).upper()
+    badge_color = {'ALTO': 'danger', 'MEDIO': 'warning', 'BAJO': 'success'}.get(risk, 'secondary')
+    return dbc.Card([
+        dbc.CardHeader([
+            html.I(className='fas fa-bullseye me-2'),
+            f"Resumen de {row.get('ID', '-')}",
+        ]),
+        dbc.CardBody([
+            dbc.Row([
+                dbc.Col([html.Small('Unidad', className='text-muted d-block'), html.Strong(row.get('Unidad', '-'))], md=2),
+                dbc.Col([html.Small('Sistema', className='text-muted d-block'), html.Strong(row.get('Sistema', '-'))], md=2),
+                dbc.Col([html.Small('Fuente', className='text-muted d-block'), html.Strong(row.get('Fuente', '-'))], md=2),
+                dbc.Col([html.Small('Riesgo', className='text-muted d-block'), dbc.Badge(risk, color=badge_color, pill=True)], md=2),
+                dbc.Col([html.Small('Evidencia', className='text-muted d-block'), html.Strong(row.get('Evidencia', '-'))], md=4),
+            ], className='mb-3'),
+            html.Strong(row.get('Diagnóstico', 'Sin diagnóstico IA disponible'), className='d-block'),
+            html.Div([
+                html.I(className='fas fa-wrench me-1'),
+                html.Strong('Acción: '),
+                row.get('Acción', 'Sin acción recomendada registrada'),
+            ], className='text-primary mt-2'),
+        ]),
+    ], className='shadow-sm', style={'borderLeft': '4px solid #3498db'})
 
 
 @callback(
@@ -626,6 +696,58 @@ def filter_alert_dropdown_by_criteria(units, sistemas, has_telemetry, has_tribol
     except Exception as e:
         logger.error(f"Error filtering alert dropdown: {e}")
         return []
+
+def _alert_case_header(row: pd.Series) -> html.Div:
+    """Render a sticky, client-facing identity block for the selected alert."""
+    prepared = prepare_alert_rows(pd.DataFrame([row])).iloc[0]
+    risk = str(prepared.get('risk_display', 'Sin clasificación')).upper()
+    badge_color = {'ALTO': 'danger', 'MEDIO': 'warning', 'BAJO': 'success'}.get(risk, 'secondary')
+    timestamp = prepared.get('date_display', '-')
+    return dbc.Card([
+        dbc.CardHeader([
+            html.I(className='fas fa-fingerprint me-2'),
+            html.Strong(f"Alerta {prepared.get('FusionID', '-')}")
+        ], className='bg-light'),
+        dbc.CardBody([
+            dbc.Row([
+                dbc.Col([html.Small('Unidad', className='text-muted d-block'), html.Strong(prepared.get('UnitId', '-'))], md=2),
+                dbc.Col([html.Small('Sistema', className='text-muted d-block'), html.Strong(prepared.get('system_display', '-'))], md=2),
+                dbc.Col([html.Small('Componente', className='text-muted d-block'), html.Strong(prepared.get('componente', '-'))], md=3),
+                dbc.Col([html.Small('Fecha', className='text-muted d-block'), html.Strong(timestamp)], md=2),
+                dbc.Col([html.Small('Riesgo', className='text-muted d-block'), dbc.Badge(risk, color=badge_color, pill=True)], md=1),
+                dbc.Col([html.Small('Fuente', className='text-muted d-block'), html.Strong(prepared.get('source_display', '-'))], md=2),
+            ], className='g-3'),
+            html.Div([
+                html.Strong('Señal / variable: ', className='text-muted'),
+                prepared.get('signal_display', 'Sin señal registrada'),
+                html.Span(' · ', className='text-muted'),
+                html.Strong('Evidencia: ', className='text-muted'),
+                prepared.get('evidence_display', 'Sin evidencia'),
+            ], className='mt-3 small'),
+        ])
+    ], className='shadow-sm', style={'position': 'sticky', 'top': '0', 'zIndex': 900, 'borderTop': '3px solid #3498db'})
+
+
+@callback(
+    Output('alerts-detail-case-header', 'children'),
+    [
+        Input('alert-selector-dropdown', 'value'),
+        Input('client-selector', 'value'),
+        Input('alerts-navigation-state', 'data'),
+    ],
+)
+def update_alert_case_header(dropdown_value, client, nav_data):
+    if not client:
+        raise PreventUpdate
+    selected = dropdown_value or (nav_data or {}).get('alert_id')
+    if not selected:
+        return html.Div()
+    alerts_df = load_alerts_data(client)
+    rows = alerts_df[alerts_df['FusionID'] == selected] if not alerts_df.empty else pd.DataFrame()
+    if rows.empty:
+        return dbc.Alert(f"Alerta no encontrada: {selected}", color='warning')
+    return _alert_case_header(rows.iloc[0])
+
 
 @callback(
     Output('alert-detail-content', 'children'),

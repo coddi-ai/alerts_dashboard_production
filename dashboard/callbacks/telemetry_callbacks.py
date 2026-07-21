@@ -19,6 +19,7 @@ from dashboard.components.telemetry_report import (
     build_fleet_priority_rows,
     build_signal_rows,
     build_system_rows,
+    client_facing_manifest,
     client_facing_text,
     filter_fleet_snapshot,
     format_urgency,
@@ -52,7 +53,7 @@ def update_reference_date(active_tab, client):
     """Show the materialized evaluation identity and refresh when client changes."""
     if not client:
         raise PreventUpdate
-    manifest = load_telemetry_snapshot(client).manifest
+    manifest = client_facing_manifest(load_telemetry_snapshot(client).manifest)
     if not manifest:
         return html.Small("Sin datos de referencia", className="text-muted")
     week = manifest.get('evaluation_week', '?')
@@ -296,7 +297,7 @@ def populate_unit_selector(active_tab, client, navigation_state, current_value):
 
 
 def _identity_display(snapshot, unit: str) -> html.Div:
-    manifest = snapshot.manifest
+    manifest = client_facing_manifest(snapshot.manifest)
     if not unit:
         return html.Div()
     return html.Div([

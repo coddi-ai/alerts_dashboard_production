@@ -7,6 +7,7 @@ from dashboard.components.telemetry_report import (
     build_fleet_priority_rows,
     build_signal_rows,
     build_system_rows,
+    client_facing_manifest,
     client_facing_text,
     filter_fleet_snapshot,
 )
@@ -16,6 +17,21 @@ from dashboard.components.telemetry_charts import build_signal_timeseries_card, 
 def test_client_labels_are_translated_without_changing_technical_names():
     assert translate_signal("EngCoolTemp") == "Temperatura del refrigerante del motor"
     assert translate_trend("worsening") == "En deterioro"
+
+
+def test_client_facing_manifest_hides_pipeline_baseline_metadata():
+    manifest = client_facing_manifest({
+        "evaluation_week": 30,
+        "evaluation_year": 2026,
+        "execution_timestamp": "2026-07-20T04:50:39Z",
+        "baseline_version": "computed",
+    })
+    assert manifest == {
+        "evaluation_week": 30,
+        "evaluation_year": 2026,
+        "execution_timestamp": "2026-07-20T04:50:39Z",
+    }
+    assert "baseline_version" not in manifest
 
 
 def test_client_facing_text_hides_internal_scores_and_translates_signal_aliases():

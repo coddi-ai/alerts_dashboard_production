@@ -149,6 +149,9 @@ def create_layout() -> html.Div:
             ])
         ], className="shadow-sm mb-4"),
         
+        # Fixed case identity keeps the selected alert visible while reviewing evidence.
+        html.Div(id='alerts-detail-case-header', className='mb-4'),
+
         # Loading indicator
         dcc.Loading(
             id="loading-alert-detail",

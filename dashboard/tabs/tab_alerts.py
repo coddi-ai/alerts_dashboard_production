@@ -27,10 +27,10 @@ def create_layout() -> html.Div:
             dbc.Col([
                 html.H2([
                     html.I(className="fas fa-exclamation-triangle me-3"),
-                    "Monitor de Alertas"
+                    "Resumen de Alertas"
                 ], className="text-primary mb-1"),
                 html.P(
-                    "Sistema integral de análisis y seguimiento de alertas",
+                    "Identifique unidades afectadas, causa, evidencia y próxima acción",
                     className="text-muted"
                 )
             ])

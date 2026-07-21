@@ -6,11 +6,13 @@ Functions to create Dash DataTables for alerts listings.
 
 import pandas as pd
 import re
+import ast
 from dash import dash_table, html
 import dash_bootstrap_components as dbc
 from typing import List, Optional, Dict
 
 from src.utils.logger import get_logger
+from dashboard.components.alerts_charts import FEATURE_NAMES_ES
 
 logger = get_logger(__name__)
 
@@ -192,6 +194,96 @@ def create_alerts_datatable(alerts_df: pd.DataFrame) -> dash_table.DataTable:
         return html.Div([
             dbc.Alert(f"Error al crear tabla: {str(e)}", color="danger")
         ])
+
+
+def create_alerts_report_table(alerts_df: pd.DataFrame) -> dash_table.DataTable:
+    """Create the executive alerts table with client-facing fields only."""
+    if alerts_df is None or alerts_df.empty:
+        return html.Div([dbc.Alert("No hay alertas para los filtros seleccionados.", color="info")])
+    try:
+        rows = []
+        for _, row in alerts_df.sort_values("Timestamp", ascending=False).iterrows():
+            sections = parse_ia_message_sections(row.get("mensaje_ia", ""))
+            trigger_vars = row.get("Trigger_Var", "Sin señal registrada")
+            if isinstance(trigger_vars, str):
+                trigger_vars = trigger_vars.strip("[]'")
+            raw_signal_values = trigger_vars
+            if isinstance(raw_signal_values, str):
+                try:
+                    raw_signal_values = ast.literal_eval(raw_signal_values)
+                except (ValueError, SyntaxError):
+                    raw_signal_values = [raw_signal_values]
+            if not isinstance(raw_signal_values, (list, tuple, set)):
+                raw_signal_values = [raw_signal_values]
+            signal_labels = []
+            for signal in raw_signal_values:
+                signal_key = str(signal).strip()
+                if signal_key and signal_key not in signal_labels:
+                    signal_labels.append(FEATURE_NAMES_ES.get(signal_key, signal_key))
+            signal_label = ", ".join(signal_labels) or "Sin señal registrada"
+            source = {"Telemetria": "Telemetría", "Tribologia": "Tribología"}.get(
+                str(row.get("Trigger_type", "")), str(row.get("Trigger_type", "Sin fuente"))
+            )
+            if bool(row.get("has_telemetry")) and bool(row.get("has_tribology")):
+                evidence = "Telemetría + Tribología"
+            elif bool(row.get("has_telemetry")):
+                evidence = "Telemetría"
+            elif bool(row.get("has_tribology")):
+                evidence = "Tribología"
+            else:
+                evidence = "Sin evidencia"
+            rows.append({
+                "ID": row.get("FusionID", "-"),
+                "Fecha": pd.to_datetime(row.get("Timestamp"), errors="coerce").strftime("%d/%m/%Y %H:%M") if pd.notna(row.get("Timestamp")) else "-",
+                "Unidad": row.get("UnitId", "-"),
+                "Sistema": row.get("sistema", "-"),
+                "Componente": row.get("componente", "-"),
+                "Señal / variable": signal_label,
+                "Fuente": source,
+                "Riesgo": sections.get("nivel_riesgo", "Sin clasificación"),
+                "Diagnóstico": sections.get("diagnostico", "Sin diagnóstico IA disponible")[:180],
+                "Evidencia": evidence,
+                "Acción": sections.get("acciones", "Sin acción recomendada registrada"),
+            })
+        table = dash_table.DataTable(
+            id="alerts-datatable",
+            columns=[
+                {"name": name, "id": name}
+                for name in ["ID", "Fecha", "Unidad", "Sistema", "Componente", "Señal / variable", "Fuente", "Riesgo", "Diagnóstico", "Evidencia", "Acción"]
+            ],
+            data=rows,
+            active_cell=None,
+            cell_selectable=True,
+            filter_action="native",
+            sort_action="native",
+            sort_mode="multi",
+            page_action="native",
+            page_size=15,
+            tooltip_data=[
+                {"Diagnóstico": {"value": row["Diagnóstico"], "type": "text"}, "Acción": {"value": row["Acción"], "type": "text"}}
+                for row in rows
+            ],
+            tooltip_duration=None,
+            style_table={"overflowX": "auto", "overflowY": "auto", "maxHeight": "560px"},
+            style_cell={"textAlign": "left", "padding": "9px", "fontSize": "12px", "whiteSpace": "normal", "height": "auto", "minWidth": "90px"},
+            style_header={"backgroundColor": "#23384d", "color": "white", "fontWeight": "bold", "textAlign": "center", "whiteSpace": "normal"},
+            style_cell_conditional=[
+                {"if": {"column_id": "ID"}, "fontWeight": "600", "minWidth": "150px"},
+                {"if": {"column_id": "Diagnóstico"}, "minWidth": "260px", "maxWidth": "420px"},
+                {"if": {"column_id": "Acción"}, "display": "none"},
+                {"if": {"column_id": "Señal / variable"}, "minWidth": "150px"},
+            ],
+            style_data_conditional=[
+                {"if": {"filter_query": '{Riesgo} = "ALTO"'}, "backgroundColor": "rgba(220,53,69,.12)", "color": "#842029", "fontWeight": "600"},
+                {"if": {"filter_query": '{Riesgo} = "MEDIO"'}, "backgroundColor": "rgba(255,193,7,.10)", "color": "#664d03"},
+                {"if": {"filter_query": '{Fuente} = "Mixto"'}, "borderLeft": "4px solid #6f42c1"},
+                {"if": {"state": "active"}, "backgroundColor": "#dbeafe", "color": "#12344d", "border": "1px solid #4f8fc0"},
+            ],
+        )
+        return table
+    except Exception as exc:
+        logger.error(f"Error creando tabla ejecutiva de alertas: {exc}")
+        return dbc.Alert(f"Error al crear tabla: {exc}", color="danger")
 
 
 def create_alert_detail_card(alert_row: pd.Series) -> dbc.Card:
