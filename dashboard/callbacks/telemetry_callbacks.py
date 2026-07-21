@@ -1,106 +1,163 @@
-"""
-Telemetry Health Dashboard Callbacks.
+"""Callbacks for the reportable telemetry fleet and unit views."""
 
-Handles:
-- Internal tab switching (Fleet Overview ↔ Unit Detail)
-- Fleet Overview: KPIs, heatmap, priority table, AI assessments
-- Unit Detail: Unit selector, system table, signal table, signal cards
-- Navigation from fleet table row click → unit detail
-"""
+from datetime import date, datetime, timedelta
+from functools import lru_cache
 
 import pandas as pd
-import json
-from datetime import datetime, timedelta
-from dash import callback, Input, Output, State, no_update, html, dcc
+from dash import callback, Input, Output, State, ctx, html, dcc, dash_table
 from dash.exceptions import PreventUpdate
 import dash_bootstrap_components as dbc
 
-from src.data.loaders import (
-    load_telemetry_unit_health,
-    load_telemetry_system_health,
-    load_telemetry_deviation_results,
-    load_telemetry_events,
-    load_telemetry_trends,
-    load_telemetry_limits,
-    load_telemetry_manifest,
-    load_silver_telemetry_week,
-    load_telemetry_ai_comments,
-)
+from src.data.loaders import load_silver_telemetry_week
 from dashboard.components.telemetry_charts import (
+    STATUS_COLORS,
     build_fleet_heatmap,
     build_heatmap_insights,
     build_signal_timeseries_card,
-    translate_system,
-    load_signal_registry,
-    STATUS_COLORS,
 )
-from dashboard.components.telemetry_tables import (
-    build_fleet_priority_table,
-    build_system_risk_table,
-    build_signal_overview_table,
-    build_signal_kpi,
+from dashboard.components.telemetry_report import (
+    build_fleet_priority_rows,
+    build_signal_rows,
+    build_system_rows,
+    client_facing_text,
+    filter_fleet_snapshot,
+    format_urgency,
+    load_telemetry_snapshot,
 )
 from dashboard.tabs.tab_telemetry_fleet import create_telemetry_fleet_layout
 from dashboard.tabs.tab_telemetry_unit_detail import create_telemetry_unit_detail_layout
-
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 
-# ===================================================================
-# REFERENCE DATE INDICATOR
-# ===================================================================
+@callback(Output('telemetry-availability-notice', 'children'), Input('client-selector', 'value'))
+def update_telemetry_availability(client):
+    if not client:
+        return html.Div()
+    snapshot = load_telemetry_snapshot(client)
+    if snapshot.unit_health.empty and snapshot.system_health.empty:
+        return dbc.Alert([
+            html.I(className="fas fa-info-circle me-2"),
+            f"No hay datos de Telemetría disponibles para el cliente {str(client).upper()}."
+        ], color="info")
+    return html.Div()
+
 
 @callback(
     Output('telemetry-reference-date', 'children'),
-    Input('telemetry-health-tabs', 'value'),
-    State('client-selector', 'value'),
+    [Input('telemetry-health-tabs', 'value'), Input('client-selector', 'value')],
 )
 def update_reference_date(active_tab, client):
-    """Show the evaluation week/date the dashboard is referencing."""
+    """Show the materialized evaluation identity and refresh when client changes."""
     if not client:
         raise PreventUpdate
-
-    manifest = load_telemetry_manifest(client)
-    if manifest:
-        week = manifest.get('evaluation_week', '?')
-        year = manifest.get('evaluation_year', '?')
-        ts = manifest.get('execution_timestamp', '')
-        date_str = ts[:10] if ts else ''
-        return html.Div([
-            html.Small([
-                html.I(className="fas fa-calendar-alt me-1"),
-                f"Semana {week}/{year}"
-            ], className="d-block text-muted"),
-            html.Small([
-                html.I(className="fas fa-sync-alt me-1"),
-                f"Actualizado: {date_str}"
-            ], className="text-muted") if date_str else html.Span()
-        ])
-    return html.Small("Sin datos de referencia", className="text-muted")
+    manifest = load_telemetry_snapshot(client).manifest
+    if not manifest:
+        return html.Small("Sin datos de referencia", className="text-muted")
+    week = manifest.get('evaluation_week', '?')
+    year = manifest.get('evaluation_year', '?')
+    timestamp = str(manifest.get('execution_timestamp', ''))
+    date_str = timestamp[:10] if timestamp else ''
+    return html.Div([
+        html.Small([html.I(className="fas fa-calendar-alt me-1"), f"Semana {week}/{year}"], className="d-block text-muted"),
+        html.Small([html.I(className="fas fa-sync-alt me-1"), f"Actualizado: {date_str}"], className="d-block text-muted") if date_str else html.Span(),
+    ])
 
 
-# ===================================================================
-# TAB SWITCHING
-# ===================================================================
-
-@callback(
-    Output('telemetry-health-tab-content', 'children'),
-    Input('telemetry-health-tabs', 'value')
-)
+@callback(Output('telemetry-health-tab-content', 'children'), Input('telemetry-health-tabs', 'value'))
 def render_telemetry_health_tab(active_tab):
-    """Render the appropriate internal tab content."""
     if active_tab == 'fleet-overview':
         return create_telemetry_fleet_layout()
-    elif active_tab == 'unit-detail':
+    if active_tab == 'unit-detail':
         return create_telemetry_unit_detail_layout()
     return html.Div("Selección inválida")
 
 
-# ===================================================================
-# FLEET OVERVIEW CALLBACKS
-# ===================================================================
+@callback(
+    [Output('telemetry-fleet-model-filter', 'options'), Output('telemetry-fleet-system-filter', 'options')],
+    [Input('telemetry-health-tabs', 'value'), Input('client-selector', 'value')],
+)
+def populate_fleet_filters(active_tab, client):
+    if active_tab != 'fleet-overview' or not client:
+        raise PreventUpdate
+    snapshot = load_telemetry_snapshot(client)
+    models = sorted(set(snapshot.equipment_models.values()))
+    systems = sorted({str(v) for v in snapshot.system_health.get('system', pd.Series(dtype=str)).map(lambda x: {
+        'Engine': 'Motor', 'Transmission': 'Transmisión', 'Brakes': 'Frenos', 'Steering': 'Dirección'
+    }.get(x, x)).dropna()})
+    return ([{'label': model, 'value': model} for model in models],
+            [{'label': system, 'value': system} for system in systems])
+
+
+def _kpi_card(label: str, value, icon: str, color: str, bg_color: str) -> dbc.Col:
+    return dbc.Col([
+        dbc.Card([
+            dbc.CardBody([
+                html.Div([
+                    html.I(className=f"{icon} fa-2x text-{color} mb-2"),
+                    html.H6(label, className="text-muted text-uppercase mb-2", style={'fontSize': '0.78rem', 'letterSpacing': '0.4px'}),
+                    html.H2(str(value), className=f"text-{color} mb-0 fw-bold")
+                ], className="text-center")
+            ])
+        ], className="shadow-sm border-0", style={'backgroundColor': bg_color})
+    ], xs=6, md=2, lg=2)
+
+
+def _priority_table(rows: list[dict]):
+    if not rows:
+        return dbc.Alert("No hay unidades para los filtros seleccionados.", color="info")
+    columns = [
+        {'name': 'Unidad', 'id': 'unit'},
+        {'name': 'Modelo', 'id': 'model'},
+        {'name': 'Estado', 'id': 'overall_status'},
+        {'name': 'Sistemas afectados', 'id': 'systems_in_alert', 'type': 'numeric'},
+        {'name': 'Sistema principal', 'id': 'top_system'},
+        {'name': 'Señal principal', 'id': 'top_signal_display'},
+        {'name': 'Urgencia', 'id': 'urgency_display'},
+        {'name': 'Acción recomendada', 'id': 'recommended_action'},
+        {'name': 'top_system_raw', 'id': 'top_system_raw'},
+        {'name': 'top_signal', 'id': 'top_signal'},
+    ]
+    data = []
+    for row in rows:
+        item = dict(row)
+        item['urgency_display'] = format_urgency(item.get('urgency'))
+        item['recommended_action'] = item.get('recommended_action') or '-'
+        data.append(item)
+    return dash_table.DataTable(
+        id='telemetry-fleet-priority-table',
+        columns=columns,
+        data=data,
+        row_selectable='single',
+        selected_rows=[],
+        sort_action='native',
+        filter_action='native',
+        page_size=12,
+        tooltip_data=[
+            {'recommended_action': {'value': row.get('recommended_action') or '', 'type': 'markdown'}}
+            for row in data
+        ],
+        tooltip_duration=None,
+        style_table={'overflowX': 'auto'},
+        style_header={'backgroundColor': '#2c3e50', 'color': 'white', 'fontWeight': 'bold', 'textAlign': 'center'},
+        style_cell={'padding': '8px', 'fontSize': '12px', 'whiteSpace': 'normal', 'height': 'auto', 'textAlign': 'center'},
+        style_cell_conditional=[
+            {'if': {'column_id': 'unit'}, 'textAlign': 'left', 'fontWeight': '600'},
+            {'if': {'column_id': 'top_system'}, 'textAlign': 'left'},
+            {'if': {'column_id': 'top_signal_display'}, 'textAlign': 'left'},
+            {'if': {'column_id': 'recommended_action'}, 'textAlign': 'left', 'minWidth': '260px', 'maxWidth': '420px'},
+            {'if': {'column_id': 'top_system_raw'}, 'display': 'none'},
+            {'if': {'column_id': 'top_signal'}, 'display': 'none'},
+        ],
+        style_data_conditional=[
+            {'if': {'filter_query': '{overall_status} = "Anormal"'}, 'backgroundColor': 'rgba(231, 76, 60, .12)', 'color': '#b02a37', 'fontWeight': 'bold'},
+            {'if': {'filter_query': '{overall_status} = "Alerta"'}, 'backgroundColor': 'rgba(243, 156, 18, .12)', 'color': '#856404', 'fontWeight': 'bold'},
+            {'if': {'filter_query': '{overall_status} = "InsufficientData"'}, 'backgroundColor': 'rgba(149, 165, 166, .15)', 'color': '#657174'},
+            {'if': {'filter_query': '{overall_status} = "Normal"', 'column_id': 'overall_status'}, 'color': '#198754'},
+        ],
+    )
+
 
 @callback(
     [
@@ -109,669 +166,396 @@ def render_telemetry_health_tab(active_tab):
         Output('telemetry-fleet-heatmap-insights', 'children'),
         Output('telemetry-fleet-ai-table', 'children'),
     ],
-    Input('telemetry-health-tabs', 'value'),
-    State('client-selector', 'value'),
+    [
+        Input('telemetry-health-tabs', 'value'),
+        Input('client-selector', 'value'),
+        Input('telemetry-fleet-model-filter', 'value'),
+        Input('telemetry-fleet-status-filter', 'value'),
+        Input('telemetry-fleet-system-filter', 'value'),
+    ],
 )
-def update_fleet_overview(active_tab, client):
-    """Load and display fleet overview data."""
+def update_fleet_overview(active_tab, client, model, statuses, systems):
     if active_tab != 'fleet-overview' or not client:
         raise PreventUpdate
-
     try:
-        unit_health = load_telemetry_unit_health(client)
-        system_health = load_telemetry_system_health(client)
-
+        snapshot = load_telemetry_snapshot(client)
+        if model and model not in set(snapshot.equipment_models.values()):
+            model = None
+        valid_systems = set(snapshot.system_health.get('system', pd.Series(dtype=str)).map(lambda x: {
+            'Engine': 'Motor', 'Transmission': 'Transmisión', 'Brakes': 'Frenos', 'Steering': 'Dirección'
+        }.get(x, x)).dropna())
+        systems = [system for system in (systems or []) if system in valid_systems]
+        unit_health, system_health = filter_fleet_snapshot(snapshot, model, statuses, systems)
         if unit_health.empty:
-            empty_msg = html.Div([
-                dbc.Alert([
-                    html.I(className="fas fa-exclamation-triangle me-2"),
-                    "No hay datos de salud de flota disponibles."
-                ], color="warning")
-            ])
-            return empty_msg, {}, html.Div(), empty_msg
+            empty = dbc.Alert("No hay unidades para los filtros seleccionados.", color="info")
+            return empty, {}, html.Div(), empty
 
-        # --- KPI Cards ---
-        total = len(unit_health)
-        normal = int((unit_health['overall_status'] == 'Normal').sum())
-        alerta = int((unit_health['overall_status'] == 'Alerta').sum())
-        anormal = int((unit_health['overall_status'] == 'Anormal').sum())
+        counts = unit_health.get('overall_status', pd.Series(dtype=str)).value_counts()
+        kpi = dbc.Row([
+            _kpi_card("Total", len(unit_health), "fas fa-truck", "info", "#f0f8ff"),
+            _kpi_card("Normal", int(counts.get('Normal', 0)), "fas fa-check-circle", "success", "#f0fff4"),
+            _kpi_card("Alerta", int(counts.get('Alerta', 0)), "fas fa-exclamation-circle", "warning", "#fffcf0"),
+            _kpi_card("Anormal", int(counts.get('Anormal', 0)), "fas fa-times-circle", "danger", "#fff5f5"),
+            _kpi_card("Sin evidencia", int(counts.get('InsufficientData', 0)), "fas fa-question-circle", "secondary", "#f3f4f5"),
+        ], className="g-3 mb-4 justify-content-center")
 
-        kpi_row = dbc.Row([
-            _kpi_card("Total Unidades", total, "fas fa-truck", "info", "#f0f8ff"),
-            _kpi_card("Normal", normal, "fas fa-check-circle", "success", "#f0fff4"),
-            _kpi_card("Alerta", alerta, "fas fa-exclamation-circle", "warning", "#fffcf0"),
-            _kpi_card("Anormal", anormal, "fas fa-times-circle", "danger", "#fff5f5"),
-        ], className="g-3 mb-4")
-
-        # --- Heatmap (includes Estado column) ---
-        heatmap_fig = build_fleet_heatmap(system_health, unit_health)
-
-        # --- Heatmap insight KPIs ---
+        heatmap = build_fleet_heatmap(system_health, unit_health)
         insights = build_heatmap_insights(system_health, unit_health)
-        heatmap_insights = dbc.Row([
-            dbc.Col([
-                html.Div([
-                    html.Small("Unidad más riesgosa", className="text-muted d-block"),
-                    html.Strong(insights['most_risky_unit'], style={"fontSize": "1.1rem"})
-                ], className="text-center")
-            ], md=4),
-            dbc.Col([
-                html.Div([
-                    html.Small("Sistema con mayor riesgo", className="text-muted d-block"),
-                    html.Strong(insights['most_critical_system'], style={"fontSize": "1.1rem"})
-                ], className="text-center")
-            ], md=4),
-            dbc.Col([
-                html.Div([
-                    html.Small("Máximo Risk Score", className="text-muted d-block"),
-                    html.Strong(f"{insights['max_score']}", className="text-danger",
-                                style={"fontSize": "1.1rem"})
-                ], className="text-center")
-            ], md=4),
+        insight_row = dbc.Row([
+            dbc.Col([html.Small("Unidad más riesgosa", className="text-muted d-block"), html.Strong(insights['most_risky_unit'])], className="text-center", md=4),
+            dbc.Col([html.Small("Sistema con mayor riesgo", className="text-muted d-block"), html.Strong(insights['most_critical_system'])], className="text-center", md=4),
+            dbc.Col([html.Small("Estado más crítico", className="text-muted d-block"), html.Strong(insights.get('most_critical_status', '-'), className="text-danger")], className="text-center", md=4),
         ], className="g-2 py-2 border rounded bg-light")
-
-        # --- AI Assessment Table (sorted by criticality) ---
-        ai_table = _build_ai_assessment_section(client, unit_health)
-
-        return kpi_row, heatmap_fig, heatmap_insights, ai_table
-
-    except Exception as e:
-        logger.error(f"Error in fleet overview: {e}")
-        error_msg = dbc.Alert(f"Error cargando datos: {e}", color="danger")
-        return error_msg, {}, html.Div(), error_msg
+        rows = build_fleet_priority_rows(snapshot, unit_health, system_health)
+        return kpi, heatmap, insight_row, _priority_table(rows)
+    except Exception as exc:
+        logger.exception("Error en Vista de Flota: %s", exc)
+        error = dbc.Alert(f"Error cargando datos de telemetría: {exc}", color="danger")
+        return error, {}, html.Div(), error
 
 
-# ===================================================================
-# UNIT DETAIL CALLBACKS
-# ===================================================================
+@callback(
+    Output('telemetry-fleet-selected-unit', 'children'),
+    [
+        Input('telemetry-fleet-priority-table', 'selected_rows'),
+        Input('client-selector', 'value'),
+        Input('telemetry-fleet-model-filter', 'value'),
+        Input('telemetry-fleet-status-filter', 'value'),
+        Input('telemetry-fleet-system-filter', 'value'),
+    ],
+    [State('telemetry-fleet-priority-table', 'data'), State('telemetry-fleet-priority-table', 'derived_viewport_data')],
+    prevent_initial_call=True,
+)
+def update_selected_fleet_unit(selected_rows, client, model, statuses, systems, table_data, visible_data):
+    table_data = visible_data or table_data
+    if not selected_rows or not table_data or not client:
+        return html.Div()
+    row = table_data[selected_rows[0]]
+    return dbc.Card([
+        dbc.CardHeader([html.I(className="fas fa-robot me-2"), f"Resumen de {row.get('unit', '-')}"]),
+        dbc.CardBody([
+            html.P(row.get('description') or "Sin descripción IA disponible.", className="mb-1"),
+            html.P(row.get('explaining') or "", className="text-muted mb-1", style={'whiteSpace': 'pre-wrap'}),
+            html.Div([
+                html.I(className="fas fa-wrench me-1"),
+                html.Strong("Acción: "), row.get('recommended_action') or "Sin acción recomendada disponible."
+            ], className="text-primary")
+        ])
+    ], className="shadow-sm mb-4", style={'borderLeft': '4px solid #3498db'})
+
 
 @callback(
     [
-        Output('telemetry-detail-unit-selector', 'options'),
-        Output('telemetry-detail-unit-selector', 'value'),
+        Output('telemetry-health-tabs', 'value', allow_duplicate=True),
+        Output('telemetry-navigation-state', 'data', allow_duplicate=True),
     ],
-    Input('telemetry-health-tabs', 'value'),
-    State('client-selector', 'value'),
+    [Input('telemetry-fleet-heatmap', 'clickData'), Input('telemetry-fleet-priority-table', 'active_cell')],
+    [State('telemetry-fleet-priority-table', 'data'), State('telemetry-fleet-priority-table', 'derived_viewport_data'), State('telemetry-fleet-heatmap', 'figure')],
+    prevent_initial_call=True,
+)
+def navigate_from_fleet(click_data, active_cell, table_data, visible_data, heatmap_figure):
+    table_data = visible_data or table_data
+    triggered = ctx.triggered_id
+    unit = system = signal = None
+    source = None
+    if triggered == 'telemetry-fleet-priority-table' and active_cell and table_data:
+        row = table_data[active_cell.get('row', 0)]
+        unit, system, signal, source = row.get('unit'), row.get('top_system'), row.get('top_signal'), 'priority_table'
+    elif triggered == 'telemetry-fleet-heatmap' and click_data and click_data.get('points'):
+        point = click_data['points'][0]
+        unit = point.get('y')
+        system = point.get('x')
+        if system == 'Estado':
+            system = None
+        source = 'fleet_heatmap'
+    if not unit:
+        raise PreventUpdate
+    return 'unit-detail', {'unit': unit, 'system': system, 'signal': signal, 'source': source}
+
+
+@callback(
+    [Output('telemetry-detail-unit-selector', 'options'), Output('telemetry-detail-unit-selector', 'value')],
+    [Input('telemetry-health-tabs', 'value'), Input('client-selector', 'value'), Input('telemetry-navigation-state', 'data')],
     State('telemetry-detail-unit-selector', 'value'),
 )
-def populate_unit_selector(active_tab, client, current_value):
-    """Populate unit dropdown with available units sorted by priority.
-    Default to most risky unit if no value is currently set."""
+def populate_unit_selector(active_tab, client, navigation_state, current_value):
     if active_tab != 'unit-detail' or not client:
         raise PreventUpdate
-
-    unit_health = load_telemetry_unit_health(client)
-    if unit_health.empty:
+    snapshot = load_telemetry_snapshot(client)
+    unit_health = snapshot.unit_health
+    if unit_health.empty or 'unit' not in unit_health.columns:
         return [], None
-
-    unit_health = unit_health.sort_values('priority_score', ascending=False)
-    options = [{'label': row['unit'], 'value': row['unit']} for _, row in unit_health.iterrows()]
-
-    # Keep current value if valid, otherwise default to highest priority
-    if current_value and current_value in [o['value'] for o in options]:
+    ordered = unit_health.sort_values('priority_score', ascending=False, na_position='last')
+    options = [{'label': row['unit'], 'value': row['unit']} for _, row in ordered.iterrows()]
+    requested = (navigation_state or {}).get('unit')
+    if requested in [item['value'] for item in options]:
+        return options, requested
+    if current_value in [item['value'] for item in options]:
         return options, current_value
+    return options, options[0]['value']
 
-    default_unit = unit_health.iloc[0]['unit']
-    return options, default_unit
+
+def _identity_display(snapshot, unit: str) -> html.Div:
+    manifest = snapshot.manifest
+    if not unit:
+        return html.Div()
+    return html.Div([
+        html.Span(f"Unidad: {unit}", className="me-3"),
+        html.Span(f"Modelo: {snapshot.equipment_models.get(unit, 'N/D')}", className="me-3"),
+        html.Span(f"Evaluación: semana {manifest.get('evaluation_week', '?')}/{manifest.get('evaluation_year', '?')}", className="me-3"),
+        html.Span(f"Ejecución: {str(manifest.get('execution_timestamp', ''))[:10]}")
+    ])
+
+
+def _decision_summary(snapshot, unit: str, system_rows: list[dict]) -> html.Div:
+    unit_row = snapshot.unit_health[snapshot.unit_health.get('unit', pd.Series(dtype=str)) == unit]
+    if unit_row.empty:
+        return dbc.Alert("No hay datos para la unidad seleccionada.", color="info")
+    row = unit_row.iloc[0]
+    top = system_rows[0] if system_rows else {}
+    unit_comment = snapshot.unit_comments[snapshot.unit_comments.get('unit', pd.Series(dtype=str)) == unit] if not snapshot.unit_comments.empty else pd.DataFrame()
+    comment = unit_comment.iloc[0] if not unit_comment.empty else None
+    description = client_facing_text(_text_value(comment, 'description', 'comment') or _text_value(row, 'executive_summary'), snapshot.signal_registry) or 'Operando dentro de parámetros normales.'
+    explaining = client_facing_text(_text_value(comment, 'explaining'), snapshot.signal_registry)
+    action = client_facing_text(_text_value(comment, 'recommended_action'), snapshot.signal_registry)
+    urgency = format_urgency(_text_value(comment, 'urgency'))
+    status = row.get('overall_status', 'InsufficientData')
+    color = {'Normal': 'success', 'Alerta': 'warning', 'Anormal': 'danger', 'InsufficientData': 'secondary'}.get(status, 'secondary')
+    title = "Por qué está en alerta" if status in {'Alerta', 'Anormal'} else "Resumen de la unidad"
+    return dbc.Card([
+        dbc.CardHeader([html.I(className="fas fa-bullseye me-2"), title]),
+        dbc.CardBody([
+            dbc.Row([
+                dbc.Col([html.Small("Estado", className="text-muted d-block"), dbc.Badge(status, color=color, pill=True)], md=2),
+                dbc.Col([html.Small("Sistemas afectados", className="text-muted d-block"), html.Strong(str(int(row.get('n_anormal_systems', 0) or 0) + int(row.get('n_alerta_systems', 0) or 0)))], md=2),
+                dbc.Col([html.Small("Sistema principal", className="text-muted d-block"), html.Strong(top.get('system', '-'))], md=3),
+                dbc.Col([html.Small("Señal principal", className="text-muted d-block"), html.Strong(top.get('top_signal_display', '-'))], md=3),
+                dbc.Col([html.Small("Urgencia", className="text-muted d-block"), html.Strong(urgency)], md=2),
+            ], className="mb-3"),
+            html.Strong(description, className="d-block"),
+            html.P(explaining or top.get('explaining') or top.get('description') or "", className="text-muted mb-1", style={'whiteSpace': 'pre-wrap'}),
+            html.Div([html.I(className="fas fa-wrench me-1"), html.Strong("Acción: "), action or top.get('recommended_action') or "Sin acción recomendada disponible."], className="text-primary")
+        ])
+    ], className="shadow-sm mb-4", style={'borderLeft': f"4px solid {STATUS_COLORS.get(status, '#95a5a6')}"})
+
+
+def _system_analysis_card(system_row: dict | None) -> html.Div:
+    """Render the materialized system-level IA explanation before signals."""
+    if not system_row:
+        return dbc.Alert("No hay un sistema seleccionado para mostrar su evaluación.", color="info")
+    status = system_row.get('system_status', 'InsufficientData')
+    color = {'Normal': 'success', 'Alerta': 'warning', 'Anormal': 'danger', 'InsufficientData': 'secondary'}.get(status, 'secondary')
+    description = system_row.get('description') or "Sin evaluación IA disponible para este sistema."
+    explaining = system_row.get('explaining') or ""
+    action = system_row.get('recommended_action') or "Sin acción recomendada disponible."
+    return dbc.Card([
+        dbc.CardBody([
+            dbc.Row([
+                dbc.Col([html.Small("Sistema", className="text-muted d-block"), html.Strong(system_row.get('system', '-'))], md=3),
+                dbc.Col([html.Small("Estado", className="text-muted d-block"), dbc.Badge(status, color=color, pill=True)], md=2),
+                dbc.Col([html.Small("Señales con hallazgo", className="text-muted d-block"), html.Strong(str(system_row.get('signals_in_alert', 0)))], md=2),
+                dbc.Col([html.Small("Señal principal", className="text-muted d-block"), html.Strong(system_row.get('top_signal_display', '-'))], md=5),
+            ], className="mb-3"),
+            html.Strong(description, className="d-block"),
+            html.P(explaining, className="text-muted mb-2", style={'whiteSpace': 'pre-wrap'}) if explaining else html.Span(),
+            html.Div([html.I(className="fas fa-wrench me-1"), html.Strong("Acción: "), action], className="text-primary"),
+        ])
+    ], className="shadow-sm mb-4", style={'borderLeft': f"4px solid {STATUS_COLORS.get(status, '#95a5a6')}"})
+
+
+def _text_value(row, *fields):
+    if row is None:
+        return None
+    for field in fields:
+        try:
+            value = row.get(field, '')
+        except AttributeError:
+            value = ''
+        if value is not None and not pd.isna(value) and str(value).strip():
+            return str(value)
+    return None
 
 
 @callback(
     [
         Output('telemetry-detail-ai-comment', 'children'),
+        Output('telemetry-detail-identity-display', 'children'),
         Output('telemetry-detail-system-table', 'data'),
         Output('telemetry-detail-system-selector', 'options'),
         Output('telemetry-detail-system-selector', 'value'),
+        Output('telemetry-detail-system-analysis', 'children'),
     ],
-    Input('telemetry-detail-unit-selector', 'value'),
-    State('client-selector', 'value'),
+    [Input('telemetry-detail-unit-selector', 'value'), Input('client-selector', 'value')],
+    State('telemetry-navigation-state', 'data'),
 )
-def update_unit_detail_header(unit, client):
-    """Update AI comment and system table when unit is selected."""
+def update_unit_detail_header(unit, client, navigation_state):
     if not unit or not client:
         raise PreventUpdate
-
     try:
-        unit_health = load_telemetry_unit_health(client)
-        system_health = load_telemetry_system_health(client)
-        deviation_df = load_telemetry_deviation_results(client)
+        snapshot = load_telemetry_snapshot(client)
+        system_rows = build_system_rows(snapshot, unit)
+        options = [{'label': row['system'], 'value': row['system']} for row in system_rows]
+        requested_system = (navigation_state or {}).get('system') if (navigation_state or {}).get('unit') == unit else None
+        selected_system = requested_system if requested_system in [item['value'] for item in options] else (options[0]['value'] if options else None)
+        selected_row = next((item for item in system_rows if item.get('system') == selected_system), None)
+        return _decision_summary(snapshot, unit, system_rows), _identity_display(snapshot, unit), system_rows, options, selected_system, _system_analysis_card(selected_row)
+    except Exception as exc:
+        logger.exception("Error actualizando detalle de unidad: %s", exc)
+        return dbc.Alert(f"Error cargando la unidad: {exc}", color="danger"), html.Div(), [], [], None, html.Div()
 
-        # AI Comment card — try structured ai_comments first
-        ai_comment = html.Div()
-        unit_comments = load_telemetry_ai_comments(client, 'unit')
 
-        description = None
-        explaining = None
-        urgency = None
-        recommended_action = None
+@callback(
+    [
+        Output('telemetry-detail-ai-comment', 'children', allow_duplicate=True),
+        Output('telemetry-detail-system-analysis', 'children', allow_duplicate=True),
+    ],
+    [Input('telemetry-detail-system-selector', 'value'), Input('telemetry-detail-unit-selector', 'value'), Input('client-selector', 'value')],
+    prevent_initial_call=True,
+)
+def update_selected_system_summary(system, unit, client):
+    """Refresh the decision block when the user changes the selected system."""
+    if not unit or not system or not client:
+        raise PreventUpdate
+    snapshot = load_telemetry_snapshot(client)
+    rows = build_system_rows(snapshot, unit)
+    selected = [row for row in rows if row.get('system') == system]
+    remainder = [row for row in rows if row.get('system') != system]
+    selected_row = selected[0] if selected else None
+    return _decision_summary(snapshot, unit, selected + remainder), _system_analysis_card(selected_row)
 
-        if not unit_comments.empty:
-            uc_row = unit_comments[unit_comments['unit'] == unit]
-            if not uc_row.empty:
-                uc = uc_row.iloc[0]
-                description = _get_ai_text(uc, 'description')
-                explaining = _get_ai_text(uc, 'explaining')
-                urgency = uc.get('urgency', '')
-                recommended_action = _get_ai_text(uc, 'recommended_action')
 
-        # Fallback to executive_summary (old schema)
-        if not description:
-            if not unit_health.empty:
-                row = unit_health[unit_health['unit'] == unit]
-                if not row.empty and 'executive_summary' in row.columns:
-                    description = row.iloc[0].get('executive_summary', '')
-                    if description and str(description) == 'nan':
-                        description = None
-
-        if description:
-            # Urgency indicator
-            urgency_el = html.Span()
-            if urgency and urgency != 'routine':
-                urgency_colors = {
-                    'monitor': '#17a2b8',
-                    'schedule_inspection': '#f39c12',
-                    'immediate': '#dc3545'
-                }
-                urgency_labels = {
-                    'monitor': 'Monitorear',
-                    'schedule_inspection': 'Programar inspección',
-                    'immediate': 'Acción inmediata'
-                }
-                urgency_el = dbc.Badge(
-                    urgency_labels.get(urgency, urgency),
-                    style={"backgroundColor": urgency_colors.get(urgency, '#6c757d')},
-                    className="ms-2"
-                )
-
-            comment_content = [
-                html.Strong(str(description), className="d-block mb-1")
-            ]
-            if explaining:
-                comment_content.append(
-                    html.P(str(explaining), className="mb-1 text-muted",
-                           style={"whiteSpace": "pre-wrap", "fontSize": "0.9rem"})
-                )
-            if recommended_action and str(recommended_action) != 'nan':
-                comment_content.append(
-                    html.Small([
-                        html.I(className="fas fa-wrench me-1"),
-                        html.Strong("Acción: "),
-                        str(recommended_action)
-                    ], className="text-primary")
-                )
-
-            ai_comment = dbc.Card([
-                dbc.CardBody([
-                    html.Div([
-                        html.I(className="fas fa-robot fa-lg text-primary me-3"),
-                        html.Div([
-                            html.Div([
-                                html.Strong("Evaluación IA", className="me-2"),
-                                urgency_el
-                            ], className="mb-1"),
-                            *comment_content
-                        ])
-                    ], className="d-flex align-items-start")
-                ])
-            ], className="shadow-sm mb-4", style={"borderLeft": "4px solid #3498db"})
-
-        # System table (pass deviation_df for signal alert counts)
-        system_table_data = build_system_risk_table(system_health, unit, deviation_df)
-
-        # System dropdown options (already translated to Spanish)
-        system_options = []
-        if system_table_data:
-            system_options = [
-                {'label': row['system'], 'value': row['system']}
-                for row in system_table_data
-            ]
-
-        # Default to highest-risk system (first in sorted list)
-        default_system = system_table_data[0]['system'] if system_table_data else None
-
-        return ai_comment, system_table_data, system_options, default_system
-
-    except Exception as e:
-        logger.error(f"Error updating unit detail: {e}", exc_info=True)
-        return html.Div(), [], [], None
+@callback(
+    Output('telemetry-detail-system-selector', 'value', allow_duplicate=True),
+    Input('telemetry-detail-system-table', 'selected_rows'),
+    State('telemetry-detail-system-table', 'data'),
+    prevent_initial_call=True,
+)
+def sync_system_table_selection(selected_rows, table_data):
+    if not selected_rows or not table_data:
+        raise PreventUpdate
+    return table_data[selected_rows[0]].get('system')
 
 
 @callback(
     [
         Output('telemetry-detail-signal-table', 'data'),
-        Output('telemetry-detail-signal-cards', 'children'),
+        Output('telemetry-detail-signal-table', 'selected_rows'),
+        Output('telemetry-detail-signal-selector', 'options'),
+        Output('telemetry-detail-signal-selector', 'value'),
     ],
-    [
-        Input('telemetry-detail-system-selector', 'value'),
-        Input('telemetry-detail-unit-selector', 'value'),
-    ],
-    State('client-selector', 'value'),
+    [Input('telemetry-detail-system-selector', 'value'), Input('telemetry-detail-unit-selector', 'value'), Input('client-selector', 'value')],
+    State('telemetry-navigation-state', 'data'),
 )
-def update_signal_section(system, unit, client):
-    """Update signal table and detail cards when system or unit changes."""
+def update_signal_section(system, unit, client, navigation_state):
     if not unit or not system or not client:
         raise PreventUpdate
-
     try:
-        deviation_df = load_telemetry_deviation_results(client)
-        events_df = load_telemetry_events(client)
-        trends_df = load_telemetry_trends(client)
-
-        logger.info(f"Signal section: unit={unit}, system={system}, "
-                    f"dev={len(deviation_df)}, events={len(events_df)}, trends={len(trends_df)}")
-
-        # Load signal registry for display names
-        signal_names_map = load_signal_registry(client)
-
-        # Load signal-level AI comments
-        signal_comments = load_telemetry_ai_comments(client, 'signal')
-        signal_comments_map = {}
-        if not signal_comments.empty:
-            sc_unit = signal_comments[signal_comments['unit'] == unit]
-            if not sc_unit.empty:
-                signal_comments_map = sc_unit.set_index('signal').to_dict('index')
-
-        # Build signal table data: signal (display_name) | estado | ai_message
-        signal_data = _build_signal_table_data(
-            deviation_df, unit, system, signal_names_map, signal_comments_map
-        )
-
-        logger.info(f"Signal data rows: {len(signal_data)}")
-
-        # Signal detail cards (time series + KPIs)
-        cards = _build_signal_cards(
-            unit, system, client, deviation_df, events_df, trends_df,
-            signal_names_map, signal_comments_map
-        )
-
-        return signal_data, cards
-
-    except Exception as e:
-        logger.error(f"Error updating signal section: {e}", exc_info=True)
-        return [], html.Div()
+        snapshot = load_telemetry_snapshot(client)
+        rows = build_signal_rows(snapshot, unit, system)
+        options = [{'label': f"{row['signal']} ({row['status']})", 'value': row['signal_raw']} for row in rows]
+        requested = (navigation_state or {}).get('signal') if (navigation_state or {}).get('unit') == unit else None
+        selected = requested if requested in [item['value'] for item in options] else (options[0]['value'] if options else None)
+        selected_rows = [next((idx for idx, row in enumerate(rows) if row['signal_raw'] == selected), 0)] if rows else []
+        return rows, selected_rows, options, selected
+    except Exception as exc:
+        logger.exception("Error actualizando señales: %s", exc)
+        return [], [], [], None
 
 
-# ===================================================================
-# HELPER FUNCTIONS
-# ===================================================================
+@callback(
+    Output('telemetry-detail-signal-selector', 'value', allow_duplicate=True),
+    Input('telemetry-detail-signal-table', 'selected_rows'),
+    State('telemetry-detail-signal-table', 'data'),
+    prevent_initial_call=True,
+)
+def sync_signal_table_selection(selected_rows, table_data):
+    if not selected_rows or not table_data:
+        raise PreventUpdate
+    return table_data[selected_rows[0]].get('signal_raw')
 
-def _get_ai_text(data, field: str):
-    """Extract AI text field with backward compatibility (comment → description)."""
-    if isinstance(data, dict):
-        val = data.get(field, '')
-        # Backward compat: if looking for 'description' and not found, try 'comment'
-        if not val and field == 'description':
-            val = data.get('comment', '')
+
+@lru_cache(maxsize=64)
+def _load_recent_telemetry_cached(client: str, unit: str, cache_key: str, weeks: int = 8) -> pd.DataFrame:
+    snapshot = load_telemetry_snapshot(client)
+    manifest = snapshot.manifest
+    anchor_year = int(manifest.get('evaluation_year', datetime.now().isocalendar()[0]))
+    anchor_week = int(manifest.get('evaluation_week', datetime.now().isocalendar()[1]))
+    available_weeks = manifest.get('silver_weeks_available', [])
+    frames = []
+    if available_weeks:
+        candidates = sorted({int(w) for w in available_weeks}, reverse=True)[:weeks]
     else:
-        val = data.get(field, '') if hasattr(data, 'get') else getattr(data, field, '')
-        if not val and field == 'description':
-            val = data.get('comment', '') if hasattr(data, 'get') else getattr(data, 'comment', '')
-    if val and str(val) != 'nan':
-        return str(val)
-    return None
+        anchor_date = date.fromisocalendar(anchor_year, anchor_week, 1)
+        candidates = [(anchor_date - timedelta(weeks=i)).isocalendar()[1] for i in range(weeks + 4)]
+    for week in candidates:
+        frame = load_silver_telemetry_week(client, int(week), anchor_year)
+        if not frame.empty and 'Unit' in frame.columns:
+            frame = frame[frame['Unit'] == unit]
+            if not frame.empty:
+                frames.append(frame)
+    if not frames:
+        return pd.DataFrame()
+    combined = pd.concat(frames, ignore_index=True)
+    return combined.sort_values('Fecha') if 'Fecha' in combined.columns else combined
 
 
-def _kpi_card(label: str, value, icon: str, color: str, bg_color: str) -> dbc.Col:
-    """Create a single KPI card."""
-    return dbc.Col([
-        dbc.Card([
-            dbc.CardBody([
-                html.Div([
-                    html.I(className=f"{icon} fa-2x text-{color} mb-2"),
-                    html.H6(label,
-                            className="text-muted text-uppercase mb-2",
-                            style={'fontSize': '0.85rem', 'letterSpacing': '0.5px'}),
-                    html.H2(f"{value}", className=f"text-{color} mb-0 fw-bold")
-                ], className="text-center")
-            ])
-        ], className="shadow-sm border-0", style={'backgroundColor': bg_color})
-    ], md=3)
+def _signal_kpi_table(row: dict) -> html.Table:
+    values = [
+        ("Total eventos", row.get('total_events', 0)),
+        ("Warnings", row.get('warnings', 0)),
+        ("Episodio máximo", f"{row.get('longest_episode', 0)} min"),
+        ("Tendencia", row.get('trend_detected', 'No')),
+        ("Dirección de tendencia", row.get('trend_direction', '-')),
+        ("Fórmula", row.get('trend_formula', '-')),
+        ("Fuera de rango", f"{row.get('abnormal_pct', 0):.2f}%"),
+    ]
+    return html.Table([
+        html.Tbody([html.Tr([html.Td(label, className="fw-bold"), html.Td(str(value), className="text-end")]) for label, value in values])
+    ], className="table table-sm table-borderless")
 
 
-def _build_ai_assessment_section(client: str, unit_health: pd.DataFrame):
-    """Build AI assessment cards using ai_comments/unit_comments or fallback to executive_summary."""
-    if unit_health.empty:
-        return html.P("Sin evaluaciones IA disponibles", className="text-muted")
-
-    # Try loading structured AI comments first
-    unit_comments = load_telemetry_ai_comments(client, 'unit')
-
-    cards = []
-    for _, row in unit_health.sort_values('priority_score', ascending=False).iterrows():
-        status = row.get('overall_status', 'Normal')
-        unit = row.get('unit', '?')
-
-        # Get comment from AI comments table (preferred) or fallback
-        description = None
-        explaining = None
-        urgency = None
-        recommended_action = None
-
-        if not unit_comments.empty:
-            uc_row = unit_comments[unit_comments['unit'] == unit]
-            if not uc_row.empty:
-                uc = uc_row.iloc[0]
-                description = _get_ai_text(uc, 'description')
-                explaining = _get_ai_text(uc, 'explaining')
-                urgency = uc.get('urgency', '')
-                recommended_action = _get_ai_text(uc, 'recommended_action')
-
-        # Fallback to executive_summary
-        if not description:
-            description = row.get('executive_summary', '')
-            if not description or str(description) == 'nan':
-                description = "Operando dentro de parámetros normales."
-
-        badge_color = {
-            'Normal': 'success', 'Alerta': 'warning',
-            'Anormal': 'danger', 'InsufficientData': 'secondary'
-        }.get(status, 'secondary')
-
-        # Urgency badge
-        urgency_badge = None
-        if urgency and urgency != 'routine':
-            urgency_colors = {
-                'monitor': 'info',
-                'schedule_inspection': 'warning',
-                'immediate': 'danger'
-            }
-            urgency_labels = {
-                'monitor': 'Monitorear',
-                'schedule_inspection': 'Programar inspección',
-                'immediate': 'Acción inmediata'
-            }
-            urgency_badge = dbc.Badge(
-                urgency_labels.get(urgency, urgency),
-                color=urgency_colors.get(urgency, 'secondary'),
-                pill=True, className="ms-2"
-            )
-
-        # Build card content
-        card_body_content = [
-            dbc.Row([
-                dbc.Col([
-                    html.Strong(unit, className="me-2"),
-                    dbc.Badge(status, color=badge_color, pill=True),
-                    urgency_badge if urgency_badge else html.Span()
-                ], width=3),
-                dbc.Col([
-                    html.Strong(str(description), className="d-block",
-                                style={"fontSize": "0.9rem"}),
-                    html.Small(str(explaining), className="text-muted")
-                    if explaining else html.Span()
-                ], width=9)
-            ], align="center")
-        ]
-
-        # Add recommended action if available
-        if recommended_action and str(recommended_action) != 'nan':
-            card_body_content.append(
-                html.Div([
-                    html.Small([
-                        html.I(className="fas fa-wrench me-1"),
-                        str(recommended_action)
-                    ], className="text-primary")
-                ], className="mt-1 ms-3")
-            )
-
-        cards.append(
-            dbc.Card([
-                dbc.CardBody(card_body_content)
-            ], className="mb-2 border-start border-3",
-               style={"borderColor": STATUS_COLORS.get(status, '#999') + " !important"})
-        )
-
-    return html.Div(cards) if cards else html.P("Sin evaluaciones disponibles", className="text-muted")
-
-
-def _build_signal_cards(unit, system, client, deviation_df, events_df, trends_df,
-                        signal_names_map=None, signal_comments_map=None):
-    """Build signal detail cards with AI comment, time series plot + KPI table."""
-    if deviation_df.empty:
-        return html.Div(dbc.Alert("Sin datos de desviación disponibles", color="info"))
-
-    if signal_names_map is None:
-        signal_names_map = load_signal_registry(client)
-    if signal_comments_map is None:
-        signal_comments_map = {}
-
-    # Reverse-translate system for filtering deviation data (Spanish → English)
-    reverse_map = {v: k for k, v in {
-        'Engine': 'Motor', 'Transmission': 'Transmisión',
-        'Brakes': 'Frenos', 'Steering': 'Dirección'
-    }.items()}
-    system_en = reverse_map.get(system, system) if system else None
-
-    # Filter deviation for this unit+system and get signals list
-    dev = deviation_df[deviation_df['unit'] == unit]
-    if system_en:
-        dev = dev[dev['system'] == system_en]
-    if dev.empty:
-        return html.Div(dbc.Alert("Sin señales para el sistema seleccionado", color="info"))
-
-    # Get latest evaluation per signal (use year/week)
-    if 'year' in dev.columns and 'week' in dev.columns:
-        dev = dev.sort_values(['year', 'week'], ascending=False).drop_duplicates(subset=['signal'])
-    dev = dev.sort_values('risk_score', ascending=False)
-
-    signals = dev['signal'].tolist()
-    if not signals:
-        return html.Div(dbc.Alert("Sin señales disponibles", color="info"))
-
-    logger.info(f"Building signal cards for {len(signals)} signals: {signals[:5]}...")
-
-    # Load raw telemetry (search wider range to find available data)
-    raw_df = _load_recent_telemetry(client, unit, weeks=8)
-    logger.info(f"Raw telemetry loaded: {len(raw_df)} rows, columns available: {len(raw_df.columns) if not raw_df.empty else 0}")
-
-    # Load limits (falls back to baselines)
-    limits_df = load_telemetry_limits(client)
-
-    cards = []
-    for signal_name in signals[:10]:  # Limit to top 10 signals
-        # Get display name
-        display_name = signal_names_map.get(signal_name, signal_name)
-
-        # Build time series figure with limits
-        fig = build_signal_timeseries_card(
-            signal_name=signal_name,
-            raw_df=raw_df,
-            limits_df=limits_df,
-            trend_df=trends_df[
-                (trends_df['unit'] == unit) & (trends_df['signal'] == signal_name)
-            ] if not trends_df.empty else pd.DataFrame(),
-            unit=unit
-        )
-
-        # Build KPI data
-        kpi = build_signal_kpi(signal_name, deviation_df, events_df, trends_df, unit)
-
-        # Get signal status
-        sig_row = dev[dev['signal'] == signal_name]
-        sig_status = sig_row.iloc[0].get('status', 'Normal') if not sig_row.empty else 'Normal'
-        border_color = STATUS_COLORS.get(sig_status, '#95a5a6')
-
-        # Signal AI comment (description + explaining)
-        ai_comment_el = html.Div()
-        sc_info = signal_comments_map.get(signal_name)
-        if sc_info:
-            desc = _get_ai_text(sc_info, 'description')
-            explaining = _get_ai_text(sc_info, 'explaining')
-            if desc:
-                comment_parts = [
-                    html.Strong(str(desc), style={"fontSize": "0.85rem"})
-                ]
-                if explaining:
-                    comment_parts.append(
-                        html.P(str(explaining), className="mb-0 mt-1",
-                               style={"fontSize": "0.8rem", "color": "#6c757d"})
-                    )
-                ai_comment_el = html.Div([
-                    html.Div([
-                        html.I(className="fas fa-robot me-1 text-primary"),
-                        *comment_parts
-                    ])
-                ], className="mb-2 p-2 bg-light rounded")
-
-        # Build card: AI comment + left (chart) + right (KPI table)
+@callback(
+    Output('telemetry-detail-signal-cards', 'children'),
+    [Input('telemetry-detail-signal-selector', 'value'), Input('telemetry-detail-system-selector', 'value'), Input('telemetry-detail-unit-selector', 'value'), Input('client-selector', 'value')],
+)
+def update_signal_cards(signal, system, unit, client):
+    if not signal or not system or not unit or not client:
+        return dbc.Alert("Seleccione una unidad, sistema y señal para ver evidencia.", color="info")
+    try:
+        snapshot = load_telemetry_snapshot(client)
+        rows = build_signal_rows(snapshot, unit, system)
+        row = next((item for item in rows if item['signal_raw'] == signal), None)
+        if row is None:
+            return dbc.Alert("No hay evidencia para la señal seleccionada.", color="info")
+        raw = _load_recent_telemetry_cached(client.lower(), unit, snapshot.cache_key)
+        trend_df = snapshot.trends[(snapshot.trends.get('unit', pd.Series(dtype=str)) == unit) & (snapshot.trends.get('signal', pd.Series(dtype=str)) == signal)] if not snapshot.trends.empty else pd.DataFrame()
+        event_signal_col = 'signal' if 'signal' in snapshot.events.columns else 'feature'
+        event_df = snapshot.events[
+            (snapshot.events.get('unit', pd.Series(dtype=str)) == unit)
+            & (snapshot.events.get(event_signal_col, pd.Series(dtype=str)) == signal)
+        ] if not snapshot.events.empty else pd.DataFrame()
+        figure = build_signal_timeseries_card(signal, raw, snapshot.limits, trend_df, unit, event_df)
+        metadata = snapshot.signal_metadata.get(signal, {})
+        status_color = {'Normal': 'success', 'Alerta': 'warning', 'Anormal': 'danger', 'InsufficientData': 'secondary'}.get(row['status'], 'secondary')
         card = dbc.Card([
             dbc.CardHeader([
-                html.H5([
-                    html.I(className="fas fa-signal me-2"),
-                    display_name
-                ], className="mb-0 d-inline"),
-                dbc.Badge(sig_status, color={
-                    'Normal': 'success', 'Alerta': 'warning',
-                    'Anormal': 'danger'
-                }.get(sig_status, 'secondary'), pill=True, className="ms-2")
-            ], className="bg-light"),
-            dbc.CardBody([
-                ai_comment_el,
-                dbc.Row([
-                    # Time series chart (70%)
-                    dbc.Col([
-                        dcc.Graph(figure=fig, config={'displayModeBar': False})
-                    ], lg=8),
-                    # KPI Table (30%)
-                    dbc.Col([
-                        _kpi_table(kpi)
-                    ], lg=4)
+                    html.Strong(row['signal']),
+                    dbc.Badge(row['status'], color=status_color, pill=True, className="ms-2")
+                ], className="bg-light"),
+                dbc.CardBody([
+                    dbc.Row([
+                        dbc.Col([
+                        html.Div([html.Small("Nombre técnico", className="text-muted d-block"), html.Strong(row.get('signal_raw', '-') or '-')], className="mb-2"),
+                        html.Div([html.Small("Unidad de medida", className="text-muted d-block"), html.Strong(metadata.get('unit', '-') or '-')], className="mb-2"),
+                        html.Div([html.Small("Diagnóstico IA", className="text-muted d-block"), html.Strong(row.get('description', ''))], className="mb-1"),
+                        html.P(row.get('explaining') or "", className="text-muted", style={'whiteSpace': 'pre-wrap'}),
+                        _signal_kpi_table(row),
+                    ], lg=4),
+                    dbc.Col([dcc.Graph(figure=figure, config={'displayModeBar': False})], lg=8)
                 ])
             ])
-        ], className="shadow-sm mb-3", style={"borderLeft": f"4px solid {border_color}"})
-
-        cards.append(card)
-
-    return html.Div(cards) if cards else html.Div(
-        dbc.Alert("No hay señales para mostrar", color="info")
-    )
-
-
-def _build_signal_table_data(deviation_df, unit, system, signal_names_map, signal_comments_map):
-    """Build simplified signal table: signal (display_name) | estado | ai_message."""
-    if deviation_df.empty:
-        return []
-
-    # Reverse-translate system
-    reverse_map = {'Motor': 'Engine', 'Transmisión': 'Transmission',
-                   'Frenos': 'Brakes', 'Dirección': 'Steering'}
-    system_en = reverse_map.get(system, system) if system else None
-
-    dev = deviation_df[deviation_df['unit'] == unit].copy()
-    if system_en:
-        dev = dev[dev['system'] == system_en]
-    if dev.empty:
-        return []
-
-    # Get latest per signal
-    if 'year' in dev.columns and 'week' in dev.columns:
-        dev = dev.sort_values(['year', 'week'], ascending=False).drop_duplicates(subset=['signal'])
-    dev = dev.sort_values('risk_score', ascending=False)
-
-    rows = []
-    for _, row in dev.iterrows():
-        sig = row['signal']
-        display_name = signal_names_map.get(sig, sig)
-        status = row.get('status', 'Normal')
-
-        # Get AI message from comments (description field, fallback to comment)
-        ai_msg = '-'
-        sc_info = signal_comments_map.get(sig)
-        if sc_info:
-            desc = _get_ai_text(sc_info, 'description')
-            if desc:
-                ai_msg = str(desc)
-
-        rows.append({
-            'signal': display_name,
-            'status': status,
-            'ai_message': ai_msg,
-        })
-
-    return rows
-
-
-def _kpi_table(kpi: dict) -> html.Div:
-    """Render KPI metrics as a small table."""
-    rows = [
-        ("Total Eventos", kpi.get('total_events', 0)),
-        ("Warnings", kpi.get('warnings', 0)),
-        ("Episodio Max", f"{kpi.get('longest_episode', 0)} min"),
-        ("Tendencia", kpi.get('trend_detected', 'No')),
-        ("Dirección", kpi.get('trend_direction', '-')),
-        ("Fórmula", kpi.get('trend_formula', '-')),
-    ]
-
-    table_rows = []
-    for label, value in rows:
-        table_rows.append(
-            html.Tr([
-                html.Td(label, style={"fontWeight": "500", "fontSize": "0.85rem", "padding": "6px 8px"}),
-                html.Td(str(value), style={"fontSize": "0.85rem", "padding": "6px 8px", "textAlign": "right"})
-            ])
-        )
-
-    return html.Table(
-        [html.Tbody(table_rows)],
-        className="table table-sm table-borderless mb-0",
-        style={"marginTop": "20px"}
-    )
-
-
-def _load_recent_telemetry(client: str, unit: str, weeks: int = 4) -> pd.DataFrame:
-    """Load recent silver telemetry data for a unit.
-
-    Uses the pipeline manifest (latest.json) to anchor on the correct evaluation
-    week, then loads backwards from there. Falls back to datetime.now() if
-    manifest is unavailable.
-    """
-    manifest = load_telemetry_manifest(client)
-
-    # Determine anchor point
-    if manifest and 'evaluation_week' in manifest and 'evaluation_year' in manifest:
-        anchor_week = manifest['evaluation_week']
-        anchor_year = manifest['evaluation_year']
-        # If manifest provides available weeks, use them directly
-        available_weeks = manifest.get('silver_weeks_available', [])
-        if available_weeks:
-            all_data = []
-            for w in sorted(available_weeks, reverse=True)[:weeks]:
-                week_df = load_silver_telemetry_week(client, w, anchor_year)
-                if not week_df.empty:
-                    unit_df = week_df[week_df['Unit'] == unit]
-                    if not unit_df.empty:
-                        all_data.append(unit_df)
-            if all_data:
-                combined = pd.concat(all_data, ignore_index=True)
-                if 'Fecha' in combined.columns:
-                    combined = combined.sort_values('Fecha')
-                return combined
-    else:
-        anchor_week = datetime.now().isocalendar()[1]
-        anchor_year = datetime.now().isocalendar()[0]
-
-    # Walk backwards from anchor week
-    all_data = []
-    from datetime import date
-    anchor_date = date.fromisocalendar(anchor_year, anchor_week, 1)
-
-    for i in range(weeks + 4):  # Extra buffer to handle gaps
-        target = anchor_date - timedelta(weeks=i)
-        week_num = target.isocalendar()[1]
-        year_num = target.isocalendar()[0]
-
-        week_df = load_silver_telemetry_week(client, week_num, year_num)
-        if not week_df.empty:
-            unit_df = week_df[week_df['Unit'] == unit]
-            if not unit_df.empty:
-                all_data.append(unit_df)
-                if len(all_data) >= weeks:
-                    break
-
-    if not all_data:
-        logger.warning(f"No silver telemetry found for unit={unit} anchored at week {anchor_week}/{anchor_year}")
-        return pd.DataFrame()
-
-    combined = pd.concat(all_data, ignore_index=True)
-    if 'Fecha' in combined.columns:
-        combined = combined.sort_values('Fecha')
-    return combined
+        ], className="shadow-sm mb-3", style={'borderLeft': f"4px solid {STATUS_COLORS.get(row['status'], '#95a5a6')}"})
+        return card
+    except Exception as exc:
+        logger.exception("Error construyendo evidencia de señal: %s", exc)
+        return dbc.Alert(f"Error cargando evidencia: {exc}", color="danger")

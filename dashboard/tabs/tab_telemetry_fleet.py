@@ -2,10 +2,10 @@
 Telemetry Fleet Overview Tab Layout (Page 1).
 
 Answers: "How is my fleet behaving currently?"
-Shows: Fleet status KPIs, system heatmap, priority table, AI assessments.
+Shows: Fleet status KPIs, system heatmap, priority and action table.
 """
 
-from dash import html, dcc, dash_table
+from dash import html, dcc
 import dash_bootstrap_components as dbc
 
 
@@ -13,6 +13,46 @@ def create_telemetry_fleet_layout() -> html.Div:
     """Create fleet overview tab layout."""
 
     return html.Div([
+        # Filters shared by KPIs, heatmap and priority table.
+        dbc.Card([
+            dbc.CardBody([
+                dbc.Row([
+                    dbc.Col([
+                        html.Label("Modelo de equipo", className="small fw-bold"),
+                        dcc.Dropdown(
+                            id='telemetry-fleet-model-filter',
+                            placeholder='Todos los modelos',
+                            clearable=True,
+                            options=[]
+                        )
+                    ], md=4),
+                    dbc.Col([
+                        html.Label("Estado", className="small fw-bold"),
+                        dcc.Dropdown(
+                            id='telemetry-fleet-status-filter',
+                            placeholder='Todos los estados',
+                            multi=True,
+                            options=[
+                                {'label': 'Normal', 'value': 'Normal'},
+                                {'label': 'Alerta', 'value': 'Alerta'},
+                                {'label': 'Anormal', 'value': 'Anormal'},
+                                {'label': 'Sin evidencia suficiente', 'value': 'InsufficientData'},
+                            ]
+                        )
+                    ], md=4),
+                    dbc.Col([
+                        html.Label("Sistemas visibles", className="small fw-bold"),
+                        dcc.Dropdown(
+                            id='telemetry-fleet-system-filter',
+                            placeholder='Todos los sistemas',
+                            multi=True,
+                            options=[]
+                        )
+                    ], md=4),
+                ])
+            ])
+        ], className="shadow-sm mb-4"),
+
         # KPI Cards Row
         html.Div(id='telemetry-fleet-kpi-row'),
 
@@ -21,13 +61,13 @@ def create_telemetry_fleet_layout() -> html.Div:
             dbc.CardHeader([
                 html.H5([
                     html.I(className="fas fa-th me-2"),
-                    "Mapa de Calor — Riesgo por Sistema y Unidad"
+                    "Mapa de Calor — Estado por Sistema y Unidad"
                 ], className="mb-0")
             ], className="bg-light"),
             dbc.CardBody([
                 html.P(
-                    "Comparación del Risk Score por unidad y sistema. "
-                    "Las unidades se ordenan de mayor a menor riesgo agregado.",
+                    "Estado de cada sistema por unidad. "
+                    "Las unidades se ordenan según la prioridad interna ya calculada.",
                     className="text-muted mb-3"
                 ),
                 # Insight KPIs above heatmap
@@ -35,14 +75,14 @@ def create_telemetry_fleet_layout() -> html.Div:
                 # Risk band legend
                 html.Div([
                     html.Small([
-                        html.Span("0–20 ", className="fw-bold", style={"color": "#28a745"}),
-                        html.Span("Bajo", className="me-3"),
-                        html.Span("20–40 ", className="fw-bold", style={"color": "#6c757d"}),
-                        html.Span("Moderado", className="me-3"),
-                        html.Span("40–60 ", className="fw-bold", style={"color": "#f39c12"}),
-                        html.Span("Alto", className="me-3"),
-                        html.Span("60+ ", className="fw-bold", style={"color": "#dc3545"}),
-                        html.Span("Crítico"),
+                        html.Span("Normal", className="fw-bold", style={"color": "#28a745"}),
+                        html.Span(" · ", className="text-muted"),
+                        html.Span("Alerta", className="fw-bold", style={"color": "#856404"}),
+                        html.Span(" · ", className="text-muted"),
+                        html.Span("Anormal", className="fw-bold", style={"color": "#b02a37"}),
+                        html.Span(" · ", className="text-muted"),
+                        html.Span("Gris", className="fw-bold", style={"color": "#95a5a6"}),
+                        html.Span(" sin evidencia suficiente"),
                     ])
                 ], className="text-center mb-2"),
                 dcc.Loading(
@@ -55,13 +95,16 @@ def create_telemetry_fleet_layout() -> html.Div:
             ])
         ], className="shadow-sm mb-4"),
 
-        # AI Assessments Table
+        # Executive priority table
         html.Div([
             html.H4([
-                html.I(className="fas fa-robot me-2"),
-                "Evaluaciones IA"
+                html.I(className="fas fa-list-ol me-2"),
+                "Prioridades y acciones"
             ], className="text-primary mb-3 mt-4 pb-2 border-bottom"),
-            html.P("Resumen ejecutivo generado por IA para cada unidad", className="text-muted mb-3")
+            html.P(
+                "Unidades ordenadas por prioridad. Seleccione una fila para ver el resumen o haga clic en ella/mapa para abrir la evidencia.",
+                className="text-muted mb-3"
+            )
         ]),
         dbc.Card([
             dbc.CardBody([
@@ -70,5 +113,7 @@ def create_telemetry_fleet_layout() -> html.Div:
                     type='circle'
                 )
             ])
-        ], className="shadow-sm mb-4")
+        ], className="shadow-sm mb-4"),
+
+        html.Div(id='telemetry-fleet-selected-unit')
     ])
