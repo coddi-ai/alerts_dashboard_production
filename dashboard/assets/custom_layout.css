@@ -146,3 +146,23 @@
 .card {
     animation: fadeInUp 0.5s ease-out;
 }
+
+/* ========================================
+   CLIENT LOGO STYLING
+   ======================================== */
+
+/* Client logo displayed without background for logos with white elements */
+#client-logo-img {
+    object-fit: contain;
+}
+
+/* Hide broken images - prevents broken icon from showing */
+#client-logo-img[src=""],
+#client-logo-img:not([src]) {
+    display: none !important;
+}
+
+/* Smooth transition when logo appears/disappears */
+#client-logo-img {
+    transition: opacity 0.3s ease;
+}

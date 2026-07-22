@@ -51,7 +51,7 @@ def create_reports_tab() -> dbc.Container:
                 ])
             ], className="mb-2")
         ], style={
-            'position': 'sticky', 'top': '0', 'zIndex': '1000',
+            'position': 'sticky', 'top': '80px', 'zIndex': '999',
             'backgroundColor': '#f8f9fa', 'paddingTop': '10px', 'paddingBottom': '10px'
         }),
 

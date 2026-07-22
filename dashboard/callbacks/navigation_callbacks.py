@@ -4,7 +4,7 @@ Navigation callbacks for multi-section dashboard.
 Handles switching between sections and subsections via left menu.
 """
 
-from dash import Input, Output, State, html, callback_context
+from dash import Input, Output, State, html, callback_context, ClientsideFunction, clientside_callback
 from dash.dependencies import ALL
 import dash
 from pathlib import Path
@@ -270,3 +270,47 @@ def register_navigation_callbacks(app: dash.Dash) -> None:
                 )
         
         return content, button_classes
+    
+    # Callback 3: Update client logo when client selector changes
+    @app.callback(
+        [Output('client-logo-img', 'src'),
+         Output('client-logo-img', 'style')],
+        [Input('client-selector', 'value')],
+        prevent_initial_call=False
+    )
+    def update_client_logo(selected_client):
+        """
+        Update client logo based on selected client.
+        
+        Args:
+            selected_client: Client selected in the dropdown
+        
+        Returns:
+            Tuple of (logo_src, logo_style)
+        """
+        if not selected_client:
+            # No client selected - hide logo
+            return '', {
+                "height": "48px",
+                "width": "auto",
+                "maxWidth": "120px",
+                "padding": "4px 12px",
+                "marginLeft": "12px",
+                "display": "none"
+            }
+        
+        # Construct logo URL - Flask route will serve from dashboard/logos/
+        client_lower = selected_client.lower()
+        logo_url = f'/logos/{client_lower}.png'
+        
+        logger.info(f"Updating client logo for {selected_client}: {logo_url}")
+        
+        # Return URL and style with display:block to show logo
+        return logo_url, {
+            "height": "48px",
+            "width": "auto",
+            "maxWidth": "120px",
+            "padding": "4px 12px",
+            "marginLeft": "12px",
+            "display": "block"
+        }

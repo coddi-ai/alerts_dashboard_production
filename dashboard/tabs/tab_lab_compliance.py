@@ -1,10 +1,12 @@
 """
-Laboratory Compliance Tab — July 2026 v3.
+Laboratory Compliance Tab — July 2026 v4.
 
 KPIs:
 - Transit Time: labDate - sampleDate
 - Lab Time: reportDate - labDate
 - Edge case: if Lab Time has no positive values → show Diagnostic Time (reportDate - sampleDate)
+
+Date Filtering: Uses reportDate as the date reference for period selection.
 
 Visualization: Weekly grouped bar chart (Transit Time vs Lab Time side-by-side).
 """
@@ -22,7 +24,7 @@ def create_lab_compliance_tab() -> dbc.Container:
         # Date Range Filter
         dbc.Row([
             dbc.Col([
-                html.Label("Rango de Fechas (Fecha de Muestra):", className="fw-bold small"),
+                html.Label("Rango de Fechas (Fecha de Reporte):", className="fw-bold small"),
                 dcc.DatePickerRange(
                     id='lab-compliance-date-range',
                     display_format='YYYY-MM-DD',

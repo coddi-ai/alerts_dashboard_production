@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 
 import dash
 import dash_bootstrap_components as dbc
+from flask import send_from_directory
 from dashboard.layout import create_app_layout
 from dashboard.callbacks.auth_callbacks import register_auth_callbacks
 from dashboard.callbacks.navigation_callbacks import register_navigation_callbacks
@@ -105,6 +106,28 @@ app.layout = create_app_layout()
 @app.server.route('/alerts-dashboard/health')
 def health_check():
     return {'status': 'healthy'}, 200
+
+# Add route to serve client logos from dashboard/logos/
+@app.server.route('/logos/<path:filename>')
+def serve_logo(filename):
+    """
+    Serve client logo files from dashboard/logos/ directory.
+    
+    Args:
+        filename: Logo filename (e.g., 'enex.png')
+    
+    Returns:
+        Logo file or 404 if not found
+    """
+    logos_dir = Path(__file__).parent / 'logos'
+    logger.info(f"Serving logo file: {filename} from {logos_dir}")
+    
+    try:
+        return send_from_directory(logos_dir, filename)
+    except FileNotFoundError:
+        logger.warning(f"Logo file not found: {filename}")
+        # Return 404 - the callback will handle hiding the logo
+        return "Logo not found", 404
 
 # Register all callbacks
 register_auth_callbacks(app)

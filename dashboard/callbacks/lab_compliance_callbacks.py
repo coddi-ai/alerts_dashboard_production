@@ -1,9 +1,12 @@
 """
-Lab Compliance callbacks — July 2026 v3.
+Lab Compliance callbacks — July 2026 v4.
 
 KPIs: Transit Time (labDate - sampleDate), Lab Time (reportDate - labDate).
 Edge case: if Lab Time has no positive values → use Diagnostic Time (reportDate - sampleDate).
 Visualization: Weekly grouped bar chart.
+
+Date Filtering: Uses reportDate as the primary date reference for period selection.
+Records without valid reportDate are excluded from filtered results.
 """
 
 from dash import callback, Input, Output, State, no_update
@@ -89,8 +92,13 @@ def init_date_range(active_tab, client):
     if df.empty:
         return no_update, no_update, no_update, no_update
 
-    min_d = df['sampleDate'].min().date()
-    max_d = df['sampleDate'].max().date()
+    # Use reportDate for date range initialization
+    df_with_report_date = df.dropna(subset=['reportDate'])
+    if df_with_report_date.empty:
+        return no_update, no_update, no_update, no_update
+
+    min_d = df_with_report_date['reportDate'].min().date()
+    max_d = df_with_report_date['reportDate'].max().date()
     start = max(min_d, (pd.Timestamp(max_d) - pd.DateOffset(months=6)).date())
     return min_d, max_d, start, max_d
 
@@ -118,10 +126,13 @@ def update_kpis(start_date, end_date, client, active_tab):
     if df.empty:
         return defaults
 
+    # Filter by reportDate instead of sampleDate
+    # Drop records without valid reportDate
+    df = df.dropna(subset=['reportDate'])
     if start_date:
-        df = df[df['sampleDate'] >= pd.Timestamp(start_date)]
+        df = df[df['reportDate'] >= pd.Timestamp(start_date)]
     if end_date:
-        df = df[df['sampleDate'] <= pd.Timestamp(end_date)]
+        df = df[df['reportDate'] <= pd.Timestamp(end_date)]
     if df.empty:
         return defaults
 
@@ -163,14 +174,18 @@ def update_weekly_chart(start_date, end_date, client, active_tab):
     if df.empty:
         return empty, default_title
 
+    # Filter by reportDate instead of sampleDate
+    # Drop records without valid reportDate
+    df = df.dropna(subset=['reportDate'])
     if start_date:
-        df = df[df['sampleDate'] >= pd.Timestamp(start_date)]
+        df = df[df['reportDate'] >= pd.Timestamp(start_date)]
     if end_date:
-        df = df[df['sampleDate'] <= pd.Timestamp(end_date)]
+        df = df[df['reportDate'] <= pd.Timestamp(end_date)]
     if df.empty:
         return empty, default_title
 
-    df['week'] = df['sampleDate'].dt.to_period('W').apply(lambda r: r.start_time)
+    # Group by reportDate week for weekly aggregation
+    df['week'] = df['reportDate'].dt.to_period('W').apply(lambda r: r.start_time)
     use_split = _has_positive_lab_time(df)
 
     fig = go.Figure()
@@ -232,10 +247,13 @@ def update_unit_chart(start_date, end_date, client, active_tab):
     if df.empty:
         return empty
 
+    # Filter by reportDate instead of sampleDate
+    # Drop records without valid reportDate
+    df = df.dropna(subset=['reportDate'])
     if start_date:
-        df = df[df['sampleDate'] >= pd.Timestamp(start_date)]
+        df = df[df['reportDate'] >= pd.Timestamp(start_date)]
     if end_date:
-        df = df[df['sampleDate'] <= pd.Timestamp(end_date)]
+        df = df[df['reportDate'] <= pd.Timestamp(end_date)]
     if df.empty:
         return empty
 

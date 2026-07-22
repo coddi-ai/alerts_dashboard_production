@@ -216,6 +216,7 @@ def create_navbar(user_data: dict, available_clients: list[str] = None) -> html.
                     # Logo and brand section
                     dbc.Col([
                         html.Div([
+                            # CODDI Logo
                             html.Img(
                                 src='https://raw.githubusercontent.com/coddi-ai/tds_alerts_dashboard/refs/heads/dev/dashboard/assets/logo.svg',
                                 style={
@@ -227,6 +228,21 @@ def create_navbar(user_data: dict, available_clients: list[str] = None) -> html.
                                     "boxShadow": "0 2px 4px rgba(0,0,0,0.1)"
                                 }
                             ),
+                            # Client Logo (dynamically loaded)
+                            html.Img(
+                                id='client-logo-img',
+                                src='',
+                                alt='',  # Empty alt to prevent text showing on error
+                                style={
+                                    "height": "48px",
+                                    "width": "auto",
+                                    "maxWidth": "120px",
+                                    "padding": "4px 12px",
+                                    "marginLeft": "12px",
+                                    "display": "none"  # Hidden by default, shown when logo loads successfully
+                                }
+                            ),
+                            # Platform title
                             html.Div([
                                 html.H5(
                                     "Plataforma de Monitoreo Multi-Técnica",
