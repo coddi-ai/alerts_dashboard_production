@@ -460,7 +460,7 @@ def update_unit_detail_header(unit, client, navigation_state):
     if not unit or not client:
         raise PreventUpdate
     try:
-        snapshot = load_telemetry_snapshot(client)
+        snapshot = load_telemetry_snapshot(client, include_detail=True)
         system_rows = build_system_rows(snapshot, unit)
         options = [{'label': row['system'], 'value': row['system']} for row in system_rows]
         requested_system = (navigation_state or {}).get('system') if (navigation_state or {}).get('unit') == unit else None
@@ -481,7 +481,7 @@ def update_selected_system_summary(system, unit, client):
     """Refresh the decision block when the user changes the selected system."""
     if not unit or not system or not client:
         raise PreventUpdate
-    snapshot = load_telemetry_snapshot(client)
+    snapshot = load_telemetry_snapshot(client, include_detail=True)
     rows = build_system_rows(snapshot, unit)
     selected = [row for row in rows if row.get('system') == system]
     selected_row = selected[0] if selected else None
@@ -513,7 +513,7 @@ def update_signal_section(system, unit, client, navigation_state):
     if not unit or not system or not client:
         raise PreventUpdate
     try:
-        snapshot = load_telemetry_snapshot(client)
+        snapshot = load_telemetry_snapshot(client, include_detail=True)
         rows = build_signal_rows(snapshot, unit, system)
         options = [{'label': f"{row['signal']} ({row['status']})", 'value': row['signal_raw']} for row in rows]
         requested = (navigation_state or {}).get('signal') if (navigation_state or {}).get('unit') == unit else None
@@ -628,7 +628,7 @@ def update_signal_cards(signal, system, unit, client):
     if not signal or not system or not unit or not client:
         return dbc.Alert("Seleccione una unidad, sistema y señal para ver evidencia.", color="info")
     try:
-        snapshot = load_telemetry_snapshot(client)
+        snapshot = load_telemetry_snapshot(client, include_detail=True)
         rows = build_signal_rows(snapshot, unit, system)
         row = next((item for item in rows if item['signal_raw'] == signal), None)
         if row is None:

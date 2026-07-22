@@ -96,32 +96,70 @@ def _manifest_cache_key(manifest: Dict[str, Any]) -> str:
 
 
 @lru_cache(maxsize=8)
-def _load_snapshot_cached(client: str, cache_key: str) -> TelemetrySnapshot:
-    manifest = load_telemetry_manifest(client)
+def _load_snapshot_cached(client: str, cache_key: str, include_detail: bool = False) -> TelemetrySnapshot:
+    """Load the light fleet snapshot, optionally enriching it for unit detail.
+
+    The event parquet is the largest telemetry artifact and is not needed for
+    availability, the fleet matrix, or the evaluation header.  Keep those
+    interactions responsive on small production machines by loading only the
+    health and system comment outputs first.  Detail outputs are read only
+    when the user opens a unit/system view; event intervals remain lazy even
+    then and are loaded by the selected signal chart.
+    """
+    if include_detail:
+        # Reuse the already cached light snapshot instead of rereading health
+        # and system comments when a user opens the detail view.
+        base = _load_snapshot_cached(client, cache_key, False)
+    else:
+        manifest = load_telemetry_manifest(client)
+        base = TelemetrySnapshot(
+            client=client,
+            cache_key=cache_key,
+            manifest=manifest,
+            unit_health=_snapshot_copy(load_telemetry_unit_health(client)),
+            system_health=_snapshot_copy(load_telemetry_system_health(client)),
+            deviation=pd.DataFrame(),
+            events=pd.DataFrame(),
+            trends=pd.DataFrame(),
+            limits=pd.DataFrame(),
+            unit_comments=_snapshot_copy(load_telemetry_ai_comments(client, "unit")),
+            system_comments=_snapshot_copy(load_telemetry_ai_comments(client, "system")),
+            signal_comments=pd.DataFrame(),
+            signal_registry=load_signal_registry(client),
+            signal_metadata=_load_signal_metadata(client),
+            equipment_models=_load_equipment_models(client),
+        )
+    if not include_detail:
+        return base
     return TelemetrySnapshot(
-        client=client,
-        cache_key=cache_key,
-        manifest=manifest,
-        unit_health=_snapshot_copy(load_telemetry_unit_health(client)),
-        system_health=_snapshot_copy(load_telemetry_system_health(client)),
-        deviation=_snapshot_copy(load_telemetry_deviation_results(client)),
-        events=_snapshot_copy(load_telemetry_events(client)),
-        trends=_snapshot_copy(load_telemetry_trends(client)),
-        limits=_snapshot_copy(load_telemetry_limits(client)),
-        unit_comments=_snapshot_copy(load_telemetry_ai_comments(client, "unit")),
-        system_comments=_snapshot_copy(load_telemetry_ai_comments(client, "system")),
-        signal_comments=_snapshot_copy(load_telemetry_ai_comments(client, "signal")),
-        signal_registry=load_signal_registry(client),
-        signal_metadata=_load_signal_metadata(client),
-        equipment_models=_load_equipment_models(client),
+        **{
+            **base.__dict__,
+            "deviation": _snapshot_copy(load_telemetry_deviation_results(client)),
+            "trends": _snapshot_copy(load_telemetry_trends(client)),
+            "limits": _snapshot_copy(load_telemetry_limits(client)),
+            "signal_comments": _snapshot_copy(load_telemetry_ai_comments(client, "signal")),
+        }
     )
 
 
-def load_telemetry_snapshot(client: str) -> TelemetrySnapshot:
-    """Load the current materialized snapshot, cached by manifest identity."""
+def load_telemetry_snapshot(client: str, include_detail: bool = False) -> TelemetrySnapshot:
+    """Load the current snapshot, keeping detail artifacts opt-in."""
     normalized = (client or "").lower()
     manifest = load_telemetry_manifest(normalized)
-    return _load_snapshot_cached(normalized, _manifest_cache_key(manifest))
+    return _load_snapshot_cached(normalized, _manifest_cache_key(manifest), include_detail)
+
+
+@lru_cache(maxsize=8)
+def _load_events_cached(client: str, cache_key: str) -> pd.DataFrame:
+    """Load event intervals only when a signal chart requests them."""
+    return _snapshot_copy(load_telemetry_events(client))
+
+
+def _snapshot_events(snapshot: TelemetrySnapshot) -> pd.DataFrame:
+    """Use injected test events or lazily load production event intervals."""
+    if isinstance(snapshot.events, pd.DataFrame) and not snapshot.events.empty:
+        return snapshot.events
+    return _load_events_cached(snapshot.client, snapshot.cache_key)
 
 
 def client_facing_manifest(manifest: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -162,7 +200,7 @@ def _events_for_signal_cached(
     chart.  Cache the filtered slice so the multi-million-row event frame is
     not scanned twice for the same selection.
     """
-    events = load_telemetry_snapshot(client).events
+    events = _snapshot_events(load_telemetry_snapshot(client))
     if events.empty or "unit" not in events.columns:
         return pd.DataFrame()
     signal_col = "signal" if "signal" in events.columns else "feature"
@@ -178,7 +216,7 @@ def _events_for_signal_cached(
 @lru_cache(maxsize=8)
 def _event_stats_cached(client: str, cache_key: str) -> dict:
     """Aggregate event counts once for the current materialized snapshot."""
-    events = load_telemetry_snapshot(client).events
+    events = _snapshot_events(load_telemetry_snapshot(client))
     if events.empty:
         return {}
     feature_col = "feature" if "feature" in events.columns else "signal"
