@@ -109,9 +109,8 @@ def create_machines_tab() -> dbc.Container:
                     type="circle"
                 ),
                 html.Small(
-                    "💡 La columna \"Días\" indica los días desde la última muestra de cada unidad. "
-                    "Verde: < 20 días · Amarillo: 20–40 días · Rojo: > 40 días. "
-                    "Haga clic en una celda de componente para ir al detalle del reporte.",
+                    "💡 Cada celda muestra el estado y los días desde la última muestra: ESTADO - (días). "
+                    "Pase el cursor para ver la recomendación. Haga clic en una celda para ir al detalle del reporte.",
                     className="text-muted d-block mt-2"
                 )
             ])

@@ -68,11 +68,11 @@ class Settings(BaseSettings):
     report_threshold_anormal: int = Field(default=5, description="Report threshold for Anormal (>=)")
     
     # Clients
-    clients: List[str] = Field(default=["CDA", "EMIN", "ENEX"], description="List of client names")
+    clients: List[str] = Field(default=["CDA", "EMIN", "ENEX", "CAPSTONE"], description="List of client names")
     
     # Module access control - clients allowed to access specific modules
     predictive_allowed_clients: List[str] = Field(
-        default=["CDA"],
+        default=["CDA", "CAPSTONE"],
         description="Clients with access to the Predictive module"
     )
     component_hours_allowed_clients: List[str] = Field(
