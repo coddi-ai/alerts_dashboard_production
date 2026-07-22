@@ -6,10 +6,10 @@ interactive filtering, and cross-navigation.
 """
 
 import pandas as pd
-from dash import callback, Input, Output, State, html, dcc, no_update, dash_table
+from dash import callback, clientside_callback, Input, Output, State, html, dcc, no_update, dash_table
 from dash.exceptions import PreventUpdate
 import dash_bootstrap_components as dbc
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 import numpy as np
 import plotly.graph_objects as go
 
@@ -28,6 +28,7 @@ from src.data.loaders import (
 from dashboard.components.alerts_charts import (
     create_alerts_per_unit_chart,
     create_alerts_per_month_chart,
+    create_alerts_per_week_chart,
     create_system_distribution_pie_chart,
     create_oil_radar_chart,
     create_sensor_trends_chart_golden,
@@ -36,8 +37,15 @@ from dashboard.components.alerts_charts import (
 )
 from dashboard.components.alerts_tables import (
     create_alerts_datatable,
-    create_alert_detail_card,
-    create_maintenance_display
+    create_alerts_report_table,
+    create_maintenance_display,
+    parse_ia_message_sections,
+)
+from dashboard.components.alerts_report import (
+    alert_summary,
+    filter_alert_rows,
+    prepare_alert_rows,
+    translate_alert_system,
 )
 from dashboard.tabs.tab_alerts_general import create_summary_stats_display, create_layout as create_general_layout
 from dashboard.tabs.tab_alerts_detail import (
@@ -84,78 +92,6 @@ def render_tab_content(active_tab):
 
 
 # ========================================
-# STORES FOR FILTERING
-# ========================================
-
-# Store for active filters in General tab
-@callback(
-    Output('alerts-filter-store', 'data'),
-    [
-        Input('alerts-unit-distribution-chart', 'clickData'),
-        Input('alerts-month-distribution-chart', 'clickData'),
-        Input('alerts-system-distribution-chart', 'clickData')
-    ],
-    [State('alerts-filter-store', 'data')]
-)
-def update_filters_from_clicks(unit_click, month_click, system_click, current_filters):
-    """
-    Update filter store based on chart clicks.
-    Toggle behavior: clicking the same value again clears that filter.
-    
-    Args:
-        unit_click: Click data from unit distribution chart
-        month_click: Click data from month distribution chart
-        system_click: Click data from system distribution chart
-        current_filters: Current filter state
-    
-    Returns:
-        Updated filters dictionary
-    """
-    from dash import callback_context
-    
-    if not callback_context.triggered:
-        return current_filters or {}
-    
-    filters = current_filters or {}
-    trigger_id = callback_context.triggered[0]['prop_id'].split('.')[0]
-    
-    # Handle unit click - toggle behavior
-    if trigger_id == 'alerts-unit-distribution-chart' and unit_click:
-        unit = unit_click['points'][0]['y']
-        if filters.get('unit') == unit:
-            # Clicking same unit - clear filter
-            filters.pop('unit', None)
-            logger.info(f"Unit filter cleared (was: {unit})")
-        else:
-            filters['unit'] = unit
-            logger.info(f"Unit filter set to: {unit}")
-    
-    # Handle month click - toggle behavior
-    elif trigger_id == 'alerts-month-distribution-chart' and month_click:
-        month = month_click['points'][0]['x']
-        if filters.get('month') == month:
-            # Clicking same month - clear filter
-            filters.pop('month', None)
-            logger.info(f"Month filter cleared (was: {month})")
-        else:
-            filters['month'] = month
-            logger.info(f"Month filter set to: {month}")
-    
-    # Handle system click - toggle behavior
-    elif trigger_id == 'alerts-system-distribution-chart' and system_click:
-        system = system_click['points'][0]['label']
-        if filters.get('sistema') == system:
-            # Clicking same system - clear filter
-            filters.pop('sistema', None)
-            logger.info(f"System filter cleared (was: {system})")
-        else:
-            filters['sistema'] = system
-            logger.info(f"System filter set to: {system}")
-    
-    return filters
-
-
-# ========================================
 # GENERAL TAB CALLBACKS
 # ========================================
 
@@ -165,16 +101,16 @@ def update_filters_from_clicks(unit_click, month_click, system_click, current_fi
         Output('alerts-month-distribution-chart', 'figure'),
         Output('alerts-system-distribution-chart', 'figure'),
         Output('alerts-summary-stats', 'children'),
-        Output('alerts-table-container', 'children')
+        Output('alerts-table-container', 'children'),
+        Output('alerts-general-filter-summary', 'children'),
     ],
     [
         Input('client-selector', 'value'),
-        Input('alerts-filter-store', 'data'),
         Input('alerts-date-range-picker', 'start_date'),
-        Input('alerts-date-range-picker', 'end_date')
+        Input('alerts-date-range-picker', 'end_date'),
     ]
 )
-def update_general_tab(client: str, filters: dict, start_date: str, end_date: str):
+def update_general_tab(client: str, start_date: str, end_date: str):
     """
     Update all components in the General Tab when client changes or filters are applied.
     
@@ -189,9 +125,6 @@ def update_general_tab(client: str, filters: dict, start_date: str, end_date: st
         raise PreventUpdate
     
     logger.info(f"Loading alerts general view for client: {client}")
-    if filters:
-        logger.info(f"Active filters: {filters}")
-    
     # Load alerts data
     alerts_df = load_alerts_data(client)
     
@@ -199,66 +132,95 @@ def update_general_tab(client: str, filters: dict, start_date: str, end_date: st
         logger.warning(f"No alerts data available for client: {client}")
         empty_fig = {'data': [], 'layout': {'title': 'No data available'}}
         empty_alert = dbc.Alert("No hay datos de alertas disponibles", color="warning")
-        return empty_fig, empty_fig, empty_fig, empty_alert, empty_alert
+        return empty_fig, empty_fig, empty_fig, empty_alert, empty_alert, ""
     
     try:
-        # Apply filters if present
-        filtered_df = alerts_df.copy()
-        
-        # Apply date range filter
-        if start_date or end_date:
-            if 'Timestamp' in filtered_df.columns:
-                filtered_df['Timestamp'] = pd.to_datetime(filtered_df['Timestamp'])
-                if start_date:
-                    filtered_df = filtered_df[filtered_df['Timestamp'] >= pd.to_datetime(start_date)]
-                if end_date:
-                    filtered_df = filtered_df[filtered_df['Timestamp'] <= pd.to_datetime(end_date) + pd.Timedelta(days=1)]
-                logger.info(f"After date range filter ({start_date} to {end_date}): {len(filtered_df)} rows")
-        
-        if filters:
-            if 'unit' in filters and filters['unit']:
-                filtered_df = filtered_df[filtered_df['UnitId'] == filters['unit']]
-                logger.info(f"After unit filter: {len(filtered_df)} rows")
-            if 'month' in filters and filters['month']:
-                # Extract year-month for comparison (YYYY-MM format)
-                month_str = str(filters['month'])[:7]  # Take first 7 chars: '2025-01'
-                filtered_df['Month_str'] = filtered_df['Month'].astype(str).str[:7]
-                filtered_df = filtered_df[filtered_df['Month_str'] == month_str]
-                logger.info(f"After month filter ({month_str}): {len(filtered_df)} rows")
-            if 'sistema' in filters and filters['sistema']:
-                filtered_df = filtered_df[filtered_df['sistema'] == filters['sistema']]
-                logger.info(f"After sistema filter: {len(filtered_df)} rows")
-        
+        # Apply the same presentation filter set to KPIs, charts and table.
+        filtered_df = filter_alert_rows(alerts_df, start_date=start_date, end_date=end_date)
+
         if filtered_df.empty:
             logger.warning("No data after applying filters")
             empty_fig = {'data': [], 'layout': {'title': 'No hay datos con los filtros aplicados'}}
             empty_alert = dbc.Alert("No hay datos con los filtros aplicados", color="info")
-            return empty_fig, empty_fig, empty_fig, empty_alert, empty_alert
+            return empty_fig, empty_fig, empty_fig, empty_alert, empty_alert, "No hay alertas para los filtros seleccionados."
         
         # Create charts (using filtered data for visualization) - removed trigger_chart
         unit_chart = create_alerts_per_unit_chart(filtered_df)
-        month_chart = create_alerts_per_month_chart(filtered_df)
+        month_chart = create_alerts_per_week_chart(filtered_df)
         system_chart = create_system_distribution_pie_chart(filtered_df)
         
         # Calculate summary statistics
-        total_alerts = len(filtered_df)
-        total_units = filtered_df['UnitId'].nunique()
-        telemetry_pct = (filtered_df['has_telemetry'].sum() / total_alerts * 100) if total_alerts > 0 else 0
-        oil_pct = (filtered_df['has_tribology'].sum() / total_alerts * 100) if total_alerts > 0 else 0
-        
-        stats = create_summary_stats_display(total_alerts, total_units, telemetry_pct, oil_pct)
+        summary = alert_summary(filtered_df)
+        stats = create_summary_stats_display(summary['total'], summary['units'], mixed_count=summary['mixed'])
         
         # Create table
-        table = create_alerts_datatable(filtered_df)
+        table = create_alerts_report_table(filtered_df)
         
-        logger.info(f"General tab updated successfully with {total_alerts} alerts")
-        return unit_chart, month_chart, system_chart, stats, table
+        latest = summary['latest'].strftime('%d/%m/%Y %H:%M') if pd.notna(summary['latest']) else '-'
+        filter_summary = f"Mostrando {summary['total']} alertas de {summary['units']} unidades · última alerta: {latest}"
+        logger.info(f"General tab updated successfully with {summary['total']} alerts")
+        return unit_chart, month_chart, system_chart, stats, table, filter_summary
     
     except Exception as e:
         logger.error(f"Error updating general tab: {e}")
         error_fig = {'data': [], 'layout': {'title': f'Error: {str(e)}'}}
         error_alert = dbc.Alert(f"Error al cargar datos: {str(e)}", color="danger")
-        return error_fig, error_fig, error_fig, error_alert, error_alert
+        return error_fig, error_fig, error_fig, error_alert, error_alert, f"Error: {str(e)}"
+
+
+@callback(
+    Output('alerts-general-selected-alert', 'children'),
+    Input('alerts-datatable', 'active_cell'),
+    State('alerts-datatable', 'derived_virtual_data'),
+    prevent_initial_call=True,
+)
+def render_selected_alert_summary(active_cell, table_data):
+    """Show a compact decision summary below the executive table."""
+    if not active_cell or not table_data:
+        return html.Div()
+    index = active_cell.get('row', 0)
+    if index >= len(table_data):
+        return html.Div()
+    row = table_data[index]
+    return dbc.Card([
+        dbc.CardHeader([
+            html.I(className='fas fa-bullseye me-2'),
+            f"Resumen de {row.get('ID', '-')}",
+        ]),
+        dbc.CardBody([
+            dbc.Row([
+                dbc.Col([html.Small('Unidad', className='text-muted d-block'), html.Strong(row.get('Unidad', '-'))], md=2),
+                dbc.Col([html.Small('Sistema', className='text-muted d-block'), html.Strong(row.get('Sistema', '-'))], md=2),
+                dbc.Col([html.Small('Fuente', className='text-muted d-block'), html.Strong(row.get('Fuente', '-'))], md=2),
+                dbc.Col([html.Small('Evidencia', className='text-muted d-block'), html.Strong(row.get('Evidencia', '-'))], md=6),
+            ], className='mb-3'),
+            html.Strong(row.get('diagnostico_completo') or row.get('Diagnóstico', 'Sin diagnóstico IA disponible'), className='d-block'),
+            html.P(row.get('causa_completa') or 'Sin causa probable registrada', className='text-muted mt-2 mb-1', style={'whiteSpace': 'pre-wrap'}),
+            html.Div([
+                html.I(className='fas fa-wrench me-1'),
+                html.Strong('Acción: '),
+                row.get('accion_completa') or row.get('Acción', 'Sin acción recomendada registrada'),
+            ], className='text-primary mt-2'),
+            dbc.Button([
+                html.I(className='fas fa-arrow-right me-1'), 'Ver detalle de la alerta'
+            ], id='general-nav-to-detail-button', color='primary', size='sm', className='mt-3'),
+        ]),
+    ], className='shadow-sm', style={'borderLeft': '4px solid #3498db'})
+
+
+@callback(
+    Output('alerts-selected-alert-id', 'data'),
+    Input('alerts-datatable', 'active_cell'),
+    State('alerts-datatable', 'derived_virtual_data'),
+    prevent_initial_call=True,
+)
+def store_selected_alert(active_cell, table_data):
+    if not active_cell or not table_data:
+        raise PreventUpdate
+    index = active_cell.get('row', 0)
+    if index >= len(table_data):
+        raise PreventUpdate
+    return table_data[index].get('ID')
 
 
 @callback(
@@ -268,8 +230,9 @@ def update_general_tab(client: str, filters: dict, start_date: str, end_date: st
     prevent_initial_call=True
 )
 def clear_date_range(_):
-    """Clear the date range picker."""
-    return None, None
+    """Restore the client-facing default of the last four calendar weeks."""
+    today = date.today()
+    return (today - timedelta(days=27)).isoformat(), today.isoformat()
 
 
 @callback(
@@ -311,100 +274,14 @@ def initialize_alert_dropdown(client: str):
         return []
 
 
-@callback(
-    [
-        Output('alerts-internal-tabs', 'value', allow_duplicate=True),
-        Output('alert-selector-dropdown', 'value', allow_duplicate=True)
-    ],
-    [
-        Input('alerts-datatable', 'active_cell')
-    ],
-    [
-        State('alerts-datatable', 'derived_virtual_data')
-    ],
-    prevent_initial_call=True
-)
-def navigate_to_detail_on_row_click(active_cell, derived_data):
-    """
-    Navigate to detail tab when a table cell is clicked.
-    Uses active_cell with derived_virtual_data to handle pagination/filtering.
-    
-    Args:
-        active_cell: Dictionary with 'row' and 'column' keys indicating clicked cell
-        derived_data: Currently visible/filtered table data
-    
-    Returns:
-        Tuple of (tab_value, alert_id)
-    """
-    logger.info(f"[ROW-NAV] NAVIGATE CALLBACK TRIGGERED: active_cell={active_cell}, has_data={bool(derived_data)}")
-    
-    if not active_cell or not derived_data:
-        logger.info("[ROW-NAV] No cell clicked or no data, preventing update")
-        raise PreventUpdate
-    
-    try:
-        # Get the row index from active_cell (refers to currently visible page)
-        row_index = active_cell['row']
-        
-        # Get the selected alert ID from derived data (handles pagination/filtering)
-        selected_fusion_id = derived_data[row_index]['ID']
-        logger.info(f"[ROW-NAV] Row {row_index} clicked! Navigating to detail for alert: {selected_fusion_id}")
-        
-        # Switch to detail tab and set the dropdown value
-        return 'detail', selected_fusion_id
-    
-    except Exception as e:
-        logger.error(f"ERROR navigating to detail from row click: {e}", exc_info=True)
-        raise PreventUpdate
-
-
 # ========================================
 # GENERAL TAB NAVIGATION BUTTON CALLBACKS
 # ========================================
 
 @callback(
-    Output('general-alert-selector', 'options'),
-    [Input('client-selector', 'value')]
-)
-def populate_general_alert_selector(client: str):
-    """
-    Populate the general tab alert selector dropdown with all available alerts.
-    
-    Args:
-        client: Selected client identifier
-    
-    Returns:
-        List of dropdown options
-    """
-    if not client:
-        raise PreventUpdate
-    
-    logger.info(f"Populating general alert selector for client: {client}")
-    
-    alerts_df = load_alerts_data(client)
-    
-    if alerts_df.empty:
-        return []
-    
-    try:
-        # Create dropdown options
-        options = []
-        for _, row in alerts_df.sort_values('Timestamp', ascending=False).iterrows():
-            label = f"{row['FusionID']} | {row['Timestamp'].strftime('%Y-%m-%d %H:%M')} | {row['UnitId']} | {row['componente']}"
-            options.append({'label': label, 'value': row['FusionID']})
-        
-        logger.info(f"General alert selector populated with {len(options)} alerts")
-        return options
-    
-    except Exception as e:
-        logger.error(f"Error populating general alert selector: {e}")
-        return []
-
-
-@callback(
     Output('alerts-navigation-state', 'data'),
     [Input('general-nav-to-detail-button', 'n_clicks')],
-    [State('general-alert-selector', 'value')],
+    [State('alerts-selected-alert-id', 'data')],
     prevent_initial_call=True
 )
 def navigate_to_detail_from_general(n_clicks, selected_alert_id):
@@ -627,6 +504,54 @@ def filter_alert_dropdown_by_criteria(units, sistemas, has_telemetry, has_tribol
         logger.error(f"Error filtering alert dropdown: {e}")
         return []
 
+def _alert_case_header(row: pd.Series) -> html.Div:
+    """Render the single client-facing alert summary and its IA analysis."""
+    prepared = prepare_alert_rows(pd.DataFrame([row])).iloc[0]
+    timestamp = prepared.get('date_display', '-')
+    diagnosis = parse_ia_message_sections(row.get('mensaje_ia', ''))
+
+    def _analysis_block(title, value, icon, color='light'):
+        text = value or 'No disponible'
+        return dbc.Col([
+            html.Div([
+                html.H6([html.I(className=f'fas {icon} me-2'), title], className='mb-2'),
+                html.P(text, className='mb-0', style={'whiteSpace': 'pre-wrap', 'lineHeight': '1.5'}),
+            ], className=f'p-3 bg-{color} rounded h-100')
+        ], md=4)
+
+    return dbc.Card([
+        dbc.CardHeader([
+            html.I(className='fas fa-fingerprint me-2'),
+            html.Strong(f"Alerta {prepared.get('FusionID', '-')}")
+        ], className='bg-light'),
+        dbc.CardBody([
+            dbc.Row([
+                dbc.Col([html.Small('Unidad', className='text-muted d-block'), html.Strong(prepared.get('UnitId', '-'))], md=2),
+                dbc.Col([html.Small('Sistema', className='text-muted d-block'), html.Strong(prepared.get('system_display', '-'))], md=2),
+                dbc.Col([html.Small('Componente', className='text-muted d-block'), html.Strong(prepared.get('componente', '-'))], md=3),
+                dbc.Col([html.Small('Fecha', className='text-muted d-block'), html.Strong(timestamp)], md=3),
+                dbc.Col([html.Small('Fuente', className='text-muted d-block'), html.Strong(prepared.get('source_display', '-'))], md=2),
+            ], className='g-3'),
+            html.Div([
+                html.Strong('Señal / variable: ', className='text-muted'),
+                prepared.get('signal_display', 'Sin señal registrada'),
+                html.Span(' · ', className='text-muted'),
+                html.Strong('Evidencia: ', className='text-muted'),
+                prepared.get('evidence_display', 'Sin evidencia'),
+            ], className='mt-3 small'),
+            html.H5([
+                html.I(className='fas fa-brain me-2'),
+                'Analisis inteligente'
+            ], className='text-primary mt-4 mb-3 pb-2 border-bottom'),
+            dbc.Row([
+                _analysis_block('Diagnostico', diagnosis.get('diagnostico'), 'fa-search', 'light'),
+                _analysis_block('Causa probable', diagnosis.get('causa_probable'), 'fa-project-diagram', 'light'),
+                _analysis_block('Accion recomendada', diagnosis.get('acciones'), 'fa-wrench', 'light'),
+            ], className='g-3'),
+        ])
+    ], className='shadow-sm', style={'borderTop': '3px solid #3498db'})
+
+
 @callback(
     Output('alert-detail-content', 'children'),
     [
@@ -696,19 +621,10 @@ def update_detail_view(dropdown_value, client, nav_data):
         
         logger.info(f"Trigger type: {trigger_type}, Evidence sections - Telemetry: {show_telemetry}, Oil: {show_oil}, Maintenance: {show_maintenance}")
         
-        # Create detail content structure
-        sections = []
-        
-        # 1. Alert Specification Card
-        sections.append(
-            dbc.Row([
-                dbc.Col([
-                    create_alert_detail_card(alert_row)
-                ], md=12)
-            ], className="mb-4")
-        )
-        
-        # 2. Telemetry Evidence (conditional)
+        # Render the alert itself first. Evidence is appended only after the
+        # identity and IA analysis are available, avoiding a graph-first state.
+        sections = [_alert_case_header(alert_row)]
+
         if show_telemetry:
             sections.append(create_telemetry_evidence_section(alert_row, client))
         
@@ -725,6 +641,30 @@ def update_detail_view(dropdown_value, client, nav_data):
     except Exception as e:
         logger.error(f"Error creating detail view: {e}")
         return dbc.Alert(f"Error al cargar detalles: {str(e)}", color="danger")
+
+
+clientside_callback(
+    """
+    function(children) {
+        if (!children) {
+            return window.dash_clientside.no_update;
+        }
+        // The detail content can include large Plotly figures.  Scroll only
+        // after Dash has committed the new content so the alert header is
+        // the first visible element, instead of the browser restoring a
+        // middle-of-page position from the previous alert.
+        window.requestAnimationFrame(function() {
+            window.scrollTo({top: 0, left: 0, behavior: 'auto'});
+            document.documentElement.scrollTop = 0;
+            document.body.scrollTop = 0;
+        });
+        return Date.now();
+    }
+    """,
+    Output('alerts-detail-scroll-trigger', 'data'),
+    Input('alert-detail-content', 'children'),
+    prevent_initial_call=True,
+)
 
 
 def create_telemetry_evidence_section(alert_row: pd.Series, client: str) -> html.Div:

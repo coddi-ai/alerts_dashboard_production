@@ -166,3 +166,21 @@
 #client-logo-img {
     transition: opacity 0.3s ease;
 }
+
+/* Alert detail selector: keep the searchable option list above nearby content
+   without creating a sticky layer that can cover the fixed application banner. */
+.alerts-detail-selector-card {
+    position: relative;
+    z-index: 1;
+}
+
+.alerts-detail-selector-dropdown,
+.alerts-detail-selector-dropdown .Select,
+.alerts-detail-selector-dropdown .Select-control {
+    position: relative;
+    z-index: 2;
+}
+
+.alerts-detail-selector-dropdown .Select-menu-outer {
+    z-index: 10 !important;
+}

@@ -1,9 +1,11 @@
 # Standard color mapping for sistema
 SISTEMA_COLORS = {
-    'Tren de Fuerza': '#1f77b4',
-    'Motor': '#ff7f0e',
-    'Frenos': '#2ca02c',
-    'Direccion': '#d62728',
+    'Tren de Fuerza': '#4f8a8b',
+    'Tren de fuerza': '#4f8a8b',
+    'Motor': '#355c7d',
+    'Frenos': '#d08c60',
+    'Direccion': '#7c6a9a',
+    'Dirección': '#7c6a9a',
 }
 """
 Chart components for Alerts Dashboard.
@@ -43,6 +45,25 @@ FEATURE_NAMES_ES = {
     "RtExhTemp": 'Temperatura del escape derecho del motor',
     "LtExhTemp": 'Temperatura del escape izquierdo del motor',
     "AirFltr": 'Estado del filtro de aire del motor',
+    "LckupSlip": 'Deslizamiento del embrague de bloqueo',
+    "TrnSlip": 'Deslizamiento de la transmisión',
+    # Variables de tribología que pueden aparecer junto a una señal de
+    # telemetría en una alerta mixta.
+    "Hierro": 'Hierro',
+    "Aluminio": 'Aluminio',
+    "Zinc": 'Zinc',
+    "Calcio": 'Calcio',
+    "Fósforo": 'Fósforo',
+    "Índice PQ": 'Índice PQ',
+    "Oxidación": 'Oxidación',
+    "Hollín": 'Hollín',
+    "Silicio": 'Silicio',
+    "Potasio": 'Potasio',
+    "Níquel": 'Níquel',
+    "Cobre": 'Cobre',
+    "Cromo": 'Cromo',
+    "Plomo": 'Plomo',
+    "Estaño": 'Estaño',
     "DiffLubePres": 'Presión del lubricante del diferencial',
     "DiffTemp": 'Temperatura del diferencial',
     "TrnLubeTemp": 'Temperatura del lubricante de la transmisión',
@@ -200,6 +221,43 @@ def create_alerts_per_month_chart(alerts_df: pd.DataFrame) -> go.Figure:
             xref="paper", yref="paper",
             x=0.5, y=0.5, showarrow=False
         )
+
+
+def create_alerts_per_week_chart(alerts_df: pd.DataFrame) -> go.Figure:
+    """Create a weekly stacked alert evolution chart."""
+    if alerts_df is None or alerts_df.empty:
+        return go.Figure().add_annotation(text="No hay alertas para el período", x=0.5, y=0.5, showarrow=False)
+    frame = alerts_df.copy()
+    timestamp = pd.to_datetime(frame.get('Timestamp'), errors='coerce')
+    frame = frame.loc[timestamp.notna()].copy()
+    frame['_week_start'] = timestamp.loc[frame.index].dt.to_period('W-SUN').dt.start_time
+    frame['_system_display'] = frame.get('sistema', '').map(lambda value: {
+        'Direccion': 'Dirección', 'Dirección': 'Dirección', 'Tren de Fuerza': 'Tren de fuerza'
+    }.get(value, value))
+    grouped = frame.groupby(['_week_start', '_system_display']).size().reset_index(name='Count')
+    weeks = pd.date_range(frame['_week_start'].min(), frame['_week_start'].max(), freq='7D')
+    systems = sorted(frame['_system_display'].dropna().unique())
+    full = pd.MultiIndex.from_product([weeks, systems], names=['_week_start', '_system_display']).to_frame(index=False)
+    grouped = full.merge(grouped, how='left', on=['_week_start', '_system_display']).fillna({'Count': 0})
+    grouped['Semana'] = grouped['_week_start'].dt.strftime('%d/%m')
+    fig = px.bar(
+        grouped,
+        x='Semana',
+        y='Count',
+        color='_system_display',
+        barmode='stack',
+        labels={'Semana': 'Semana iniciada', 'Count': 'Alertas', '_system_display': 'Sistema'},
+        color_discrete_map=SISTEMA_COLORS,
+        template='plotly_white',
+        height=360,
+    )
+    fig.update_traces(hovertemplate='<b>%{fullData.name}</b><br>Semana: %{x}<br>Alertas: %{y}<extra></extra>')
+    fig.update_layout(
+        margin=dict(l=45, r=15, t=18, b=55),
+        legend=dict(orientation='h', y=1.08, x=1, xanchor='right', yanchor='bottom', font=dict(size=10)),
+        hovermode='x unified',
+    )
+    return fig
 
 
 def create_trigger_distribution_treemap(alerts_df: pd.DataFrame) -> go.Figure:
