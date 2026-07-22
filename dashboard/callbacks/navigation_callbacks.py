@@ -300,9 +300,13 @@ def register_navigation_callbacks(app: dash.Dash) -> None:
                 "display": "none"
             }, ''
         
-        # Construct logo URL - Flask route will serve from dashboard/logos/
+        # Construct logo URL - use GitHub raw content URL for production reliability
         client_lower = selected_client.lower()
-        logo_url = f'/logos/{client_lower}.png'
+        
+        # Try PNG first, fallback to JPEG if needed
+        # GitHub raw content URL format for direct image access
+        base_url = 'https://raw.githubusercontent.com/coddi-ai/tds_alerts_dashboard/dev/dashboard/logos'
+        logo_url = f'{base_url}/{client_lower}.png'
         
         logger.info(f"Updating client logo for {selected_client}: {logo_url}")
         

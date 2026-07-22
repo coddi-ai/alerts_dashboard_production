@@ -30,4 +30,10 @@ or
 
 ## Usage
 
-Logos are loaded dynamically based on the active client selection. When a client is selected, the dashboard attempts to load the corresponding logo file. If no logo exists, the header continues to display normally without the client logo.
+Logos are loaded dynamically from GitHub using raw content URLs based on the active client selection. When a client is selected, the dashboard loads the logo from:
+
+```
+https://raw.githubusercontent.com/coddi-ai/tds_alerts_dashboard/dev/dashboard/logos/{client_name_lowercase}.png
+```
+
+This approach ensures logos are accessible in all environments (local development and production) without requiring additional server-side file serving configuration. If no logo exists in the repository, the header continues to display normally without the client logo.
