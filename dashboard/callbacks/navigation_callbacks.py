@@ -274,7 +274,8 @@ def register_navigation_callbacks(app: dash.Dash) -> None:
     # Callback 3: Update client logo when client selector changes
     @app.callback(
         [Output('client-logo-img', 'src'),
-         Output('client-logo-img', 'style')],
+         Output('client-logo-img', 'style'),
+         Output('client-logo-img', 'className')],
         [Input('client-selector', 'value')],
         prevent_initial_call=False
     )
@@ -286,7 +287,7 @@ def register_navigation_callbacks(app: dash.Dash) -> None:
             selected_client: Client selected in the dropdown
         
         Returns:
-            Tuple of (logo_src, logo_style)
+            Tuple of (logo_src, logo_style, logo_className)
         """
         if not selected_client:
             # No client selected - hide logo
@@ -297,7 +298,7 @@ def register_navigation_callbacks(app: dash.Dash) -> None:
                 "padding": "4px 12px",
                 "marginLeft": "12px",
                 "display": "none"
-            }
+            }, ''
         
         # Construct logo URL - Flask route will serve from dashboard/logos/
         client_lower = selected_client.lower()
@@ -305,7 +306,11 @@ def register_navigation_callbacks(app: dash.Dash) -> None:
         
         logger.info(f"Updating client logo for {selected_client}: {logo_url}")
         
-        # Return URL and style with display:block to show logo
+        # Add client-specific class for conditional styling
+        # ENEX logo doesn't need white background, others do
+        client_class = f'client-logo client-logo-{client_lower}'
+        
+        # Return URL, style, and className
         return logo_url, {
             "height": "48px",
             "width": "auto",
@@ -313,4 +318,4 @@ def register_navigation_callbacks(app: dash.Dash) -> None:
             "padding": "4px 12px",
             "marginLeft": "12px",
             "display": "block"
-        }
+        }, client_class

@@ -23,7 +23,10 @@ or
 - **Format**: PNG or JPEG
 - **Recommended height**: 48-64px (logos are scaled to fit header)
 - **Aspect ratio**: Preserved automatically
-- **Background**: Displayed directly on dark header (#1a252f) - works well with white or light-colored logos
+- **Background styling**: 
+  - **ENEX**: Displayed directly on dark header (#1a252f) with no background box
+  - **Other clients (CDA, EMIN, etc.)**: White background box with rounded corners and shadow
+- **Color**: White or light-colored logos work well for ENEX; other clients can use any color
 
 ## Usage
 

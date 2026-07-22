@@ -56,8 +56,10 @@ dashboard/logos/
 - Format: PNG or JPEG
 - Height: 48-64px recommended
 - Width: Auto-scaled to maintain aspect ratio (max 120px)
-- Background: Displayed directly on dark header background (#1a252f)
-- Color: White or light-colored logos work best on the dark header
+- Background styling:
+  - **ENEX**: No background box (transparent, displays on dark header)
+  - **Other clients**: White background box with rounded corners and shadow
+- Color: White/light logos work for ENEX; any color works for other clients with white background
 
 ### 2. Start the Application
 
@@ -96,7 +98,8 @@ Check the following visual aspects:
 - [ ] Client logo appears next to CODDI logo (not next to title)
 - [ ] Logo is vertically centered in header
 - [ ] Logo maintains proper spacing (12px margin-left)
-- [ ] Logo is displayed directly on dark header background
+- [ ] **ENEX logo**: Displayed directly on dark header (no background box)
+- [ ] **Other client logos (CDA, EMIN)**: White background box with rounded corners and shadow
 - [ ] White/light-colored logo elements are clearly visible
 - [ ] No broken image icon appears for missing logos
 - [ ] Header layout remains aligned and responsive
