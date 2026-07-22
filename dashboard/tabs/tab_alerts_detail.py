@@ -136,7 +136,8 @@ def create_layout() -> html.Div:
                             id='alert-selector-dropdown',
                             placeholder="Buscar por ID, unidad, sistema...",
                             clearable=True,
-                            searchable=True
+                            searchable=True,
+                            className='alerts-detail-selector-dropdown'
                         )
                     ], md=12)
                 ]),
@@ -147,11 +148,8 @@ def create_layout() -> html.Div:
                     ], className="text-muted mt-2 d-block")
                 ])
             ])
-        ], className="shadow-sm mb-4"),
+        ], className="alerts-detail-selector-card shadow-sm mb-4"),
         
-        # Fixed case identity keeps the selected alert visible while reviewing evidence.
-        html.Div(id='alerts-detail-case-header', className='mb-4'),
-
         # Loading indicator
         dcc.Loading(
             id="loading-alert-detail",

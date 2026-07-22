@@ -61,7 +61,11 @@ def create_layout() -> html.Div:
         html.Div(id='alerts-tab-content'),
         
         # Store for filters (used in General tab)
-        dcc.Store(id='alerts-filter-store', storage_type='memory', data={})
+        dcc.Store(id='alerts-filter-store', storage_type='memory', data={}),
+
+        # Trigger used by the clientside scroll-to-top callback when a new
+        # alert detail has finished rendering.
+        dcc.Store(id='alerts-detail-scroll-trigger', storage_type='memory', data=0)
         
     ], className="container-fluid p-4")
     

@@ -89,7 +89,6 @@ def prepare_alert_rows(alerts_df: pd.DataFrame) -> pd.DataFrame:
     sections = frame.get("mensaje_ia", pd.Series("", index=frame.index)).map(_message_sections)
     frame["diagnosis_display"] = sections.map(lambda item: item.get("diagnostico") or "Sin diagnóstico IA disponible")
     frame["cause_display"] = sections.map(lambda item: item.get("causa_probable") or "Sin causa probable registrada")
-    frame["risk_display"] = sections.map(lambda item: item.get("nivel_riesgo") or "Sin clasificación")
     frame["action_display"] = sections.map(lambda item: item.get("acciones") or "Sin acción recomendada registrada")
     frame["evidence_display"] = frame.apply(_evidence_label, axis=1)
     frame["date_display"] = frame["Timestamp"].dt.strftime("%d/%m/%Y %H:%M") if "Timestamp" in frame.columns else "-"

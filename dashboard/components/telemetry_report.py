@@ -149,6 +149,61 @@ def _latest_per_signal(df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
+@lru_cache(maxsize=32)
+def _events_for_signal_cached(
+    client: str,
+    cache_key: str,
+    unit: str,
+    signal: str,
+) -> pd.DataFrame:
+    """Return materialized event intervals for one unit/signal.
+
+    Signal evidence is requested by both the signal table and the selected
+    chart.  Cache the filtered slice so the multi-million-row event frame is
+    not scanned twice for the same selection.
+    """
+    events = load_telemetry_snapshot(client).events
+    if events.empty or "unit" not in events.columns:
+        return pd.DataFrame()
+    signal_col = "signal" if "signal" in events.columns else "feature"
+    if signal_col not in events.columns:
+        return pd.DataFrame()
+    mask = (
+        events["unit"].astype(str).eq(str(unit))
+        & events[signal_col].astype(str).str.strip().str.casefold().eq(str(signal).strip().casefold())
+    )
+    return events.loc[mask].copy()
+
+
+@lru_cache(maxsize=8)
+def _event_stats_cached(client: str, cache_key: str) -> dict:
+    """Aggregate event counts once for the current materialized snapshot."""
+    events = load_telemetry_snapshot(client).events
+    if events.empty:
+        return {}
+    feature_col = "feature" if "feature" in events.columns else "signal"
+    if "unit" not in events.columns or feature_col not in events.columns:
+        return {}
+    columns = [
+        column for column in (
+            "unit", feature_col, "event_id", "event_type_weighted", "duration_minutes"
+        ) if column in events.columns
+    ]
+    frame = events[columns].copy()
+    frame["__signal_key"] = frame[feature_col].astype(str).str.strip().str.casefold()
+    frame["__warning"] = frame.get(
+        "event_type_weighted", pd.Series("", index=frame.index)
+    ).astype(str).str.casefold().eq("warning")
+    grouped = frame.groupby(["unit", "__signal_key"], sort=False)
+    stats = grouped.size().rename("total_events").to_frame()
+    if "event_id" in frame.columns:
+        stats["total_events"] = grouped["event_id"].nunique()
+    stats["warnings"] = grouped["__warning"].sum()
+    if "duration_minutes" in frame.columns:
+        stats["longest_episode"] = grouped["duration_minutes"].max()
+    return stats.to_dict("index")
+
+
 def filter_fleet_snapshot(
     snapshot: TelemetrySnapshot,
     model: Optional[str] = None,
@@ -273,6 +328,73 @@ def _comment_row(df: pd.DataFrame, key: str, value: Any, **filters: Any) -> Opti
     return rows.iloc[0] if not rows.empty else None
 
 
+_SIGNAL_STATUSES = {"Normal", "Alerta", "Anormal", "InsufficientData"}
+
+
+def _materialized_signal_status(
+    snapshot: TelemetrySnapshot,
+    unit: str,
+    raw_system: str,
+    signal: str,
+    fallback_status: Any,
+    reference_row: Any = None,
+) -> str:
+    """Return the status from the same materialized evaluation as the system.
+
+    ``deviation_summary`` and ``ai_signal_comments`` are both pipeline outputs,
+    but they can be written a few minutes apart.  The system card is based on
+    ``system_health`` while the signal table historically used only
+    ``deviation_summary``.  When a current signal comment is available, use its
+    materialized status so the two views cannot disagree for the same signal.
+    Older comments from a previous run are ignored when an evaluation timestamp
+    is available; the deviation status remains the safe fallback.
+    """
+    fallback = str(fallback_status or "InsufficientData")
+    if fallback not in _SIGNAL_STATUSES:
+        fallback = "InsufficientData"
+    comment = _comment_row(
+        snapshot.signal_comments,
+        "signal",
+        signal,
+        unit=unit,
+        system=raw_system,
+    )
+    comment_status = _text(comment, "status")
+    if comment is None or comment_status not in _SIGNAL_STATUSES:
+        return fallback
+
+    # Prefer the comment only when it belongs to the manifest period.  This is
+    # also a guard for legacy rows that do not carry an execution timestamp.
+    comment_year = _text(comment, "evaluation_year", "year")
+    comment_week = _text(comment, "evaluation_week", "week")
+    manifest_year = _text(snapshot.manifest, "evaluation_year")
+    manifest_week = _text(snapshot.manifest, "evaluation_week")
+    if (
+        comment_year and comment_week and manifest_year and manifest_week
+        and (str(comment_year), str(comment_week)) != (str(manifest_year), str(manifest_week))
+    ):
+        return fallback
+
+    # The AI comment may be generated shortly after system_health.  Accept it
+    # only when it belongs to that same evaluation; this prevents an old partial
+    # run from changing the status shown for a current signal.
+    comment_ts = pd.to_datetime(
+        _text(comment, "evaluation_timestamp", "execution_timestamp"),
+        errors="coerce",
+        utc=True,
+    )
+    reference_ts = pd.to_datetime(
+        _text(reference_row, "evaluation_timestamp", "execution_timestamp")
+        or _text(snapshot.manifest, "execution_timestamp"),
+        errors="coerce",
+        utc=True,
+    )
+    if pd.notna(comment_ts) and pd.notna(reference_ts):
+        if abs(comment_ts - reference_ts) > pd.Timedelta(minutes=15):
+            return fallback
+    return comment_status
+
+
 def build_fleet_priority_rows(
     snapshot: TelemetrySnapshot,
     unit_health: Optional[pd.DataFrame] = None,
@@ -321,6 +443,80 @@ def build_fleet_priority_rows(
     return rows
 
 
+def build_fleet_matrix_rows(
+    snapshot: TelemetrySnapshot,
+    unit_health: Optional[pd.DataFrame] = None,
+    system_health: Optional[pd.DataFrame] = None,
+    visible_systems: Optional[list[str]] = None,
+) -> tuple[list[dict], list[str]]:
+    """Build the single fleet matrix used by the client-facing fleet report.
+
+    Internal scores are used only to order rows.  Every system cell keeps the
+    materialized state and its system-level IA action in a tooltip, matching the
+    compact component matrix used by the oil report.
+    """
+    units = (unit_health if unit_health is not None else snapshot.unit_health).copy()
+    systems = (system_health if system_health is not None else snapshot.system_health).copy()
+    if units.empty:
+        return [], []
+
+    all_systems = sorted({translate_system(value) for value in systems.get("system", pd.Series(dtype=str)).dropna()})
+    selected = [value for value in (visible_systems or all_systems) if value in all_systems]
+    if not selected:
+        selected = all_systems
+
+    status_order = {"InsufficientData": 0, "Normal": 1, "Alerta": 2, "Anormal": 3}
+    units["_severity"] = units.get("overall_status", pd.Series("InsufficientData", index=units.index)).map(status_order).fillna(0)
+    units = units.sort_values(
+        ["_severity", "priority_score"] if "priority_score" in units.columns else ["_severity"],
+        ascending=[False, False] if "priority_score" in units.columns else [False],
+        na_position="last",
+    )
+
+    system_lookup = {}
+    for _, row in systems.iterrows():
+        unit = row.get("unit")
+        display = translate_system(row.get("system", ""))
+        if unit and display:
+            comment = _comment_row(snapshot.system_comments, "system", row.get("system"), unit=unit)
+            system_lookup[(unit, display)] = {
+                "status": row.get("system_status", "InsufficientData"),
+                "action": _comment_text(comment, snapshot.signal_registry, "recommended_action")
+                    or "Sin acción recomendada registrada.",
+                "raw": row.get("system", ""),
+                "score": float(row.get("system_score", 0) or 0),
+            }
+
+    rows = []
+    for _, unit_row in units.iterrows():
+        unit = unit_row.get("unit", "")
+        item = {
+            "unit": unit,
+            "model": snapshot.equipment_models.get(unit, "N/D"),
+            "overall_status": unit_row.get("overall_status", "InsufficientData"),
+            "_system_map": {},
+            "_system_actions": {},
+        }
+        for display in selected:
+            cell = system_lookup.get((unit, display), {
+                "status": "InsufficientData",
+                "action": "Sin evidencia de sistema disponible.",
+                "raw": "",
+                "score": 0,
+            })
+            item[display] = cell["status"]
+            item["_system_map"][display] = cell["raw"]
+            item["_system_actions"][display] = cell["action"]
+        top = max(
+            (system_lookup.get((unit, display)) for display in all_systems),
+            key=lambda value: (status_order.get(value.get("status"), 0), value.get("score", 0)) if value else (0, 0),
+            default=None,
+        )
+        item["_top_system_raw"] = top.get("raw", "") if top else ""
+        rows.append(item)
+    return rows, selected
+
+
 def build_system_rows(snapshot: TelemetrySnapshot, unit: str) -> list[dict]:
     """Build system rows with existing score, confidence and signal evidence."""
     if snapshot.system_health.empty or "unit" not in snapshot.system_health.columns:
@@ -333,7 +529,18 @@ def build_system_rows(snapshot: TelemetrySnapshot, unit: str) -> list[dict]:
     for _, row in systems.sort_values("system_score", ascending=False, na_position="last").iterrows():
         raw_system = row.get("system", "")
         system_dev = deviation[(deviation.get("unit", pd.Series(dtype=str)) == unit) & (deviation.get("system", pd.Series(dtype=str)) == raw_system)] if not deviation.empty else pd.DataFrame()
-        alert_count = int(system_dev.get("status", pd.Series(dtype=str)).isin(["Alerta", "Anormal"]).sum()) if not system_dev.empty else 0
+        alert_count = 0
+        if not system_dev.empty:
+            for _, signal_row in system_dev.iterrows():
+                signal_status = _materialized_signal_status(
+                    snapshot,
+                    unit,
+                    raw_system,
+                    signal_row.get("signal", ""),
+                    signal_row.get("status", "InsufficientData"),
+                    reference_row=row,
+                )
+                alert_count += int(signal_status in {"Alerta", "Anormal"})
         comment = _comment_row(snapshot.system_comments, "system", raw_system, unit=unit)
         rows.append({
             "system": translate_system(raw_system),
@@ -363,32 +570,44 @@ def build_signal_rows(snapshot: TelemetrySnapshot, unit: str, system: str) -> li
     dev = _latest_per_signal(dev)
     if dev.empty:
         return []
-    events = snapshot.events.copy()
-    feature_col = "feature" if "feature" in events.columns else "signal"
     trends = snapshot.trends.copy()
+    event_stats = _event_stats_cached(snapshot.client, snapshot.cache_key)
+    system_health = snapshot.system_health[
+        (snapshot.system_health.get("unit", pd.Series(dtype=str)) == unit)
+        & (snapshot.system_health.get("system", pd.Series(dtype=str)) == raw_system)
+    ] if not snapshot.system_health.empty else pd.DataFrame()
+    system_health_row = system_health.iloc[0] if not system_health.empty else None
     rows = []
     for _, row in dev.sort_values("risk_score", ascending=False, na_position="last").iterrows():
         signal = row.get("signal", "")
-        event_rows = events[(events.get("unit", pd.Series(dtype=str)) == unit) & (events.get(feature_col, pd.Series(dtype=str)) == signal)] if not events.empty else pd.DataFrame()
+        stats = event_stats.get((unit, str(signal).strip().casefold()), {})
         trend_rows = trends[(trends.get("unit", pd.Series(dtype=str)) == unit) & (trends.get("signal", pd.Series(dtype=str)) == signal)] if not trends.empty else pd.DataFrame()
         if not trend_rows.empty and {"is_significant", "is_good_fit"}.issubset(trend_rows.columns):
             good_trends = trend_rows[(trend_rows["is_significant"] == True) & (trend_rows["is_good_fit"] == True)]
         else:
             good_trends = pd.DataFrame()
         best_trend = good_trends.sort_values("r2", ascending=False).iloc[0] if not good_trends.empty else None
-        comment = _comment_row(snapshot.signal_comments, "signal", signal, unit=unit)
+        comment = _comment_row(snapshot.signal_comments, "signal", signal, unit=unit, system=raw_system)
+        display_status = _materialized_signal_status(
+            snapshot,
+            unit,
+            raw_system,
+            signal,
+            row.get("status", "InsufficientData"),
+            reference_row=system_health_row,
+        )
         rows.append({
             "signal": snapshot.signal_registry.get(signal, translate_signal(signal)),
             "signal_raw": signal,
-            "status": row.get("status", "InsufficientData"),
+            "status": display_status,
             "risk_score": round(float(row.get("risk_score", 0) or 0), 1),
             "confidence_score": round(float(row.get("confidence_score", 0) or 0), 1),
             "abnormal_pct": round(float(row.get("abnormal_pct", 0) or 0), 2),
             "abnormal_pct_display": f"{float(row.get('abnormal_pct', 0) or 0):.2f}%",
             "total_minutes_evaluated": row.get("total_minutes_evaluated", 0),
-            "total_events": int(event_rows["event_id"].nunique()) if not event_rows.empty and "event_id" in event_rows.columns else len(event_rows),
-            "warnings": int((event_rows.get("event_type_weighted", pd.Series(dtype=str)) == "warning").sum()) if not event_rows.empty else 0,
-            "longest_episode": int(event_rows.get("duration_minutes", pd.Series(dtype=float)).max()) if not event_rows.empty and event_rows.get("duration_minutes", pd.Series(dtype=float)).notna().any() else 0,
+            "total_events": int(stats.get("total_events", 0) or 0),
+            "warnings": int(stats.get("warnings", 0) or 0),
+            "longest_episode": int(stats.get("longest_episode", 0) or 0),
             "trend_detected": "Sí" if best_trend is not None else "No",
             "trend_direction": translate_trend(best_trend.get("trend_interpretation", "-")) if best_trend is not None else "-",
             "trend_formula": f"{float(best_trend.get('slope_per_day', 0)):+.2f}/día (R²={float(best_trend.get('r2', 0)):.2f})" if best_trend is not None else "-",

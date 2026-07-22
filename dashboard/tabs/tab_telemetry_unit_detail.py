@@ -1,185 +1,131 @@
-"""Telemetry unit detail report layout."""
+"""Hierarchical telemetry unit detail layout."""
 
 from dash import html, dcc, dash_table
 import dash_bootstrap_components as dbc
 
 
+_STATE_RULES = [
+    {"if": {"filter_query": '{system_status} = "Anormal"'}, "backgroundColor": "rgba(220,53,69,.10)", "color": "#b42318", "fontWeight": "600"},
+    {"if": {"filter_query": '{system_status} = "Alerta"'}, "backgroundColor": "rgba(245,158,11,.12)", "color": "#8a5a00", "fontWeight": "600"},
+    {"if": {"filter_query": '{system_status} = "InsufficientData"'}, "backgroundColor": "rgba(149,165,166,.15)", "color": "#657174"},
+    {"if": {"filter_query": '{system_status} = "Normal"'}, "color": "#247a3d"},
+]
+
+
 def create_telemetry_unit_detail_layout() -> html.Div:
-    """Create a report-style unit detail view with progressive evidence."""
+    """Create the unit -> system -> signal report flow."""
     return html.Div([
         dbc.Card([
             dbc.CardHeader([
-                html.H5([
-                    html.I(className="fas fa-fingerprint me-2"),
-                    "Identidad del caso"
-                ], className="mb-0")
+                html.H5([html.I(className="fas fa-fingerprint me-2"), "Resumen de la unidad"], className="mb-0")
             ], className="bg-light"),
             dbc.CardBody([
                 dbc.Row([
                     dbc.Col([
                         html.Label("Unidad", className="fw-bold small"),
                         dcc.Dropdown(
-                            id='telemetry-detail-unit-selector',
+                            id="telemetry-detail-unit-selector",
                             placeholder="Seleccione una unidad...",
                             clearable=False,
-                            searchable=True
-                        )
+                            searchable=True,
+                        ),
                     ], md=4),
                     dbc.Col([
-                        html.Label("Sistema", className="fw-bold small"),
-                        dcc.Dropdown(
-                            id='telemetry-detail-system-selector',
-                            placeholder="Seleccione un sistema...",
-                            clearable=False
-                        )
-                    ], md=4),
-                    dbc.Col([
-                        html.Label("Señal", className="fw-bold small"),
-                        dcc.Dropdown(
-                            id='telemetry-detail-signal-selector',
-                            placeholder="Seleccione una señal...",
-                            clearable=False
-                        )
-                    ], md=4),
+                        html.Div("Caso seleccionado", className="small text-muted fw-bold"),
+                        html.Div("El estado y la recomendación corresponden a la unidad completa.", className="small text-muted mt-1"),
+                    ], md=8),
                 ]),
-                html.Div(id='telemetry-detail-identity-display', className="mt-3 text-muted small")
-            ])
-        ], className="shadow-sm mb-4", style={'position': 'sticky', 'top': '0', 'zIndex': 1000}),
-
-        html.Div(id='telemetry-detail-ai-comment'),
+                html.Div(id="telemetry-detail-ai-comment", className="mt-3"),
+            ]),
+        ], className="shadow-sm mb-4"),
 
         html.Div([
-            html.H4([
-                html.I(className="fas fa-cogs me-2"),
-                "Estado de los sistemas"
-            ], className="text-primary mb-3 mt-4 pb-2 border-bottom"),
-            html.P("Estado, señales con hallazgo y señal principal de cada sistema", className="text-muted mb-3")
+            html.H4([html.I(className="fas fa-cogs me-2"), "Estado por sistema"], className="text-primary mb-2 mt-4 pb-2 border-bottom"),
+            html.P("Revise el estado de todos los sistemas y seleccione uno para ver su evaluación IA.", className="text-muted mb-3"),
         ]),
         dbc.Card([
             dbc.CardBody([
+                dbc.Row([
+                    dbc.Col(html.Label("Sistema seleccionado", className="small fw-bold"), md=3),
+                    dbc.Col(dcc.Dropdown(id="telemetry-detail-system-selector", placeholder="Seleccione un sistema...", clearable=False), md=9),
+                ], className="align-items-center mb-3"),
                 dcc.Loading(
                     dash_table.DataTable(
-                        id='telemetry-detail-system-table',
+                        id="telemetry-detail-system-table",
                         columns=[
-                            {'name': 'Sistema', 'id': 'system'},
-                            {'name': 'Estado', 'id': 'system_status'},
-                            {'name': 'Señales con hallazgo', 'id': 'signals_in_alert', 'type': 'numeric'},
-                            {'name': 'Señal Principal', 'id': 'top_signal_display'},
+                            {"name": "Sistema", "id": "system"},
+                            {"name": "Estado", "id": "system_status"},
+                            {"name": "Señales afectadas", "id": "signals_in_alert", "type": "numeric"},
+                            {"name": "Señal principal", "id": "top_signal_display"},
                         ],
                         data=[],
-                        sort_action='native',
-                        row_selectable='single',
+                        row_selectable="single",
                         selected_rows=[],
+                        sort_action="native",
                         page_size=10,
-                        style_table={'overflowX': 'auto'},
-                        style_header={
-                            'backgroundColor': '#2c3e50', 'color': 'white',
-                            'fontWeight': 'bold', 'textAlign': 'center'
-                        },
-                        style_cell={
-                            'textAlign': 'center', 'padding': '10px',
-                            'fontSize': '14px', 'whiteSpace': 'normal', 'height': 'auto'
-                        },
+                        style_table={"overflowX": "auto"},
+                        style_header={"backgroundColor": "#34495e", "color": "white", "fontWeight": "bold", "textAlign": "center"},
+                        style_cell={"textAlign": "center", "padding": "10px", "fontSize": "14px", "whiteSpace": "normal", "height": "auto"},
                         style_cell_conditional=[
-                            {'if': {'column_id': 'system'}, 'textAlign': 'left'},
-                            {'if': {'column_id': 'top_signal_display'}, 'textAlign': 'left'},
+                            {"if": {"column_id": "system"}, "textAlign": "left", "fontWeight": "600"},
+                            {"if": {"column_id": "top_signal_display"}, "textAlign": "left"},
                         ],
-                        style_data_conditional=[
-                            {'if': {'filter_query': '{system_status} = "Anormal"'},
-                             'backgroundColor': 'rgba(220, 53, 69, 0.1)', 'color': '#dc3545', 'fontWeight': 'bold'},
-                            {'if': {'filter_query': '{system_status} = "Alerta"'},
-                             'backgroundColor': 'rgba(255, 193, 7, 0.1)', 'color': '#856404', 'fontWeight': 'bold'},
-                            {'if': {'filter_query': '{system_status} = "InsufficientData"'},
-                             'backgroundColor': 'rgba(149, 165, 166, 0.15)', 'color': '#657174'},
-                            {'if': {'filter_query': '{system_status} = "Normal"'}, 'color': '#28a745'},
-                        ]
+                        style_data_conditional=_STATE_RULES + [{"if": {"state": "active"}, "border": "2px solid #2f80ed"}],
                     ),
-                    type='circle'
-                )
-            ])
-        ], className="shadow-sm mb-4"),
+                    type="circle",
+                ),
+            ]),
+        ], className="shadow-sm mb-3"),
+        dcc.Loading(html.Div(id="telemetry-detail-system-analysis"), type="circle"),
 
         html.Div([
-            html.H4([
-                html.I(className="fas fa-stethoscope me-2"),
-                "Evaluación del sistema seleccionado"
-            ], className="text-primary mb-3 mt-4 pb-2 border-bottom"),
-            html.P(
-                "Estado, explicación y acción recomendada para el sistema antes de revisar sus señales.",
-                className="text-muted mb-3"
-            )
-        ]),
-        dcc.Loading(
-            html.Div(id='telemetry-detail-system-analysis'),
-            type='circle'
-        ),
-
-        html.Div([
-            html.H4([
-                html.I(className="fas fa-wave-square me-2"),
-                "Señales — Evidencia del sistema"
-            ], className="text-primary mb-3 mt-4 pb-2 border-bottom"),
-            html.P("Seleccione una señal para abrir su evidencia técnica", className="text-muted mb-3")
+            html.H4([html.I(className="fas fa-wave-square me-2"), "Señales del sistema"], className="text-primary mb-2 mt-4 pb-2 border-bottom"),
+            html.P("Seleccione una señal para abrir únicamente su evidencia técnica.", className="text-muted mb-3"),
         ]),
         dbc.Card([
             dbc.CardBody([
+                dbc.Row([
+                    dbc.Col(html.Label("Señal seleccionada", className="small fw-bold"), md=3),
+                    dbc.Col(dcc.Dropdown(id="telemetry-detail-signal-selector", placeholder="Seleccione una señal...", clearable=False), md=9),
+                ], className="align-items-center mb-3"),
                 dcc.Loading(
                     dash_table.DataTable(
-                        id='telemetry-detail-signal-table',
+                        id="telemetry-detail-signal-table",
                         columns=[
-                            {'name': 'Señal', 'id': 'signal'},
-                            {'name': 'Estado', 'id': 'status'},
-                            {'name': 'Fuera de rango', 'id': 'abnormal_pct_display'},
-                            {'name': 'Eventos', 'id': 'total_events', 'type': 'numeric'},
-                            {'name': 'Episodio Máx.', 'id': 'longest_episode', 'type': 'numeric'},
-                            {'name': 'Tendencia', 'id': 'trend_direction'},
-                            {'name': 'signal_raw', 'id': 'signal_raw'},
+                            {"name": "Señal", "id": "signal"},
+                            {"name": "Estado", "id": "status"},
+                            {"name": "Fuera de rango", "id": "abnormal_pct_display"},
+                            {"name": "Eventos", "id": "total_events", "type": "numeric"},
+                            {"name": "Episodio máx. (min)", "id": "longest_episode", "type": "numeric"},
+                            {"name": "Tendencia", "id": "trend_direction"},
+                            {"name": "signal_raw", "id": "signal_raw"},
                         ],
                         data=[],
-                        sort_action='native',
-                        row_selectable='single',
+                        row_selectable="single",
                         selected_rows=[],
+                        sort_action="native",
                         page_size=15,
-                        style_table={'overflowX': 'auto'},
-                        style_header={
-                            'backgroundColor': '#2c3e50', 'color': 'white',
-                            'fontWeight': 'bold', 'textAlign': 'center'
-                        },
-                        style_cell={
-                            'textAlign': 'center', 'padding': '8px',
-                            'fontSize': '13px', 'whiteSpace': 'normal', 'height': 'auto'
-                        },
+                        style_table={"overflowX": "auto"},
+                        style_header={"backgroundColor": "#34495e", "color": "white", "fontWeight": "bold", "textAlign": "center"},
+                        style_cell={"textAlign": "center", "padding": "9px", "fontSize": "13px", "whiteSpace": "normal", "height": "auto"},
                         style_cell_conditional=[
-                            {'if': {'column_id': 'signal'}, 'textAlign': 'left'},
-                            {'if': {'column_id': 'signal_raw'}, 'display': 'none'},
+                            {"if": {"column_id": "signal"}, "textAlign": "left", "fontWeight": "600"},
+                            {"if": {"column_id": "signal_raw"}, "display": "none"},
                         ],
                         style_data_conditional=[
-                            {'if': {'filter_query': '{status} = "Anormal"'},
-                             'backgroundColor': 'rgba(220, 53, 69, 0.1)', 'color': '#dc3545', 'fontWeight': 'bold'},
-                            {'if': {'filter_query': '{status} = "Alerta"'},
-                             'backgroundColor': 'rgba(255, 193, 7, 0.1)', 'color': '#856404', 'fontWeight': 'bold'},
-                            {'if': {'filter_query': '{status} = "InsufficientData"'},
-                             'backgroundColor': 'rgba(149, 165, 166, 0.15)', 'color': '#657174'},
-                            {'if': {'filter_query': '{status} = "Normal"'}, 'color': '#28a745'},
-                        ]
+                            {"if": {"filter_query": '{status} = "Anormal"'}, "backgroundColor": "rgba(220,53,69,.10)", "color": "#b42318", "fontWeight": "600"},
+                            {"if": {"filter_query": '{status} = "Alerta"'}, "backgroundColor": "rgba(245,158,11,.12)", "color": "#8a5a00", "fontWeight": "600"},
+                            {"if": {"filter_query": '{status} = "InsufficientData"'}, "backgroundColor": "rgba(149,165,166,.15)", "color": "#657174"},
+                            {"if": {"state": "active"}, "border": "2px solid #2f80ed"},
+                        ],
                     ),
-                    type='circle'
-                )
-            ])
-        ], className="shadow-sm mb-4"),
-
+                    type="circle",
+                ),
+            ]),
+        ], className="shadow-sm mb-3"),
         html.Div([
-            html.H4([
-                html.I(className="fas fa-chart-line me-2"),
-                "Evidencia de la señal seleccionada"
-            ], className="text-primary mb-3 mt-4 pb-2 border-bottom"),
-            html.P(
-                "Serie temporal con anomalías y eventos resaltados, límites de referencia, tendencia y comentario IA.",
-                className="text-muted mb-3"
-            )
+            html.H4([html.I(className="fas fa-chart-line me-2"), "Evidencia de la señal seleccionada"], className="text-primary mb-2 mt-4 pb-2 border-bottom"),
+            html.P("Serie temporal con límites, tendencia y eventos materializados resaltados.", className="text-muted mb-3"),
         ]),
-        dcc.Loading(
-            html.Div(id='telemetry-detail-signal-cards'),
-            type='circle'
-        )
+        dcc.Loading(html.Div(id="telemetry-detail-signal-cards"), type="circle"),
     ])

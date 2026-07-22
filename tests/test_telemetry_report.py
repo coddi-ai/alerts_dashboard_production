@@ -107,6 +107,44 @@ def test_detail_joins_feature_alias_and_significant_trend():
     assert signals[0]["unit_label"] == "°C"
 
 
+def test_signal_status_stays_aligned_with_current_ai_evaluation():
+    snapshot = make_snapshot()
+    system_health = snapshot.system_health.copy()
+    system_health.loc[0, "evaluation_timestamp"] = "2026-07-22T02:19:57Z"
+    signal_comments = snapshot.signal_comments.copy()
+    signal_comments.loc[0, "status"] = "Alerta"
+    signal_comments.loc[0, "evaluation_timestamp"] = "2026-07-22T02:20:21Z"
+    snapshot = TelemetrySnapshot(**{
+        **snapshot.__dict__,
+        "system_health": system_health,
+        "signal_comments": signal_comments,
+    })
+
+    systems = build_system_rows(snapshot, "T_01")
+    signals = build_signal_rows(snapshot, "T_01", "Motor")
+    assert systems[0]["signals_in_alert"] == 1
+    assert signals[0]["status"] == "Alerta"
+
+
+def test_stale_signal_comment_does_not_override_deviation_status():
+    snapshot = make_snapshot()
+    system_health = snapshot.system_health.copy()
+    system_health.loc[0, "evaluation_timestamp"] = "2026-07-22T02:19:57Z"
+    signal_comments = snapshot.signal_comments.copy()
+    signal_comments.loc[0, "status"] = "Alerta"
+    signal_comments.loc[0, "evaluation_timestamp"] = "2026-07-22T01:00:00Z"
+    snapshot = TelemetrySnapshot(**{
+        **snapshot.__dict__,
+        "system_health": system_health,
+        "signal_comments": signal_comments,
+    })
+
+    systems = build_system_rows(snapshot, "T_01")
+    signals = build_signal_rows(snapshot, "T_01", "Motor")
+    assert systems[0]["signals_in_alert"] == 1
+    assert signals[0]["status"] == "Anormal"
+
+
 def test_empty_frames_are_safe():
     snapshot = make_snapshot()
     snapshot = TelemetrySnapshot(**{**snapshot.__dict__, "unit_health": pd.DataFrame(), "system_health": pd.DataFrame()})

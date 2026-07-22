@@ -2,6 +2,7 @@
 
 from datetime import date, datetime, timedelta
 from functools import lru_cache
+from pathlib import Path
 
 import pandas as pd
 from dash import callback, Input, Output, State, ctx, html, dcc, dash_table
@@ -16,6 +17,7 @@ from dashboard.components.telemetry_charts import (
     build_signal_timeseries_card,
 )
 from dashboard.components.telemetry_report import (
+    build_fleet_matrix_rows,
     build_fleet_priority_rows,
     build_signal_rows,
     build_system_rows,
@@ -24,6 +26,7 @@ from dashboard.components.telemetry_report import (
     filter_fleet_snapshot,
     format_urgency,
     load_telemetry_snapshot,
+    _events_for_signal_cached,
 )
 from dashboard.tabs.tab_telemetry_fleet import create_telemetry_fleet_layout
 from dashboard.tabs.tab_telemetry_unit_detail import create_telemetry_unit_detail_layout
@@ -76,7 +79,7 @@ def render_telemetry_health_tab(active_tab):
 
 
 @callback(
-    [Output('telemetry-fleet-model-filter', 'options'), Output('telemetry-fleet-system-filter', 'options')],
+    [Output('telemetry-fleet-model-filter', 'options'), Output('telemetry-fleet-system-filter', 'options'), Output('telemetry-fleet-system-filter', 'value')],
     [Input('telemetry-health-tabs', 'value'), Input('client-selector', 'value')],
 )
 def populate_fleet_filters(active_tab, client):
@@ -87,8 +90,8 @@ def populate_fleet_filters(active_tab, client):
     systems = sorted({str(v) for v in snapshot.system_health.get('system', pd.Series(dtype=str)).map(lambda x: {
         'Engine': 'Motor', 'Transmission': 'Transmisión', 'Brakes': 'Frenos', 'Steering': 'Dirección'
     }.get(x, x)).dropna()})
-    return ([{'label': model, 'value': model} for model in models],
-            [{'label': system, 'value': system} for system in systems])
+    options = [{'label': system, 'value': system} for system in systems]
+    return ([{'label': model, 'value': model} for model in models], options, systems)
 
 
 def _kpi_card(label: str, value, icon: str, color: str, bg_color: str) -> dbc.Col:
@@ -160,13 +163,67 @@ def _priority_table(rows: list[dict]):
     )
 
 
+def _fleet_status_table(rows: list[dict], systems: list[str]):
+    """Render one fleet matrix with a system action tooltip per cell."""
+    if not rows:
+        return dbc.Alert("No hay unidades para los filtros seleccionados.", color="info")
+    columns = [
+        {"name": "Unidad", "id": "unit"},
+        {"name": "Modelo", "id": "model"},
+        *[{"name": system, "id": system} for system in systems],
+        {"name": "Estado", "id": "overall_status"},
+    ]
+    tooltip_data = []
+    for row in rows:
+        tooltip_data.append({
+            system: {
+                "value": f"**Estado:** {row.get(system, 'InsufficientData')}  \n**Acción:** {row.get('_system_actions', {}).get(system, 'Sin acción recomendada registrada.')} ",
+                "type": "markdown",
+            }
+            for system in systems
+        })
+    conditional = [
+        {"if": {"column_id": "unit"}, "textAlign": "left", "fontWeight": "600"},
+        {"if": {"column_id": "model"}, "textAlign": "left"},
+    ]
+    colors = {
+        "Normal": ("#e8f5e9", "#247a3d"),
+        "Alerta": ("#fff4d6", "#8a5a00"),
+        "Anormal": ("#fde8e8", "#b42318"),
+        "InsufficientData": ("#eef0f2", "#657174"),
+    }
+    for column_id in [*systems, "overall_status"]:
+        for state, (background, color) in colors.items():
+            conditional.append({
+                "if": {"filter_query": f'{{{column_id}}} = "{state}"', "column_id": column_id},
+                "backgroundColor": background,
+                "color": color,
+                "fontWeight": "600",
+            })
+    return dash_table.DataTable(
+        id="telemetry-fleet-status-table",
+        columns=columns,
+        data=rows,
+        active_cell=None,
+        cell_selectable=True,
+        tooltip_data=tooltip_data,
+        tooltip_duration=None,
+        sort_action="native",
+        page_action="native",
+        page_size=15,
+        style_table={"overflowX": "auto"},
+        style_header={"backgroundColor": "#34495e", "color": "white", "fontWeight": "bold", "textAlign": "center"},
+        style_cell={"padding": "9px", "fontSize": "13px", "whiteSpace": "normal", "height": "auto", "textAlign": "center", "minWidth": "90px"},
+        style_cell_conditional=conditional,
+        style_data_conditional=[
+            {"if": {"row_index": "odd"}, "backgroundColor": "#f8fafc"},
+            {"if": {"state": "active"}, "border": "2px solid #2f80ed"},
+        ],
+    )
+
+
 @callback(
-    [
-        Output('telemetry-fleet-kpi-row', 'children'),
-        Output('telemetry-fleet-heatmap', 'figure'),
-        Output('telemetry-fleet-heatmap-insights', 'children'),
-        Output('telemetry-fleet-ai-table', 'children'),
-    ],
+    Output('telemetry-fleet-table-container', 'children'),
     [
         Input('telemetry-health-tabs', 'value'),
         Input('client-selector', 'value'),
@@ -186,10 +243,16 @@ def update_fleet_overview(active_tab, client, model, statuses, systems):
             'Engine': 'Motor', 'Transmission': 'Transmisión', 'Brakes': 'Frenos', 'Steering': 'Dirección'
         }.get(x, x)).dropna())
         systems = [system for system in (systems or []) if system in valid_systems]
-        unit_health, system_health = filter_fleet_snapshot(snapshot, model, statuses, systems)
+        unit_health, _ = filter_fleet_snapshot(snapshot, model, statuses, systems)
+        # Keep the complete system snapshot for main-system navigation; the
+        # selector controls visible columns only and must not change the case.
+        _, all_system_health = filter_fleet_snapshot(snapshot, model, statuses, [])
+        system_health = all_system_health
+        rows, visible = build_fleet_matrix_rows(snapshot, unit_health, all_system_health, systems)
+        return _fleet_status_table(rows, visible)
         if unit_health.empty:
             empty = dbc.Alert("No hay unidades para los filtros seleccionados.", color="info")
-            return empty, {}, html.Div(), empty
+            return empty
 
         counts = unit_health.get('overall_status', pd.Series(dtype=str)).value_counts()
         kpi = dbc.Row([
@@ -208,15 +271,17 @@ def update_fleet_overview(active_tab, client, model, statuses, systems):
             dbc.Col([html.Small("Estado más crítico", className="text-muted d-block"), html.Strong(insights.get('most_critical_status', '-'), className="text-danger")], className="text-center", md=4),
         ], className="g-2 py-2 border rounded bg-light")
         rows = build_fleet_priority_rows(snapshot, unit_health, system_health)
-        return kpi, heatmap, insight_row, _priority_table(rows)
+        rows, visible = build_fleet_matrix_rows(snapshot, unit_health, system_health, systems)
+        return _fleet_status_table(rows, visible)
     except Exception as exc:
         logger.exception("Error en Vista de Flota: %s", exc)
         error = dbc.Alert(f"Error cargando datos de telemetría: {exc}", color="danger")
-        return error, {}, html.Div(), error
+        return error
 
 
-@callback(
-    Output('telemetry-fleet-selected-unit', 'children'),
+# Legacy selected-unit summary retained as a helper for backwards compatibility;
+# the fleet matrix no longer renders a separate summary card.
+def _legacy_selected_fleet_unit(selected_rows, client, model, statuses, systems, table_data, visible_data):
     [
         Input('telemetry-fleet-priority-table', 'selected_rows'),
         Input('client-selector', 'value'),
@@ -226,7 +291,6 @@ def update_fleet_overview(active_tab, client, model, statuses, systems):
     ],
     [State('telemetry-fleet-priority-table', 'data'), State('telemetry-fleet-priority-table', 'derived_viewport_data')],
     prevent_initial_call=True,
-)
 def update_selected_fleet_unit(selected_rows, client, model, statuses, systems, table_data, visible_data):
     table_data = visible_data or table_data
     if not selected_rows or not table_data or not client:
@@ -250,25 +314,22 @@ def update_selected_fleet_unit(selected_rows, client, model, statuses, systems, 
         Output('telemetry-health-tabs', 'value', allow_duplicate=True),
         Output('telemetry-navigation-state', 'data', allow_duplicate=True),
     ],
-    [Input('telemetry-fleet-heatmap', 'clickData'), Input('telemetry-fleet-priority-table', 'active_cell')],
-    [State('telemetry-fleet-priority-table', 'data'), State('telemetry-fleet-priority-table', 'derived_viewport_data'), State('telemetry-fleet-heatmap', 'figure')],
+    [Input('telemetry-fleet-status-table', 'active_cell')],
+    [State('telemetry-fleet-status-table', 'data'), State('telemetry-fleet-status-table', 'derived_viewport_data')],
     prevent_initial_call=True,
 )
-def navigate_from_fleet(click_data, active_cell, table_data, visible_data, heatmap_figure):
+def navigate_from_fleet(active_cell, table_data, visible_data):
     table_data = visible_data or table_data
-    triggered = ctx.triggered_id
     unit = system = signal = None
     source = None
-    if triggered == 'telemetry-fleet-priority-table' and active_cell and table_data:
+    if active_cell and table_data:
         row = table_data[active_cell.get('row', 0)]
-        unit, system, signal, source = row.get('unit'), row.get('top_system'), row.get('top_signal'), 'priority_table'
-    elif triggered == 'telemetry-fleet-heatmap' and click_data and click_data.get('points'):
-        point = click_data['points'][0]
-        unit = point.get('y')
-        system = point.get('x')
-        if system == 'Estado':
-            system = None
-        source = 'fleet_heatmap'
+        column_id = active_cell.get('column_id')
+        unit = row.get('unit')
+        system = row.get('_system_map', {}).get(column_id) if column_id else None
+        if not system:
+            system = row.get('_top_system_raw') or None
+        source = 'fleet_matrix'
     if not unit:
         raise PreventUpdate
     return 'unit-detail', {'unit': unit, 'system': system, 'signal': signal, 'source': source}
@@ -321,6 +382,13 @@ def _decision_summary(snapshot, unit: str, system_rows: list[dict]) -> html.Div:
     action = client_facing_text(_text_value(comment, 'recommended_action'), snapshot.signal_registry)
     urgency = format_urgency(_text_value(comment, 'urgency'))
     status = row.get('overall_status', 'InsufficientData')
+    # A missing current-period IA comment must remain explicit.  Do not let
+    # the generic normal fallback misrepresent an alerting/anormal unit.
+    if status in {'Alerta', 'Anormal'} and not (
+        _text_value(comment, 'description', 'comment')
+        or _text_value(row, 'executive_summary')
+    ):
+        description = 'Análisis IA no disponible para esta evaluación.'
     color = {'Normal': 'success', 'Alerta': 'warning', 'Anormal': 'danger', 'InsufficientData': 'secondary'}.get(status, 'secondary')
     title = "Por qué está en alerta" if status in {'Alerta', 'Anormal'} else "Resumen de la unidad"
     return dbc.Card([
@@ -380,11 +448,10 @@ def _text_value(row, *fields):
 @callback(
     [
         Output('telemetry-detail-ai-comment', 'children'),
-        Output('telemetry-detail-identity-display', 'children'),
         Output('telemetry-detail-system-table', 'data'),
+        Output('telemetry-detail-system-table', 'selected_rows'),
         Output('telemetry-detail-system-selector', 'options'),
         Output('telemetry-detail-system-selector', 'value'),
-        Output('telemetry-detail-system-analysis', 'children'),
     ],
     [Input('telemetry-detail-unit-selector', 'value'), Input('client-selector', 'value')],
     State('telemetry-navigation-state', 'data'),
@@ -398,18 +465,15 @@ def update_unit_detail_header(unit, client, navigation_state):
         options = [{'label': row['system'], 'value': row['system']} for row in system_rows]
         requested_system = (navigation_state or {}).get('system') if (navigation_state or {}).get('unit') == unit else None
         selected_system = requested_system if requested_system in [item['value'] for item in options] else (options[0]['value'] if options else None)
-        selected_row = next((item for item in system_rows if item.get('system') == selected_system), None)
-        return _decision_summary(snapshot, unit, system_rows), _identity_display(snapshot, unit), system_rows, options, selected_system, _system_analysis_card(selected_row)
+        selected_index = [next((idx for idx, row in enumerate(system_rows) if row.get('system') == selected_system), 0)] if system_rows else []
+        return _decision_summary(snapshot, unit, system_rows), system_rows, selected_index, options, selected_system
     except Exception as exc:
         logger.exception("Error actualizando detalle de unidad: %s", exc)
-        return dbc.Alert(f"Error cargando la unidad: {exc}", color="danger"), html.Div(), [], [], None, html.Div()
+        return dbc.Alert(f"Error cargando la unidad: {exc}", color="danger"), [], [], [], None
 
 
 @callback(
-    [
-        Output('telemetry-detail-ai-comment', 'children', allow_duplicate=True),
-        Output('telemetry-detail-system-analysis', 'children', allow_duplicate=True),
-    ],
+    Output('telemetry-detail-system-analysis', 'children'),
     [Input('telemetry-detail-system-selector', 'value'), Input('telemetry-detail-unit-selector', 'value'), Input('client-selector', 'value')],
     prevent_initial_call=True,
 )
@@ -420,9 +484,8 @@ def update_selected_system_summary(system, unit, client):
     snapshot = load_telemetry_snapshot(client)
     rows = build_system_rows(snapshot, unit)
     selected = [row for row in rows if row.get('system') == system]
-    remainder = [row for row in rows if row.get('system') != system]
     selected_row = selected[0] if selected else None
-    return _decision_summary(snapshot, unit, selected + remainder), _system_analysis_card(selected_row)
+    return _system_analysis_card(selected_row)
 
 
 @callback(
@@ -442,7 +505,6 @@ def sync_system_table_selection(selected_rows, table_data):
         Output('telemetry-detail-signal-table', 'data'),
         Output('telemetry-detail-signal-table', 'selected_rows'),
         Output('telemetry-detail-signal-selector', 'options'),
-        Output('telemetry-detail-signal-selector', 'value'),
     ],
     [Input('telemetry-detail-system-selector', 'value'), Input('telemetry-detail-unit-selector', 'value'), Input('client-selector', 'value')],
     State('telemetry-navigation-state', 'data'),
@@ -457,16 +519,16 @@ def update_signal_section(system, unit, client, navigation_state):
         requested = (navigation_state or {}).get('signal') if (navigation_state or {}).get('unit') == unit else None
         selected = requested if requested in [item['value'] for item in options] else (options[0]['value'] if options else None)
         selected_rows = [next((idx for idx, row in enumerate(rows) if row['signal_raw'] == selected), 0)] if rows else []
-        return rows, selected_rows, options, selected
+        return rows, selected_rows, options
     except Exception as exc:
         logger.exception("Error actualizando señales: %s", exc)
-        return [], [], [], None
+        return [], [], []
 
 
 @callback(
-    Output('telemetry-detail-signal-selector', 'value', allow_duplicate=True),
+    Output('telemetry-detail-signal-selector', 'value'),
     Input('telemetry-detail-signal-table', 'selected_rows'),
-    State('telemetry-detail-signal-table', 'data'),
+    Input('telemetry-detail-signal-table', 'data'),
     prevent_initial_call=True,
 )
 def sync_signal_table_selection(selected_rows, table_data):
@@ -475,8 +537,39 @@ def sync_signal_table_selection(selected_rows, table_data):
     return table_data[selected_rows[0]].get('signal_raw')
 
 
-@lru_cache(maxsize=64)
-def _load_recent_telemetry_cached(client: str, unit: str, cache_key: str, weeks: int = 8) -> pd.DataFrame:
+@callback(
+    Output('telemetry-detail-signal-table', 'selected_rows', allow_duplicate=True),
+    Input('telemetry-detail-signal-selector', 'value'),
+    State('telemetry-detail-signal-table', 'data'),
+    prevent_initial_call=True,
+)
+def sync_signal_selector_selection(signal, table_data):
+    """Keep the radio selection aligned when the signal dropdown changes."""
+    if not signal or not table_data:
+        raise PreventUpdate
+    selected_index = next(
+        (idx for idx, row in enumerate(table_data) if row.get('signal_raw') == signal),
+        None,
+    )
+    if selected_index is None:
+        raise PreventUpdate
+    return [selected_index]
+
+
+@lru_cache(maxsize=256)
+def _load_recent_telemetry_signal_cached(
+    client: str,
+    unit: str,
+    signal: str,
+    cache_key: str,
+    weeks: int = 5,
+) -> pd.DataFrame:
+    """Load only the selected signal from the latest weeks needed by the UI.
+
+    Five ISO weeks cover the "last month" range selector plus its boundary
+    week; loading eight weeks added I/O without expanding any client-facing
+    range.
+    """
     snapshot = load_telemetry_snapshot(client)
     manifest = snapshot.manifest
     anchor_year = int(manifest.get('evaluation_year', datetime.now().isocalendar()[0]))
@@ -484,13 +577,25 @@ def _load_recent_telemetry_cached(client: str, unit: str, cache_key: str, weeks:
     available_weeks = manifest.get('silver_weeks_available', [])
     frames = []
     if available_weeks:
-        candidates = sorted({int(w) for w in available_weeks}, reverse=True)[:weeks]
+        candidates = [(anchor_year, int(w)) for w in sorted({int(w) for w in available_weeks}, reverse=True)[:weeks]]
     else:
-        anchor_date = date.fromisocalendar(anchor_year, anchor_week, 1)
-        candidates = [(anchor_date - timedelta(weeks=i)).isocalendar()[1] for i in range(weeks + 4)]
-    for week in candidates:
-        frame = load_silver_telemetry_week(client, int(week), anchor_year)
-        if not frame.empty and 'Unit' in frame.columns:
+        silver_dir = Path(f"data/telemetry/silver/{client.lower()}/Telemetry_Wide_With_States")
+        existing = [
+            week for week in range(1, 54)
+            if (silver_dir / f"Week{week:02d}Year{anchor_year}.parquet").exists()
+        ]
+        if existing:
+            candidates = [(anchor_year, week) for week in sorted(existing, reverse=True)[:weeks]]
+        else:
+            anchor_date = date.fromisocalendar(anchor_year, anchor_week, 1)
+            candidates = [
+                ((anchor_date - timedelta(weeks=i)).isocalendar().year,
+                 (anchor_date - timedelta(weeks=i)).isocalendar().week)
+                for i in range(weeks)
+            ]
+    for year, week in candidates:
+        frame = load_silver_telemetry_week(client, int(week), int(year), columns=['Unit', 'Fecha', signal])
+        if not frame.empty and 'Unit' in frame.columns and signal in frame.columns:
             frame = frame[frame['Unit'] == unit]
             if not frame.empty:
                 frames.append(frame)
@@ -528,22 +633,46 @@ def update_signal_cards(signal, system, unit, client):
         row = next((item for item in rows if item['signal_raw'] == signal), None)
         if row is None:
             return dbc.Alert("No hay evidencia para la señal seleccionada.", color="info")
-        raw = _load_recent_telemetry_cached(client.lower(), unit, snapshot.cache_key)
+        raw = _load_recent_telemetry_signal_cached(client.lower(), unit, signal, snapshot.cache_key)
+        numeric_values = (
+            pd.to_numeric(raw[signal], errors='coerce').dropna()
+            if not raw.empty and signal in raw.columns
+            else pd.Series(dtype=float)
+        )
+        has_valid_series = not numeric_values.empty
         trend_df = snapshot.trends[(snapshot.trends.get('unit', pd.Series(dtype=str)) == unit) & (snapshot.trends.get('signal', pd.Series(dtype=str)) == signal)] if not snapshot.trends.empty else pd.DataFrame()
-        event_signal_col = 'signal' if 'signal' in snapshot.events.columns else 'feature'
-        event_df = snapshot.events[
-            (snapshot.events.get('unit', pd.Series(dtype=str)) == unit)
-            & (snapshot.events.get(event_signal_col, pd.Series(dtype=str)) == signal)
-        ] if not snapshot.events.empty else pd.DataFrame()
+        event_df = _events_for_signal_cached(
+            client.lower(), snapshot.cache_key, unit, signal
+        )
         figure = build_signal_timeseries_card(signal, raw, snapshot.limits, trend_df, unit, event_df)
         metadata = snapshot.signal_metadata.get(signal, {})
+        coverage_notice = None
+        if not has_valid_series:
+            coverage_notice = dbc.Alert([
+                html.Strong("Sin datos válidos para esta señal. "),
+                f"La columna técnica {signal} no contiene observaciones numéricas para {unit} en la ventana evaluada. ",
+                "No se sustituye por otra señal para evitar crear evidencia que no corresponde al sensor seleccionado. ",
+                f"El estado materializado ({row.get('status', 'InsufficientData')}) y los eventos se conservan solo como referencia del pipeline.",
+            ], color="secondary", className="small mb-3")
+        if has_valid_series and not event_df.empty and 'end_time' in event_df.columns and 'Fecha' in raw.columns:
+            classified_until = pd.to_datetime(event_df['end_time'], errors='coerce').max()
+            observed_until = pd.to_datetime(raw['Fecha'], errors='coerce').max()
+            if pd.notna(classified_until) and pd.notna(observed_until) and classified_until < observed_until:
+                coverage_notice = dbc.Alert(
+                    f"Eventos clasificados hasta {classified_until.strftime('%d/%m/%Y')}; los datos posteriores se muestran sin clasificación de eventos.",
+                    color="light", className="small mb-3",
+                )
         status_color = {'Normal': 'success', 'Alerta': 'warning', 'Anormal': 'danger', 'InsufficientData': 'secondary'}.get(row['status'], 'secondary')
+        badge_label = row['status'] if has_valid_series else 'Sin datos'
+        card_border_color = STATUS_COLORS.get(row['status'], '#95a5a6') if has_valid_series else STATUS_COLORS.get('InsufficientData', '#95a5a6')
         card = dbc.Card([
             dbc.CardHeader([
                     html.Strong(row['signal']),
-                    dbc.Badge(row['status'], color=status_color, pill=True, className="ms-2")
+                    dbc.Badge(badge_label, color=status_color if has_valid_series else 'secondary', pill=True, className="ms-2"),
+                    html.Small(f"Estado materializado: {row['status']}", className="text-muted ms-2") if not has_valid_series else html.Span()
                 ], className="bg-light"),
                 dbc.CardBody([
+                    coverage_notice or html.Span(),
                     dbc.Row([
                         dbc.Col([
                         html.Div([html.Small("Nombre técnico", className="text-muted d-block"), html.Strong(row.get('signal_raw', '-') or '-')], className="mb-2"),
@@ -552,10 +681,16 @@ def update_signal_cards(signal, system, unit, client):
                         html.P(row.get('explaining') or "", className="text-muted", style={'whiteSpace': 'pre-wrap'}),
                         _signal_kpi_table(row),
                     ], lg=4),
-                    dbc.Col([dcc.Graph(figure=figure, config={'displayModeBar': False})], lg=8)
+                    dbc.Col([
+                        dcc.Graph(
+                            figure=figure,
+                            config={'displayModeBar': False},
+                            style={'height': '620px'},
+                        )
+                    ], lg=8)
                 ])
             ])
-        ], className="shadow-sm mb-3", style={'borderLeft': f"4px solid {STATUS_COLORS.get(row['status'], '#95a5a6')}"})
+        ], className="shadow-sm mb-3", style={'borderLeft': f"4px solid {card_border_color}"})
         return card
     except Exception as exc:
         logger.exception("Error construyendo evidencia de señal: %s", exc)

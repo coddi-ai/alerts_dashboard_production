@@ -19,25 +19,18 @@ logger = get_logger(__name__)
 
 def parse_ia_message_sections(mensaje_ia: str) -> Dict[str, str]:
     """
-    Separa el mensaje de IA en 4 secciones principales usando regex.
+    Separa el mensaje de IA en las secciones útiles para el cliente usando regex.
     
     Args:
         mensaje_ia: Texto completo generado por la IA
         
     Returns:
-        dict con las secciones: {
-            'diagnostico': str,
-            'causa_probable': str,
-            'riesgo': str,
-            'nivel_riesgo': str,  # BAJO/MEDIO/ALTO
-            'acciones': str
-        }
+        dict con diagnóstico, causa probable y acciones.
+        El nivel de riesgo no se calcula ni se expone en Alertas.
     """
     sections = {
         'diagnostico': '',
         'causa_probable': '',
-        'riesgo': '',
-        'nivel_riesgo': 'MEDIO',  # Default
         'acciones': ''
     }
     
@@ -48,7 +41,6 @@ def parse_ia_message_sections(mensaje_ia: str) -> Dict[str, str]:
     patterns = {
         'diagnostico': r'(?:DIAGNÓSTICO|DIAGNOSTICO)[:\s](.+?)(?=(?:CAUSA|RIESGO|ACCIONES|$))',
         'causa_probable': r'(?:CAUSA PROBABLE|CAUSA)[:\s](.+?)(?=(?:RIESGO|ACCIONES|$))',
-        'riesgo': r'(?:RIESGO OPERACIONAL|RIESGO)[:\s](.+?)(?=(?:ACCIONES|$))',
         'acciones': r'(?:ACCIONES CLARAS|ACCIONES RECOMENDADAS|ACCIONES)[:\s](.+?)$'
     }
     
@@ -65,11 +57,6 @@ def parse_ia_message_sections(mensaje_ia: str) -> Dict[str, str]:
                     text = re.sub(r'\s+', ' ', text)
                 sections[key] = text
         
-        # Extraer nivel de riesgo (BAJO/MEDIO/ALTO)
-        riesgo_match = re.search(r'(BAJO|MEDIO|ALTO)', sections['riesgo'], re.IGNORECASE)
-        if riesgo_match:
-            sections['nivel_riesgo'] = riesgo_match.group(1).upper()
-        
         # Fallback: dividir por párrafos si no se encontraron secciones
         if not any([sections['diagnostico'], sections['causa_probable'], sections['acciones']]):
             paragraphs = [p.strip() for p in mensaje_ia.split('\n\n') if p.strip()]
@@ -78,9 +65,7 @@ def parse_ia_message_sections(mensaje_ia: str) -> Dict[str, str]:
             if len(paragraphs) >= 2:
                 sections['causa_probable'] = paragraphs[1]
             if len(paragraphs) >= 3:
-                sections['riesgo'] = paragraphs[2]
-            if len(paragraphs) >= 4:
-                sections['acciones'] = '\n'.join(paragraphs[3:])
+                sections['acciones'] = '\n'.join(paragraphs[2:])
     
     except Exception as e:
         logger.warning(f"Error parseando mensaje IA: {e}")
@@ -205,8 +190,8 @@ def create_alerts_report_table(alerts_df: pd.DataFrame) -> dash_table.DataTable:
         for _, row in alerts_df.sort_values("Timestamp", ascending=False).iterrows():
             sections = parse_ia_message_sections(row.get("mensaje_ia", ""))
             trigger_vars = row.get("Trigger_Var", "Sin señal registrada")
-            if isinstance(trigger_vars, str):
-                trigger_vars = trigger_vars.strip("[]'")
+            # Mixed alerts store Trigger_Var as a serialized list. Preserve
+            # that representation so each telemetry/oil variable is translated.
             raw_signal_values = trigger_vars
             if isinstance(raw_signal_values, str):
                 try:
@@ -240,8 +225,10 @@ def create_alerts_report_table(alerts_df: pd.DataFrame) -> dash_table.DataTable:
                 "Componente": row.get("componente", "-"),
                 "Señal / variable": signal_label,
                 "Fuente": source,
-                "Riesgo": sections.get("nivel_riesgo", "Sin clasificación"),
-                "Diagnóstico": sections.get("diagnostico", "Sin diagnóstico IA disponible")[:180],
+                "Diagnóstico": sections.get("diagnostico", "Sin diagnóstico IA disponible"),
+                "diagnostico_completo": sections.get("diagnostico", "Sin diagnóstico IA disponible"),
+                "causa_completa": sections.get("causa_probable", "Sin causa probable registrada"),
+                "accion_completa": sections.get("acciones", "Sin acción recomendada registrada"),
                 "Evidencia": evidence,
                 "Acción": sections.get("acciones", "Sin acción recomendada registrada"),
             })
@@ -249,7 +236,7 @@ def create_alerts_report_table(alerts_df: pd.DataFrame) -> dash_table.DataTable:
             id="alerts-datatable",
             columns=[
                 {"name": name, "id": name}
-                for name in ["ID", "Fecha", "Unidad", "Sistema", "Componente", "Señal / variable", "Fuente", "Riesgo", "Diagnóstico", "Evidencia", "Acción"]
+                for name in ["ID", "Fecha", "Unidad", "Sistema", "Componente", "Señal / variable", "Fuente", "Diagnóstico", "Evidencia", "Acción"]
             ],
             data=rows,
             active_cell=None,
@@ -274,8 +261,6 @@ def create_alerts_report_table(alerts_df: pd.DataFrame) -> dash_table.DataTable:
                 {"if": {"column_id": "Señal / variable"}, "minWidth": "150px"},
             ],
             style_data_conditional=[
-                {"if": {"filter_query": '{Riesgo} = "ALTO"'}, "backgroundColor": "rgba(220,53,69,.12)", "color": "#842029", "fontWeight": "600"},
-                {"if": {"filter_query": '{Riesgo} = "MEDIO"'}, "backgroundColor": "rgba(255,193,7,.10)", "color": "#664d03"},
                 {"if": {"filter_query": '{Fuente} = "Mixto"'}, "borderLeft": "4px solid #6f42c1"},
                 {"if": {"state": "active"}, "backgroundColor": "#dbeafe", "color": "#12344d", "border": "1px solid #4f8fc0"},
             ],

@@ -280,7 +280,10 @@ def build_signal_timeseries_card(
 
     # Calculate on the full materialized series, then thin only plotted points
     # to keep the browser responsive for the multi-week silver window.
-    df['rolling_mean'] = df[signal_name].rolling(window=30, min_periods=5).mean()
+    # Use a time-based window so the 120-minute label remains correct with gaps.
+    df = df.set_index('Fecha')
+    df['rolling_mean'] = df[signal_name].rolling('120min', min_periods=5).mean()
+    df = df.reset_index()
     max_points = 6000
     step = max(1, int(len(df) / max_points))
     plot_df = df.iloc[::step].copy()
@@ -309,36 +312,84 @@ def build_signal_timeseries_card(
         hovertemplate='%{x}<br>Valor: %{y:.2f}<extra></extra>'
     ))
 
+    fig.data[-1].name = 'Media móvil 120 min'
+
     # Event/anomaly overlays use only the existing event labels and periods.
     event_windows, anomaly_count, event_count = _event_windows(events_df, signal_name)
+    raw_start, raw_end = df['Fecha'].min(), df['Fecha'].max()
+    event_windows = [
+        {**window, 'start': max(window['start'], raw_start), 'end': min(window['end'], raw_end)}
+        for window in event_windows
+        if window['end'] >= raw_start and window['start'] <= raw_end
+    ]
     event_colors = {
         'anomaly': ('#dc3545', 'Anomalía'),
         'event': ('#fd7e14', 'Evento'),
     }
+    event_colors = {
+        'anomaly': ('#c1121f', 'Anomal\u00eda'),
+        'event': ('#f59e0b', 'Evento'),
+    }
+    # Build all event windows in one layout update. Calling add_vrect once per
+    # window causes Plotly to revalidate the complete figure hundreds of times
+    # when a signal has many materialized episodes.
+    event_shapes = []
     for window in event_windows:
         color, _ = event_colors[window['kind']]
-        fig.add_vrect(
-            x0=window['start'],
-            x1=window['end'],
-            fillcolor=color,
-            opacity=0.14 if window['kind'] == 'event' else 0.2,
-            line=dict(color=color, width=1),
-            layer='below',
-        )
-    for kind, count in (('anomaly', anomaly_count), ('event', event_count)):
-        if count:
-            color, label = event_colors[kind]
+        event_shapes.append({
+            'type': 'rect',
+            'xref': 'x',
+            'yref': 'paper',
+            'x0': window['start'],
+            'x1': window['end'],
+            'y0': 0,
+            'y1': 1,
+            'fillcolor': color,
+            'opacity': 0.14 if window['kind'] == 'event' else 0.2,
+            'line': {'color': color, 'width': 1},
+            'layer': 'below',
+        })
+    if event_shapes:
+        fig.update_layout(shapes=event_shapes)
+    # Mark materialized samples so short episodes remain visible when the
+    # chart starts with a multi-week range. Counts stay in the signal KPI table,
+    # not in this legend.
+    plot_times = pd.DatetimeIndex(plot_df['Fecha'])
+    for kind in ('anomaly', 'event'):
+        color, label = event_colors[kind]
+        windows = [window for window in event_windows if window['kind'] == kind]
+        if windows and len(plot_times):
+            # Convert intervals into a boolean coverage mask with cumulative
+            # boundaries.  This avoids filtering the complete plotted series
+            # once per event window when a signal has many episodes.
+            starts = plot_times.searchsorted(
+                pd.to_datetime([window['start'] for window in windows]), side='left'
+            )
+            ends = plot_times.searchsorted(
+                pd.to_datetime([window['end'] for window in windows]), side='right'
+            )
+            diff = np.zeros(len(plot_times) + 1, dtype=np.int32)
+            for start_idx, end_idx in zip(starts, ends):
+                diff[start_idx] += 1
+                diff[end_idx] -= 1
+            point_mask = np.cumsum(diff[:-1]) > 0
+            point_df = plot_df.loc[point_mask, ['Fecha', signal_name]].rename(
+                columns={signal_name: 'value'}
+            )
+        else:
+            point_df = pd.DataFrame()
+        if not point_df.empty:
             fig.add_trace(go.Scatter(
-                x=[None], y=[None], mode='markers', name=f'{label} ({count})',
-                marker=dict(size=9, color=color, symbol='square'),
-                hoverinfo='skip',
+                x=point_df['Fecha'], y=point_df['value'], mode='markers', name=label,
+                marker=dict(size=6, color=color, symbol='square', line=dict(width=0.5, color='white')),
+                hovertemplate=f'{label}<br>%{{x}}<br>Valor: %{{y:.2f}}<extra></extra>',
             ))
 
     latest_observed = df['Fecha'].max()
-    max_episode_start = _max_episode_start(events_df, signal_name)
-    initial_start = max_episode_start if max_episode_start is not None else df['Fecha'].min()
-    if initial_start is not None and latest_observed is not None and initial_start > latest_observed:
-        initial_start = df['Fecha'].min()
+    # Open on the latest three days that actually contain values for the
+    # selected signal. Event/anomaly backgrounds remain clipped to this same
+    # valid series domain, while the range selector can still expand the view.
+    initial_start = max(df['Fecha'].min(), latest_observed - pd.Timedelta(days=3))
 
     # Limits reference lines (from limits or baselines)
     if not limits_df.empty and unit:
@@ -366,28 +417,32 @@ def build_signal_timeseries_card(
                 fig.add_trace(go.Scatter(
                     x=x_range, y=[bl_row['P95']] * 2,
                     mode='lines', name='P95',
-                    line=dict(color='#f39c12', dash='dash', width=1),
+                    line=dict(color='#9bbbd0', dash='dash', width=1),
+                    legendrank=3,
                     showlegend=True
                 ))
             if 'P98' in bl_row.index and pd.notna(bl_row['P98']):
                 fig.add_trace(go.Scatter(
                     x=x_range, y=[bl_row['P98']] * 2,
                     mode='lines', name='P98',
-                    line=dict(color='#e74c3c', dash='dash', width=1),
+                    line=dict(color='#527d9c', dash='dash', width=1),
+                    legendrank=4,
                     showlegend=True
                 ))
             if 'P5' in bl_row.index and pd.notna(bl_row['P5']):
                 fig.add_trace(go.Scatter(
                     x=x_range, y=[bl_row['P5']] * 2,
                     mode='lines', name='P5',
-                    line=dict(color='#f39c12', dash='dash', width=1),
+                    line=dict(color='#b8cad8', dash='dash', width=1),
+                    legendrank=2,
                     showlegend=True
                 ))
             if 'P2' in bl_row.index and pd.notna(bl_row['P2']):
                 fig.add_trace(go.Scatter(
                     x=x_range, y=[bl_row['P2']] * 2,
                     mode='lines', name='P2',
-                    line=dict(color='#e74c3c', dash='dash', width=1),
+                    line=dict(color='#789bb5', dash='dash', width=1),
+                    legendrank=1,
                     showlegend=True
                 ))
 
@@ -416,15 +471,38 @@ def build_signal_timeseries_card(
                     line=dict(color=color, dash='dot', width=2)
                 ))
 
+    values = pd.to_numeric(df[signal_name], errors='coerce').dropna()
+    p1 = float(values.quantile(0.01)) if not values.empty else None
+    p99 = float(values.quantile(0.99)) if not values.empty else None
+    if p1 is not None and p99 is not None:
+        spread = p99 - p1 if p99 > p1 else max(abs(p99), 1.0)
+        y_range = [p1 - spread * 0.05, p99 + spread * 0.05]
+    else:
+        y_range = None
+
     fig.update_layout(
-        height=280,
-        margin=dict(t=58, b=40, l=50, r=20),
+        # La serie es la evidencia principal: reservamos una altura amplia
+        # para que las excursiones, limites y ventanas de eventos sean legibles.
+        height=620,
+        margin=dict(t=88, b=72, l=55, r=20),
         xaxis_title="",
         xaxis=dict(
             range=[initial_start, latest_observed] if initial_start is not None else None,
             autorange=False if initial_start is not None else True,
+            rangeslider=dict(visible=True, thickness=0.08),
+            rangeselector=dict(
+                buttons=[
+                    dict(count=7, label='Última semana', step='day', stepmode='backward'),
+                    dict(count=14, label='Últimas 2 semanas', step='day', stepmode='backward'),
+                    dict(count=1, label='Último mes', step='month', stepmode='backward'),
+                ],
+                x=0,
+                y=1.16,
+                xanchor='left',
+            ),
         ),
         yaxis_title="Valor",
+        yaxis=dict(range=y_range, autorange=y_range is None),
         legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
         hovermode='x unified'
     )
@@ -438,6 +516,7 @@ def build_signal_timeseries_card(
         font=dict(size=11, color='#495057'),
         bgcolor='#f8f9fa', bordercolor='#dee2e6', borderwidth=1,
     )
+    fig.layout.annotations = []
     return fig
 
 
@@ -448,7 +527,8 @@ def _event_windows(events_df: Optional[pd.DataFrame], signal_name: str):
     events = events_df.copy()
     signal_col = 'signal' if 'signal' in events.columns else 'feature'
     if signal_col in events.columns:
-        events = events[events[signal_col].astype(str) == str(signal_name)]
+        expected = str(signal_name).strip().casefold()
+        events = events[events[signal_col].astype(str).str.strip().str.casefold() == expected]
     if events.empty or 'start_time' not in events.columns:
         return [], 0, 0
     events['start'] = pd.to_datetime(events['start_time'], errors='coerce')
@@ -459,11 +539,19 @@ def _event_windows(events_df: Optional[pd.DataFrame], signal_name: str):
     if events.empty:
         return [], 0, 0
 
-    def kind(row):
-        labels = f"{row.get('event_type_binary', '')} {row.get('event_type_weighted', '')}".lower()
-        return 'anomaly' if 'anomal' in labels else 'event'
-
-    events['kind'] = events.apply(kind, axis=1)
+    binary_labels = events.get(
+        'event_type_binary', pd.Series('', index=events.index)
+    ).fillna('').astype(str)
+    weighted_labels = events.get(
+        'event_type_weighted', pd.Series('', index=events.index)
+    ).fillna('').astype(str)
+    # Vectorized classification avoids a Python-level apply over potentially
+    # hundreds of thousands of materialized episodes.
+    events['kind'] = np.where(
+        binary_labels.str.cat(weighted_labels, sep=' ').str.contains('anomal', case=False, na=False),
+        'anomaly',
+        'event',
+    )
     anomaly_count = int((events['kind'] == 'anomaly').sum())
     event_count = int((events['kind'] == 'event').sum())
     windows = []
@@ -491,7 +579,8 @@ def _max_episode_start(events_df: Optional[pd.DataFrame], signal_name: str):
     events = events_df.copy()
     signal_col = 'signal' if 'signal' in events.columns else 'feature'
     if signal_col in events.columns:
-        events = events[events[signal_col].astype(str) == str(signal_name)]
+        expected = str(signal_name).strip().casefold()
+        events = events[events[signal_col].astype(str).str.strip().str.casefold() == expected]
     if events.empty:
         return None
     duration_col = 'duration_minutes' if 'duration_minutes' in events.columns else None

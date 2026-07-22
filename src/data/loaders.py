@@ -10,6 +10,7 @@ Load data from different layers:
 import pandas as pd
 import json
 import warnings
+from functools import lru_cache
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -17,6 +18,13 @@ from src.utils.logger import get_logger
 from src.utils.file_utils import list_excel_files, safe_read_excel, safe_read_parquet
 
 logger = get_logger(__name__)
+
+
+# These files are read by several Dash callbacks during a single interaction
+# (filters, tables, charts and detail cards).  Keep one process-local parsed
+# copy and return defensive copies from the public loaders.  The cache is
+# cleared when the dashboard process restarts, which is also the normal data
+# refresh boundary for the mounted data directory.
 
 
 def load_essays_mapping(file_path: str | Path = "essays_elements.xlsx") -> pd.DataFrame:
@@ -384,7 +392,8 @@ def load_silver_data(file_path: str | Path) -> pd.DataFrame:
 # ALERTS DASHBOARD LOADERS (CDA ONLY)
 # ========================================
 
-def load_alerts_data(client: str) -> pd.DataFrame:
+@lru_cache(maxsize=8)
+def _load_alerts_data_cached(client: str) -> pd.DataFrame:
     """
     Load consolidated alerts data for a specific client.
     
@@ -423,6 +432,11 @@ def load_alerts_data(client: str) -> pd.DataFrame:
     except Exception as e:
         logger.error(f"Error loading alerts data: {e}")
         return pd.DataFrame()
+
+
+def load_alerts_data(client: str) -> pd.DataFrame:
+    """Return alerts data without re-reading the CSV for every callback."""
+    return _load_alerts_data_cached((client or '').lower()).copy(deep=True)
 
 
 def load_telemetry_values(client: str) -> pd.DataFrame:
@@ -592,7 +606,8 @@ def load_feature_names(client: str) -> Dict[str, str]:
         return {}
 
 
-def load_telemetry_alerts_detail_golden(client: str) -> pd.DataFrame:
+@lru_cache(maxsize=8)
+def _load_telemetry_alerts_detail_golden_cached(client: str) -> pd.DataFrame:
     """
     Load pre-processed telemetry alert details from golden layer.
     This file contains all signals, limits, and GPS data for alerts in wide format.
@@ -626,7 +641,13 @@ def load_telemetry_alerts_detail_golden(client: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def load_oil_classified(client: str) -> pd.DataFrame:
+def load_telemetry_alerts_detail_golden(client: str) -> pd.DataFrame:
+    """Return cached golden alert evidence as a defensive copy."""
+    return _load_telemetry_alerts_detail_golden_cached((client or '').lower()).copy(deep=True)
+
+
+@lru_cache(maxsize=8)
+def _load_oil_classified_cached(client: str) -> pd.DataFrame:
     """
     Load classified oil reports for alerts dashboard.
     
@@ -653,6 +674,11 @@ def load_oil_classified(client: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def load_oil_classified(client: str) -> pd.DataFrame:
+    """Return cached classified oil data as a defensive copy."""
+    return _load_oil_classified_cached((client or '').lower()).copy(deep=True)
+
+
 
 # ========================================
 # TELEMETRY HEALTH DASHBOARD LOADERS
@@ -670,6 +696,94 @@ def _filter_latest_week(df: pd.DataFrame) -> pd.DataFrame:
         latest_week = week_col[year_col == latest_year].max()
         df = df[(year_col == latest_year) & (week_col == latest_week)]
     return df
+
+
+def _latest_telemetry_partition(base: Path) -> Path:
+    """Select one materialized year/week partition before reading parquet.
+
+    The S3 export can contain an older flat parquet tree alongside the newer
+    Spark-style ``year=YYYY/week=WW`` output.  Reading both trees at once can
+    fail when schemas evolved (for example, a list column becoming a string),
+    so the dashboard must select the latest partition first.
+    """
+    if not base.is_dir():
+        return base
+    partitions = []
+    for year_dir in base.glob("year=*"):
+        if not year_dir.is_dir():
+            continue
+        try:
+            year = int(year_dir.name.split("=", 1)[1])
+        except (IndexError, ValueError):
+            continue
+        for week_dir in year_dir.glob("week=*"):
+            if not week_dir.is_dir():
+                continue
+            try:
+                week = int(week_dir.name.split("=", 1)[1])
+            except (IndexError, ValueError):
+                continue
+            partitions.append((year, week, week_dir))
+    if not partitions:
+        return base
+    return max(partitions, key=lambda item: (item[0], item[1]))[2]
+
+
+def _keep_latest_execution(df: pd.DataFrame, keys: list[str]) -> pd.DataFrame:
+    """Keep one row per entity when a partition contains repeated runs."""
+    if df.empty or not keys:
+        return df
+    timestamp_col = next(
+        (column for column in ("execution_timestamp", "evaluation_timestamp") if column in df.columns),
+        None,
+    )
+    available_keys = [key for key in keys if key in df.columns]
+    if not timestamp_col or not available_keys:
+        return df
+    result = df.copy()
+    result["__telemetry_execution_ts"] = pd.to_datetime(result[timestamp_col], errors="coerce")
+    if result["__telemetry_execution_ts"].notna().any():
+        result = result.sort_values("__telemetry_execution_ts")
+        result = result.drop_duplicates(subset=available_keys, keep="last")
+    return result.drop(columns=["__telemetry_execution_ts"], errors="ignore")
+
+
+def _load_latest_telemetry_output(
+    paths: list[Path],
+    label: str,
+    dedupe_keys: list[str] | None = None,
+    columns: list[str] | None = None,
+) -> pd.DataFrame:
+    """Read the newest partition from the first available output location."""
+    base = next((path for path in paths if path.exists()), None)
+    if base is None:
+        logger.warning("%s path not found: %s", label, paths[0])
+        return pd.DataFrame()
+    target = _latest_telemetry_partition(base)
+    try:
+        # Event output can contain millions of rows.  Read only the fields
+        # consumed by the report and chart layer when a projection is given.
+        read_columns = columns
+        if columns:
+            try:
+                import pyarrow.parquet as pq
+                schema_path = target
+                if schema_path.is_dir():
+                    schema_path = next(schema_path.rglob("*.parquet"), schema_path)
+                available = set(pq.ParquetFile(schema_path).schema.names)
+                read_columns = [column for column in columns if column in available]
+            except Exception:
+                # Let pandas perform the read if schema inspection is not
+                # available (legacy parquet engines may not expose it).
+                read_columns = columns
+        df = safe_read_parquet(target, columns=read_columns) if read_columns else safe_read_parquet(target)
+        df = _filter_latest_week(df)
+        df = _keep_latest_execution(df, dedupe_keys or [])
+        logger.info("Loaded %s %s records from %s", len(df), label, target)
+        return df
+    except Exception as e:
+        logger.error("Error loading %s: %s", label, e)
+        return pd.DataFrame()
 
 
 def load_telemetry_unit_health(client: str) -> pd.DataFrame:
@@ -690,8 +804,9 @@ def load_telemetry_unit_health(client: str) -> pd.DataFrame:
         return pd.DataFrame()
 
     try:
-        df = safe_read_parquet(base)
+        df = safe_read_parquet(_latest_telemetry_partition(base))
         df = _filter_latest_week(df)
+        df = _keep_latest_execution(df, ["unit"])
         logger.info(f"Loaded {len(df)} unit health records")
         return df
     except Exception as e:
@@ -717,8 +832,9 @@ def load_telemetry_system_health(client: str) -> pd.DataFrame:
         return pd.DataFrame()
 
     try:
-        df = safe_read_parquet(base)
+        df = safe_read_parquet(_latest_telemetry_partition(base))
         df = _filter_latest_week(df)
+        df = _keep_latest_execution(df, ["unit", "system"])
         logger.info(f"Loaded {len(df)} system health records")
         return df
     except Exception as e:
@@ -736,19 +852,12 @@ def load_telemetry_deviation_results(client: str) -> pd.DataFrame:
     Returns:
         DataFrame with per-signal deviation risk scores and abnormal percentages
     """
-    base = Path(f"data/telemetry/golden/{client.lower()}/technique_results/deviation")
-    if not base.exists():
-        logger.warning(f"Deviation results path not found: {base}")
-        return pd.DataFrame()
-
-    try:
-        df = safe_read_parquet(base)
-        df = _filter_latest_week(df)
-        logger.info(f"Loaded {len(df)} deviation results")
-        return df
-    except Exception as e:
-        logger.error(f"Error loading deviation results: {e}")
-        return pd.DataFrame()
+    root = Path(f"data/telemetry/golden/{client.lower()}")
+    return _load_latest_telemetry_output(
+        [root / "deviation_summary", root / "technique_results" / "deviation"],
+        "deviation results",
+        ["unit", "system", "signal"],
+    )
 
 
 def load_telemetry_events(client: str) -> pd.DataFrame:
@@ -761,19 +870,16 @@ def load_telemetry_events(client: str) -> pd.DataFrame:
     Returns:
         DataFrame with abnormal episodes (duration, severity, classification)
     """
-    base = Path(f"data/telemetry/golden/{client.lower()}/technique_results/events")
-    if not base.exists():
-        logger.warning(f"Events path not found: {base}")
-        return pd.DataFrame()
-
-    try:
-        df = safe_read_parquet(base)
-        df = _filter_latest_week(df)
-        logger.info(f"Loaded {len(df)} event records")
-        return df
-    except Exception as e:
-        logger.error(f"Error loading events: {e}")
-        return pd.DataFrame()
+    root = Path(f"data/telemetry/golden/{client.lower()}")
+    return _load_latest_telemetry_output(
+        [root / "event_results", root / "technique_results" / "events"],
+        "event records",
+        columns=[
+            "unit", "feature", "signal", "event_id", "event_group",
+            "start_time", "end_time", "duration_minutes",
+            "event_type_binary", "event_type_weighted", "execution_timestamp",
+        ],
+    )
 
 
 def load_telemetry_trends(client: str) -> pd.DataFrame:
@@ -786,19 +892,12 @@ def load_telemetry_trends(client: str) -> pd.DataFrame:
     Returns:
         DataFrame with trend significance, slopes, and interpretations
     """
-    base = Path(f"data/telemetry/golden/{client.lower()}/technique_results/trend")
-    if not base.exists():
-        logger.warning(f"Trend results path not found: {base}")
-        return pd.DataFrame()
-
-    try:
-        df = safe_read_parquet(base)
-        df = _filter_latest_week(df)
-        logger.info(f"Loaded {len(df)} trend results")
-        return df
-    except Exception as e:
-        logger.error(f"Error loading trend results: {e}")
-        return pd.DataFrame()
+    root = Path(f"data/telemetry/golden/{client.lower()}")
+    return _load_latest_telemetry_output(
+        [root / "trend_results", root / "technique_results" / "trend"],
+        "trend results",
+        ["unit", "system", "signal", "window_weeks"],
+    )
 
 
 def load_telemetry_baselines(client: str) -> pd.DataFrame:
@@ -879,7 +978,12 @@ def load_telemetry_limits(client: str) -> pd.DataFrame:
     return load_telemetry_baselines(client)
 
 
-def load_silver_telemetry_week(client: str, week: int, year: int) -> pd.DataFrame:
+def load_silver_telemetry_week(
+    client: str,
+    week: int,
+    year: int,
+    columns: Optional[List[str]] = None,
+) -> pd.DataFrame:
     """
     Load silver layer telemetry data for a specific week.
     
@@ -897,7 +1001,19 @@ def load_silver_telemetry_week(client: str, week: int, year: int) -> pd.DataFram
         return pd.DataFrame()
 
     try:
-        df = safe_read_parquet(file_path)
+        read_columns = columns
+        if columns:
+            # Avoid loading the complete wide table for a single signal.  The
+            # schema check also handles weeks where a legacy signal is absent.
+            try:
+                import pyarrow.parquet as pq
+                available = set(pq.ParquetFile(file_path).schema.names)
+                read_columns = [column for column in columns if column in available]
+                if not {"Unit", "Fecha"}.issubset(read_columns):
+                    return pd.DataFrame()
+            except Exception:
+                read_columns = columns
+        df = safe_read_parquet(file_path, columns=read_columns) if read_columns else safe_read_parquet(file_path)
         if 'Fecha' in df.columns:
             df['Fecha'] = pd.to_datetime(df['Fecha'])
         return df
@@ -918,29 +1034,47 @@ def load_telemetry_ai_comments(client: str, level: str) -> pd.DataFrame:
         DataFrame with AI comments for the specified level.
         Returns empty DataFrame if data not available.
     """
-    base = Path(f"data/telemetry/golden/{client.lower()}/ai_comments")
-    if not base.exists():
+    root = Path(f"data/telemetry/golden/{client.lower()}")
+    if level not in {"unit", "system", "signal"}:
+        logger.warning("Unknown telemetry AI comment level: %s", level)
         return pd.DataFrame()
 
-    filename = f"{level}_comments.parquet"
+    # The current pipeline writes one directory per level.  The legacy
+    # ``ai_comments/{level}_comments.parquet`` tree is kept only as fallback;
+    # otherwise a stale week-26 comment can be joined to a week-30 health row.
+    candidate_bases = [
+        root / f"ai_{level}_comments",
+        root / "ai_comments",
+    ]
+    dedupe_keys = {
+        "unit": ["unit"],
+        "system": ["unit", "system"],
+        "signal": ["unit", "system", "signal"],
+    }[level]
 
-    # Search in partitioned structure (year=YYYY/week=WW/) or flat
     try:
-        # Try partitioned read first
-        parquet_files = sorted(base.rglob(filename))
-        if parquet_files:
-            # Load latest partition
-            df = safe_read_parquet(parquet_files[-1])
-            logger.info(f"Loaded {len(df)} {level} AI comments")
-            return df
+        for base in candidate_bases:
+            if not base.exists():
+                continue
+            target = _latest_telemetry_partition(base)
+            if target.is_file():
+                parquet_target = target
+            else:
+                parquet_files = sorted(target.rglob("*.parquet"))
+                parquet_target = target if parquet_files else None
+            if parquet_target is None:
+                continue
 
-        # Fallback: try as directory of parquet files
-        level_dir = base / f"{level}_comments"
-        if level_dir.exists():
-            df = safe_read_parquet(level_dir)
-            logger.info(f"Loaded {len(df)} {level} AI comments from directory")
+            df = safe_read_parquet(parquet_target)
+            if df.empty:
+                continue
+            df = _filter_latest_week(df)
+            df = _keep_latest_execution(df, dedupe_keys)
+            logger.info(
+                "Loaded %s %s AI comments from %s",
+                len(df), level, target,
+            )
             return df
-
         return pd.DataFrame()
     except Exception as e:
         logger.error(f"Error loading {level} AI comments: {e}")

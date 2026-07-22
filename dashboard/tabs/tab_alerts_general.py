@@ -1,389 +1,106 @@
-"""
-Alerts General Tab Layout.
+"""Executive alerts overview layout."""
 
-Displays:
-- Distribution of Alerts per Unit (horizontal bar chart)
-- Distribution of Alerts per Month (vertical bar chart)
-- Distribution of Alert Trigger (treemap)
-- Alerts Table (interactive DataTable)
-"""
-
+from datetime import date, timedelta
 from dash import html, dcc
 import dash_bootstrap_components as dbc
-from src.utils.logger import get_logger
 
-logger = get_logger(__name__)
+
+def _default_alert_dates() -> tuple[str, str]:
+    today = date.today()
+    return (today - timedelta(days=27)).isoformat(), today.isoformat()
 
 
 def create_layout() -> html.Div:
-    """
-    Create layout for Alerts General tab.
-    
-    Returns:
-        Dash HTML Div with complete general tab layout
-    """
-    logger.info("Creating Alerts General Tab layout")
-    
-    layout = html.Div([
-        # Summary stats at the top
-        html.Div(id='alerts-summary-stats', className="mb-3"),
-
-        # Shared report filters. These filters drive KPIs, charts and the table.
+    start_date, end_date = _default_alert_dates()
+    return html.Div([
+        dcc.Store(id="alerts-selected-alert-id"),
+        html.Div(id="alerts-summary-stats", className="mb-3"),
         dbc.Card([
             dbc.CardBody([
                 dbc.Row([
                     dbc.Col([
-                        html.Label("Unidad", className="small fw-bold"),
-                        dcc.Dropdown(
-                            id="alerts-general-unit-filter",
-                            options=[], multi=True, clearable=True,
-                            placeholder="Todas las unidades"
-                        )
-                    ], md=3),
+                        html.Div([
+                            html.I(className="fas fa-filter me-2"),
+                            html.Span("Filtro temporal", className="fw-bold"),
+                        ], className="d-flex align-items-center mb-2"),
+                    ], width="auto"),
                     dbc.Col([
-                        html.Label("Sistema", className="small fw-bold"),
-                        dcc.Dropdown(
-                            id="alerts-general-system-filter",
-                            options=[], multi=True, clearable=True,
-                            placeholder="Todos los sistemas"
-                        )
-                    ], md=3),
+                        dcc.DatePickerRange(
+                            id="alerts-date-range-picker",
+                            start_date=start_date,
+                            end_date=end_date,
+                            display_format="DD/MM/YYYY",
+                            start_date_placeholder_text="Fecha inicio",
+                            end_date_placeholder_text="Fecha fin",
+                            clearable=False,
+                            className="w-100",
+                        ),
+                    ], width="auto"),
                     dbc.Col([
-                        html.Label("Fuente", className="small fw-bold"),
-                        dcc.Dropdown(
-                            id="alerts-general-source-filter",
-                            options=[
-                                {"label": "Telemetría", "value": "Telemetría"},
-                                {"label": "Tribología", "value": "Tribología"},
-                                {"label": "Mixto", "value": "Mixto"},
-                            ], multi=True, clearable=True,
-                            placeholder="Todas las fuentes"
+                        dbc.Button(
+                            [html.I(className="fas fa-undo me-1"), "Restablecer últimas 4 semanas"],
+                            id="alerts-date-range-clear",
+                            color="outline-secondary",
+                            size="sm",
                         )
-                    ], md=3),
-                    dbc.Col([
-                        html.Label("Evidencia disponible", className="small fw-bold"),
-                        dcc.Dropdown(
-                            id="alerts-general-evidence-filter",
-                            options=[
-                                {"label": "Telemetría", "value": "Telemetría"},
-                                {"label": "Tribología", "value": "Tribología"},
-                                {"label": "Telemetría + Tribología", "value": "Telemetría + Tribología"},
-                                {"label": "Sin evidencia", "value": "Sin evidencia"},
-                            ], multi=True, clearable=True,
-                            placeholder="Toda la evidencia"
-                        )
-                    ], md=3),
-                ], className="g-3"),
-                html.Div(id="alerts-general-filter-summary", className="small text-muted mt-2")
+                    ], width="auto"),
+                ], align="center", className="g-2"),
+                html.Div(id="alerts-general-filter-summary", className="small text-muted mt-2"),
             ])
         ], className="shadow-sm mb-3"),
-        
-        # Date Range Filter
+        html.H4([html.I(className="fas fa-chart-bar me-2"), "Análisis semanal de alertas"], className="text-primary mb-3 mt-4"),
         dbc.Row([
             dbc.Col([
                 dbc.Card([
-                    dbc.CardBody([
-                        dbc.Row([
-                            dbc.Col([
-                                html.Div([
-                                    html.I(className="fas fa-filter me-2"),
-                                    html.Span("Filtro Temporal", style={'fontWeight': 'bold'}),
-                                ], className="d-flex align-items-center mb-2"),
-                            ], width="auto"),
-                            dbc.Col([
-                                dcc.DatePickerRange(
-                                    id='alerts-date-range-picker',
-                                    display_format='DD/MM/YYYY',
-                                    start_date_placeholder_text='Fecha inicio',
-                                    end_date_placeholder_text='Fecha fin',
-                                    clearable=True,
-                                    className="w-100"
-                                ),
-                            ], width="auto"),
-                            dbc.Col([
-                                dbc.Button([
-                                    html.I(className="fas fa-times me-1"),
-                                    "Limpiar"
-                                ], id='alerts-date-range-clear', color="outline-secondary", size="sm")
-                            ], width="auto"),
-                        ], align="center", className="g-2"),
-                    ], className="py-2 px-3")
-                ], className="shadow-sm mb-3")
-            ])
-        ]),
-        
-        # Analytics Section Header
-        html.Div([
-            html.H4([
-                html.I(className="fas fa-chart-bar me-2"),
-                "Análisis de Alertas"
-            ], className="text-primary mb-3 mt-4")
-        ]),
-        
-        # Top Row: 2 Analytics Charts (Unit | Month) - Removed redundant trigger distribution
-        dbc.Row([
-            # Distribution per Unit
+                    dbc.CardHeader(html.H5([html.I(className="fas fa-truck me-2"), "Distribución por unidad"], className="mb-0"), className="bg-light"),
+                    dbc.CardBody(dcc.Loading(dcc.Graph(id="alerts-unit-distribution-chart", config={"displayModeBar": False}), type="circle")),
+                ], className="shadow-sm mb-4 h-100"),
+            ], lg=4),
             dbc.Col([
                 dbc.Card([
-                    dbc.CardHeader([
-                        html.H5([
-                            html.I(className="fas fa-truck me-2"),
-                            "Distribución por Unidad"
-                        ], className="mb-0")
-                    ], className="bg-light"),
-                    dbc.CardBody([
-                        dcc.Loading(
-                            id="loading-unit-chart",
-                            type="circle",
-                            children=[
-                                dcc.Graph(
-                                    id='alerts-unit-distribution-chart',
-                                    config={'displayModeBar': False},
-                                    clear_on_unhover=True
-                                )
-                            ]
-                        )
-                    ])
-                ], className="shadow-sm mb-4 h-100")
-            ], md=6),
-            
-            # Distribution per Month
+                    dbc.CardHeader(html.H5([html.I(className="fas fa-calendar-week me-2"), "Evolución temporal"], className="mb-0"), className="bg-light"),
+                    dbc.CardBody(dcc.Loading(dcc.Graph(id="alerts-month-distribution-chart", config={"displayModeBar": False}), type="circle")),
+                ], className="shadow-sm mb-4 h-100"),
+            ], lg=4),
             dbc.Col([
                 dbc.Card([
-                    dbc.CardHeader([
-                        html.H5([
-                            html.I(className="fas fa-calendar-alt me-2"),
-                            "Evolución Temporal"
-                        ], className="mb-0")
-                    ], className="bg-light"),
-                    dbc.CardBody([
-                        dcc.Loading(
-                            id="loading-month-chart",
-                            type="circle",
-                            children=[
-                                dcc.Graph(
-                                    id='alerts-month-distribution-chart',
-                                    config={'displayModeBar': False},
-                                    clear_on_unhover=True
-                                )
-                            ]
-                        )
-                    ])
-                ], className="shadow-sm mb-4 h-100")
-            ], md=6)
-        ]),
-        
-        # Data Section Header
-        html.Div([
-            html.H4([
-                html.I(className="fas fa-database me-2"),
-                "Listado de Alertas"
-            ], className="text-primary mb-3 mt-4")
-        ]),
-        
-        # Bottom Row: Table (9 cols) | System Distribution (3 cols)
-        dbc.Row([
-            # Alerts Table Section
-            dbc.Col([
-                dbc.Card([
-                    dbc.CardHeader([
-                        html.H5([
-                            html.I(className="fas fa-table me-2"),
-                            "Todas las Alertas"
-                        ], className="mb-0"),
-                        html.Br(),
-                        html.Small(
-                            "💡 Haga clic en cualquier fila para ver el análisis detallado",
-                            className="text-muted"
-                        )
-                    ], className="bg-light"),
-                    dbc.CardBody([
-                        # Table
-                        dcc.Loading(
-                            id="loading-alerts-table",
-                            type="circle",
-                            children=[
-                                html.Div(id='alerts-table-container')
-                            ]
-                        )
-                        ,html.Div(id='alerts-general-selected-alert', className="mt-3 px-3 pb-3")
-                    ], className="p-0")
-                ], className="shadow mb-4")
-            ], md=9),
-            
-            # System Distribution Pie Chart
-            dbc.Col([
-                dbc.Card([
-                    dbc.CardHeader([
-                        html.H5([
-                            html.I(className="fas fa-cogs me-2"),
-                            "Por Sistema"
-                        ], className="mb-0 text-center")
-                    ], className="bg-light"),
-                    dbc.CardBody([
-                        dcc.Loading(
-                            id="loading-system-chart",
-                            type="circle",
-                            children=[
-                                dcc.Graph(
-                                    id='alerts-system-distribution-chart',
-                                    config={'displayModeBar': False},
-                                    clear_on_unhover=True
-                                )
-                            ]
-                        )
-                    ])
-                ], className="shadow mb-4")
-            ], md=3)
-        ]),
-        
-        # Navigation Section
-        html.Div([
-            html.H4([
-                html.I(className="fas fa-search-plus me-2"),
-                "Análisis Detallado"
-            ], className="text-primary mb-3 mt-4")
-        ]),
-        
+                    dbc.CardHeader(html.H5([html.I(className="fas fa-cogs me-2"), "Distribución por sistema"], className="mb-0"), className="bg-light"),
+                    dbc.CardBody(dcc.Loading(dcc.Graph(id="alerts-system-distribution-chart", config={"displayModeBar": False}), type="circle")),
+                ], className="shadow-sm mb-4 h-100"),
+            ], lg=4),
+        ], className="g-3"),
+        html.H4([html.I(className="fas fa-database me-2"), "Listado de alertas"], className="text-primary mb-3 mt-4"),
         dbc.Card([
             dbc.CardHeader([
-                html.H5([
-                    html.I(className="fas fa-microscope me-2"),
-                    "Explorar Alerta en Detalle"
-                ], className="mb-0")
-            ], className="bg-primary text-white"),
+                html.H5([html.I(className="fas fa-table me-2"), "Alertas del período"], className="mb-0"),
+                html.Small("Seleccione una fila para leer el resumen completo.", className="text-muted"),
+            ], className="bg-light"),
             dbc.CardBody([
-                dbc.Row([
-                    dbc.Col([
-                        html.Label("Seleccione una alerta para análisis completo:", className="fw-bold mb-2"),
-                        html.P("Acceda a evidencia de telemetría, análisis de aceite y contexto de mantenimiento", 
-                               className="text-muted small mb-3"),
-                        dcc.Dropdown(
-                            id='general-alert-selector',
-                            placeholder="Buscar por ID, unidad o sistema...",
-                            clearable=True,
-                            searchable=True
-                        )
-                    ], md=9),
-                    dbc.Col([
-                        html.Label(html.Br()),  # Spacer to align with dropdown
-                        dbc.Button(
-                            [
-                                html.I(className="fas fa-arrow-circle-right me-2"),
-                                "Ver Detalle"
-                            ],
-                            id='general-nav-to-detail-button',
-                            color='primary',
-                            size='lg',
-                            className='w-100 mt-4'
-                        )
-                    ], md=3)
-                ], className="g-2")
-            ])
-        ], className="shadow mb-4")
+                dcc.Loading(html.Div(id="alerts-table-container"), type="circle"),
+                html.Div(id="alerts-general-selected-alert", className="mt-3 px-2 pb-2"),
+            ], className="p-2"),
+        ], className="shadow-sm mb-4"),
     ], className="p-4")
-    
-    logger.info("Alerts General Tab layout created successfully")
-    return layout
 
 
-def create_summary_stats_display(total_alerts: int, 
-                                 total_units: int, 
-                                 telemetry_pct: float, 
-                                 oil_pct: float,
-                                 mixed_count: int = 0) -> html.Div:
-    """
-    Create summary statistics display with semantic colors and clear hierarchy.
-    
-    Args:
-        total_alerts: Total number of alerts
-        total_units: Total number of unique units with alerts
-        telemetry_pct: Percentage of alerts with telemetry evidence
-        oil_pct: Percentage of alerts with oil evidence
-    
-    Returns:
-        HTML Div with KPI section
-    """
+def create_summary_stats_display(total_alerts: int, total_units: int, telemetry_pct: float = 0, oil_pct: float = 0, mixed_count: int = 0) -> html.Div:
+    """Render only the three client-facing alert KPIs."""
+    cards = [
+        ("Total de alertas", total_alerts, "fas fa-exclamation-triangle", "#355c7d", "#eef4f8"),
+        ("Unidades afectadas", total_units, "fas fa-truck", "#4f8a8b", "#edf7f6"),
+        ("Alertas mixtas", mixed_count, "fas fa-layer-group", "#7c6a9a", "#f3eff8"),
+    ]
     return html.Div([
-        # Section Header
-        html.Div([
-            html.H4([
-                html.I(className="fas fa-chart-line me-2"),
-                "Resumen Ejecutivo"
-            ], className="text-primary mb-3")
-        ]),
-        
-        # KPI Cards Row
+        html.H4([html.I(className="fas fa-chart-line me-2"), "Resumen ejecutivo"], className="text-primary mb-3"),
         dbc.Row([
-            # Total Alerts - Primary metric
-            dbc.Col([
-                dbc.Card([
-                    dbc.CardBody([
-                        html.Div([
-                            html.I(className="fas fa-exclamation-triangle fa-2x text-danger mb-2"),
-                            html.H6("Total de Alertas", className="text-muted text-uppercase mb-2", 
-                                   style={'fontSize': '0.85rem', 'letterSpacing': '0.5px'}),
-                            html.H2(f"{total_alerts:,}", className="text-danger mb-0 fw-bold")
-                        ], className="text-center")
-                    ])
-                ], className="shadow-sm border-0", style={'backgroundColor': '#fff5f5'})
-            ], style={'flex': '1 1 0', 'minWidth': '150px'}),
-            
-            # Affected Units - Info metric
-            dbc.Col([
-                dbc.Card([
-                    dbc.CardBody([
-                        html.Div([
-                            html.I(className="fas fa-truck fa-2x text-info mb-2"),
-                            html.H6("Unidades Afectadas", className="text-muted text-uppercase mb-2",
-                                   style={'fontSize': '0.85rem', 'letterSpacing': '0.5px'}),
-                            html.H2(f"{total_units}", className="text-info mb-0 fw-bold")
-                        ], className="text-center")
-                    ])
-                ], className="shadow-sm border-0", style={'backgroundColor': '#f0f8ff'})
-            ], style={'flex': '1 1 0', 'minWidth': '150px'}),
-            
-            # Telemetry Coverage - Success metric
-            dbc.Col([
-                dbc.Card([
-                    dbc.CardBody([
-                        html.Div([
-                            html.I(className="fas fa-signal fa-2x text-success mb-2"),
-                            html.H6("Con Telemetría", className="text-muted text-uppercase mb-2",
-                                   style={'fontSize': '0.85rem', 'letterSpacing': '0.5px'}),
-                            html.H2(f"{telemetry_pct:.1f}%", className="text-success mb-0 fw-bold")
-                        ], className="text-center")
-                    ])
-                ], className="shadow-sm border-0", style={'backgroundColor': '#f0fff4'})
-            ], style={'flex': '1 1 0', 'minWidth': '150px'}),
-            
-        # Mixed alerts - purple metric
-        dbc.Col([
-            dbc.Card([
-                dbc.CardBody([
+            dbc.Col(
+                dbc.Card(dbc.CardBody([
                     html.Div([
-                            html.I(className="fas fa-code-branch fa-2x text-purple mb-2"),
-                            html.H6("Alertas Mixtas", className="text-muted text-uppercase mb-2",
-                                   style={'fontSize': '0.85rem', 'letterSpacing': '0.5px'}),
-                            html.H2(f"{mixed_count}", className="mb-0 fw-bold", style={'color': '#6f42c1'})
-                        ], className="text-center")
-                    ])
-                ], className="shadow-sm border-0", style={'backgroundColor': '#f5f0ff'})
-            ], style={'flex': '1 1 0', 'minWidth': '150px'}),
-
-            # Oil evidence coverage retained as a compact secondary metric
-            dbc.Col([
-                dbc.Card([
-                    dbc.CardBody([
-                        html.Div([
-                            html.I(className="fas fa-oil-can fa-2x text-warning mb-2"),
-                            html.H6("Con Tribología", className="text-muted text-uppercase mb-2",
-                                   style={'fontSize': '0.85rem', 'letterSpacing': '0.5px'}),
-                            html.H2(f"{oil_pct:.1f}%", className="text-warning mb-0 fw-bold")
-                        ], className="text-center")
-                    ])
-                ], className="shadow-sm border-0", style={'backgroundColor': '#fffcf0'})
-            ], style={'flex': '1 1 0', 'minWidth': '150px'})
-        ], className="g-3 mb-4", style={'display': 'flex', 'flexWrap': 'wrap'})
+                        html.I(className=f"{icon} fa-2x mb-2", style={"color": color}),
+                        html.H6(label, className="text-muted text-uppercase mb-2", style={"fontSize": "0.82rem", "letterSpacing": "0.4px"}),
+                        html.H2(f"{value:,}", className="mb-0 fw-bold", style={"color": color}),
+                    ], className="text-center")
+                ]), className="shadow-sm border-0", style={"backgroundColor": background}), md=4
+            ) for label, value, icon, color, background in cards
+        ], className="g-3"),
     ])
-
