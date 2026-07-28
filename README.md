@@ -197,11 +197,3 @@ USERS = {
 - [Alerts Data Contracts](documentation/alerts/data_contracts.md)
 - [Mantentions Data Contracts](documentation/mantentions/data_contracts.md)
 
----
-
-<div align="center">
-
-**v3.0** — Junio 2026  
-Made with ❤️ by CODDI
-
-</div>

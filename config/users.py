@@ -48,6 +48,14 @@ USERS: Dict[str, Dict[str, any]] = {
         "clients": ["ENEX"],  # Only ENEX data
         "role": "client"
     },
+    # Lomas User for ENEX data
+    "lomas_user" : {
+        "password": hash_password("Lomas.2026"),  # Change in production!
+        "name": "Lomas User",
+        "clients": ["ENEX"],  # Only ENEX data
+        "role": "client"
+        
+    },
     "capstone_user": {
         "password": hash_password("Capstone.2026"),  # Change in production!
         "name": "Capstone User",
