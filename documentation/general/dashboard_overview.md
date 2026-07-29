@@ -1,7 +1,7 @@
 # Multi-Technical Alerts Dashboard - Overview
 
-**Version**: 2.1.0  
-**Last Updated**: April 10, 2026  
+**Version**: 2.2.0  
+**Last Updated**: July 28, 2026  
 **Owner**: Technical Alerts Team
 
 ---
@@ -45,31 +45,47 @@ The platform provides intuitive visualizations that help users:
 
 ## 📊 Data Sources
 
-The dashboard integrates four primary data sources:
+The dashboard integrates five primary data sources, all consumed as pre-processed Gold-layer
+files under `data/{technique}/golden|silver/{client}/`. **This repository does not process raw
+data** — it reads the output of an upstream data pipeline, syncing it from S3 on startup if the
+local `data/` folder is absent (see `src/data/s3_downloader.py`).
 
 ### 1. **Oil (Tribology Analysis)**
 - **Purpose**: Analyze oil samples to detect component wear and contamination
 - **Frequency**: Periodic sampling (weekly/monthly)
-- **Key Outputs**: Essay classifications, component health status, AI recommendations
+- **Key Outputs**: Essay classifications, component health status, AI recommendations, lab
+  turnaround-time compliance
 - **Status**: ✅ **Fully Implemented**
 
 ### 2. **Telemetry (Sensor Data)**
-- **Purpose**: Real-time monitoring of equipment sensors and operational parameters
-- **Frequency**: Continuous streaming data
-- **Key Outputs**: Sensor alerts, trend analysis, operational state tracking
-- **Status**: 🔄 **In Progress**
+- **Purpose**: Monitoring of equipment sensors and operational parameters
+- **Frequency**: Weekly-aggregated silver-layer snapshots
+- **Key Outputs**: Fleet/system status matrix, unit → system → signal drill-down with AI commentary
+- **Status**: 🔄 **In Progress** (functional fleet + unit-detail views; a previously-planned
+  signal-level baseline "Limits" UI, showing P2/P5/P95/P98 percentile thresholds per signal, is
+  not currently wired into navigation)
 
 ### 3. **Mantentions (Maintenance Records)**
 - **Purpose**: Track maintenance activities and intervention history
 - **Frequency**: Weekly reports
-- **Key Outputs**: Maintenance summaries, activity tracking per system
-- **Status**: 🔄 **In Progress**
+- **Key Outputs**: Maintenance summaries, activity tracking per system; also feeds the Resumen
+  General status table (via `src/data/maintenance_repository.py`)
+- **Status**: 🔄 **In Progress** (data loaders exist and feed Overview/Predictive; there is no
+  standalone Mantentions tab in navigation yet)
 
 ### 4. **Alerts (Consolidated)**
 - **Purpose**: Unified view of all alerts across techniques
 - **Frequency**: Real-time aggregation
 - **Key Outputs**: Consolidated alerts with AI diagnosis, cross-technique correlation, evidence sections
 - **Status**: ✅ **Fully Implemented** (February 18, 2026)
+
+### 5. **Predictive (Failure-Mode KPIs)**
+- **Purpose**: Component-level (e.g. Motor, Transmisión) failure-mode risk scoring combining oil
+  and telemetry evidence with narrative insights
+- **Frequency**: Per-component CSVs, auto-discovered per client
+- **Key Outputs**: Fleet KPIs, priority cards, failure-mode table, per-unit evidence view
+- **Status**: ✅ **Implemented**, restricted to clients in `predictive_allowed_clients`
+  (currently CDA, CAPSTONE)
 
 ---
 
@@ -89,17 +105,24 @@ data/
 │   └── golden/{client}/
 ├── mantentions/
 │   └── golden/{client}/
-└── alerts/
-    └── golden/{client}/
+├── alerts/
+│   └── golden/{client}/
+├── predictive/
+│   └── golden/{client}/{component}.csv
+└── auxiliar/
+    └── {client}/Data_Date_Last_Update.csv
 ```
 
 **Path Pattern**: `data/{technique}/{layer}/{client}/{datafile}`
 
 Where:
-- **technique**: `oil`, `telemetry`, `mantentions`, `alerts`
+- **technique**: `oil`, `telemetry`, `mantentions`, `alerts`, `predictive`
 - **layer**: `silver` (harmonized data), `golden` (analysis-ready outputs)
 - **client**: Client identifier
 - **datafile**: Specific data files based on data contracts
+
+`auxiliar/` is a non-technique folder used by the Data Freshness view and does not follow the
+`{technique}/{layer}/{client}` pattern.
 
 ### Technology Stack
 
@@ -151,17 +174,26 @@ The left sidebar provides **persistent, hierarchical navigation** throughout the
   - Active: Blue accent border, darker background, bold text
   - Transition animations for smooth interactions
 
-**Navigation Sections**:
-1. **Overview** (dashboard icon)
+**Navigation Sections** (built dynamically in `dashboard/layout.py::create_main_dashboard`):
+1. **Resumen / Overview** (dashboard icon)
    - General
-2. **Monitoring** (chart icon)
-   - Alerts
-   - Telemetry
-   - Health Index
-   - Mantentions
-   - Oil
-3. **Limits** (sliders icon)
-   - Oil
+   - Estado de Datos (Data Freshness)
+2. **Monitoreo / Monitoring** (chart icon)
+   - Alertas (Alerts)
+   - Telemetría (Telemetry)
+   - Aceite (Oil — includes the Cumplimiento Laboratorio lab-compliance view internally)
+3. **Predictivo / Predictive** (brain icon) — *shown only if the logged-in user's client is in
+   `predictive_allowed_clients`*
+   - One subsection per auto-discovered component (e.g. Motor, Transmisión)
+4. **Integración / Integration** (plug icon) — placeholder ("En Desarrollo")
+5. **Reportes / Reporting** (file icon) — placeholder ("En Desarrollo")
+6. **Administración / Admin** (gear icon) — placeholder ("En Desarrollo")
+
+Several tab/callback modules exist in the codebase but are currently **commented out of
+navigation** (shelved or superseded): standalone Stewart Limits, Machines Overview, and Reports
+Detail tabs (superseded by the Aceite subsections), Mantenciones General, Health Index, Menace
+Control, and Hot Sheet. The Component Hours ("Horómetro") tab is also commented out of the Aceite
+tab bar, though its data loader is still used internally by the Predictive section.
 
 **Styling Details**:
 - Background: #2c3e50 (dark blue-gray)
@@ -220,24 +252,32 @@ The main content area provides **optimized space for visualizations and data**:
 
 ## 🎨 Dashboard Sections
 
-The dashboard is organized into three main sections, each serving a specific purpose:
+The dashboard is organized into the sections below (see [Dashboard Architecture](#dashboard-architecture)
+for the full navigation tree):
 
-### 1. **Overview Section**
+### 1. **Resumen (Overview) Section**
 
 **Purpose**: Provide a high-level summary of fleet health
 
-**Features**:
-- Overall fleet condition metrics
-- Aggregated alert counts across all techniques
-- Equipment availability statistics
-- Key performance indicators (KPIs)
-
 **Sub-sections**:
-- **General**: Fleet-wide summary dashboard
 
-**Data Sources**: All (Oil, Telemetry, Mantentions, Alerts)
+#### 1.1 **General**
+- Single unified per-unit status table combining Telemetría, Alertas, Data Freshness, and the
+  latest Tribología (oil) result for the selected client
+- **Data Sources**: `telemetry` (unit health), `mantentions` (status/downtime via
+  `maintenance_repository.py`), `oil/golden/{client}/machine_status.parquet`,
+  `alerts/golden/{client}/consolidated_alerts.csv`, `data/auxiliar/{client}/Data_Date_Last_Update.csv`
+- **Status**: ✅ **Implemented**
 
-**Status**: 🔄 In Progress
+#### 1.2 **Estado de Datos (Data Freshness)**
+- Per-unit traffic-light table (🟢/🟡/🔴) showing how stale Telemetría and Tribología data are
+  - 🟢 Telemetría < 1h / Tribología < 1 week
+  - 🟡 Telemetría 1–4h / Tribología 1–2 weeks
+  - 🔴 Telemetría > 4h / Tribología > 2 weeks
+- Source timestamps are stored UTC and displayed converted to `America/Santiago`
+- **Data Source**: `data/auxiliar/{client}/Data_Date_Last_Update.csv`
+- **Status**: ✅ **Implemented** (see [DATA_FRESHNESS_TAB.md](DATA_FRESHNESS_TAB.md) and
+  [DATA_FRESHNESS_IMPLEMENTATION.md](DATA_FRESHNESS_IMPLEMENTATION.md) for detailed design)
 
 ---
 
@@ -280,117 +320,94 @@ The dashboard is organized into three main sections, each serving a specific pur
   - Responsive charts with optimized legends
 - **Status**: ✅ **Fully Implemented** (February 18, 2026)
 
-#### 2.2 **Telemetry**
-- **Purpose**: Hierarchical sensor monitoring from fleet-wide health to signal-level diagnosis
+#### 2.2 **Telemetría (Telemetry)**
+- **Purpose**: Sensor-based health monitoring, from fleet-wide status down to unit/system/signal detail
 - **Tabs**:
-  - **Fleet Overview**: High-level fleet health snapshot
-    - KPI Cards: Total Units, Normal %, Alerta %, Anormal %
-    - Fleet Status Table: Sortable by priority_score, component counts
-    - Status Distribution Pie Chart: Visual fleet health breakdown
-  - **Machine Detail**: Component-level analysis for specific units
-    - Machine selector with status badges
-    - Component Status Table: Detailed component health
-    - Component Radar Chart: Multi-axis visualization of component scores
-    - Component Details Accordion: Expandable evidence panels
-  - **Component Detail**: Signal-level evaluations with historical baselines
-    - Signal Evaluation Table: Window scores, severity, weight, data quality
-    - Weekly Distribution Boxplots: Historical comparison across weeks
-    - Estado filter: Operacional, Ralenti, Apagada state-specific analysis
-    - Signal drill-down modal: Detailed baseline comparison with P2/P5/P95/P98 thresholds
-  - **Limits**: Baseline threshold management and visualization
-    - Baseline Thresholds Table: Display P2, P5, P95, P98 percentiles per signal
-    - Training window metadata
-    - Threshold Distribution Histogram: Visualize baseline calculation
-- **Data Sources**: 
-  - `telemetry/golden/{client}/machine_status.parquet` (fleet-level summaries)
-  - `telemetry/golden/{client}/classified.parquet` (component-level evaluations)
-  - `telemetry/golden/{client}/baselines/baseline_YYYYMMDD.parquet` (percentile thresholds)
-  - `telemetry/silver/{client}/Telemetry_Wide_With_States/ww-yyyy.parquet` (raw sensor data)
-- **Key Features**:
-  - Severity-Weighted Percentile Window Scoring methodology
-  - Hierarchical drill-down navigation (Fleet → Machine → Component → Signal)
-  - State-aware baseline comparisons (Operacional, Ralenti, Apagada)
-  - Component criticality weighting for machine-level status
-  - Weekly evaluation with multi-week historical comparison
-  - JSON-based nested data structures (component_details, signals_evaluation)
-- **Status**: 🔄 **In Progress** (February 26, 2026 - Prototyping Phase)
+  - **Vista de Flota**: Compact fleet matrix of unit × system status, filterable by model/status/system
+  - **Detalle de Unidad**: Unit → system → signal drill-down table with AI-generated commentary
+- **Data Sources**:
+  - `telemetry/silver/{client}/.../Week{NN}Year{YYYY}.parquet` (weekly sensor snapshots)
+  - Unit-level health aggregation via `load_telemetry_unit_health` (also feeds Resumen General)
+- **Status**: 🔄 **In Progress** — functional fleet + unit-detail views; the previously-planned
+  signal-level baseline "Limits" sub-tab (P2/P5/P95/P98 percentile thresholds) is not yet wired
+  into navigation
 
-#### 2.3 **Mantentions**
+#### 2.3 **Mantenciones (Maintenance)**
 - **Purpose**: Maintenance activity tracking
-- **Features**:
-  - Intervention history per unit
-  - Maintenance frequency analysis
-  - Activity breakdown by system
+- **Current state**: No standalone tab in navigation (`tab_mantenciones_general.py` exists but is
+  commented out in `dashboard/layout.py`). Maintenance status/downtime data is currently surfaced
+  indirectly through the Resumen General status table via `src/data/maintenance_repository.py`
 - **Data Source**: `mantentions/golden/{client}/ww-yyyy.csv`
 - **Status**: 🔄 Planned
 
-#### 2.4 **Oil**
+#### 2.4 **Aceite (Oil)**
 - **Purpose**: Tribology analysis and component health
-- **Features**:
-  - Essay classifications
-  - Radar charts for component analysis
-  - Time series trends
-  - AI recommendations
-- **Data Sources**: 
+- **Tabs** (`dashboard/tabs/tab_oil.py`):
+  - **Visión de Flota**: machine status distribution and priority table
+  - **Detalle de Reporte**: radar chart, time series vs. Stewart Limits thresholds, AI recommendations
+  - **Cumplimiento Laboratorio**: transit-time (sample→lab) and lab-time (lab→report) KPIs,
+    weekly grouped bar chart, per-unit delay chart
+- **Data Sources**:
   - `oil/golden/{client}/classified.parquet`
   - `oil/golden/{client}/machine_status.parquet`
+  - `oil/golden/{client}/stewart_limits.parquet` (thresholds used in Detalle de Reporte)
 - **Status**: ✅ **Fully Implemented**
 
 ---
 
-### 3. **Limits Section**
+### 3. **Predictivo (Predictive) Section**
 
-**Purpose**: Display thresholds and triggers for alert generation
+**Purpose**: Component-level failure-mode risk scoring combining oil and telemetry evidence
 
-**Features**:
-- Configurable limit tables
-- Threshold visualization
-- Statistical analysis of limits
+**Visibility**: Only shown to users whose client is listed in `predictive_allowed_clients`
+(`config/settings.py`, currently CDA and CAPSTONE)
 
-**Sub-sections**:
+**How it works**: Components (e.g. Motor, Transmisión) are auto-discovered per client from CSVs
+under `data/predictive/golden/{client}/*.csv`; each gets its own sidebar subsection and its own
+KPI thresholds/failure-mode configuration (`dashboard/components/predictive_config.py`)
 
-#### 3.1 **Oil Limits**
-- **Purpose**: Stewart Limits for essay classifications
-- **Features**: 
-  - Limits by machine/component/essay
-  - Threshold distribution charts
-  - Sample count statistics
-- **Data Source**: `oil/golden/{client}/stewart_limits.parquet`
-- **Status**: ✅ **Fully Implemented**
+**Tabs per component** (`tab_predictive_component.py`):
+- **Resumen**: fleet KPIs, priority cards, failure-mode table (`tab_predictive_overview.py`)
+- **Evidencia**: per-unit oil/telemetry evidence with narrative insights (`tab_predictive_evidence.py`)
 
-#### 3.2 **Telemetry Limits**
-- **Purpose**: Baseline percentile thresholds for sensor anomaly detection
-- **Features**:
-  - Baseline Thresholds Table: Display P2, P5, P95, P98 percentiles per signal
-  - Training window metadata: Shows baseline version and training period
-  - Threshold Distribution Histogram: Visualize training data distribution with percentile lines
-  - Filter by Unit, Signal, EstadoMaquina
-  - State-specific thresholds (Operacional, Ralenti, Apagada)
-- **Data Sources**: 
-  - `telemetry/golden/{client}/baselines/baseline_YYYYMMDD.parquet`
-  - `telemetry/silver/{client}/Telemetry_Wide_With_States/ww-yyyy.parquet` (for visualizations)
-- **Key Concepts**:
-  - P2/P98: Extreme bounds (alarm thresholds)
-  - P5/P95: Alert bounds (early warning)
-  - Training window: Historical data period used to compute percentiles
-- **Status**: 🔄 **In Progress** (February 26, 2026 - Prototyping Phase)
+**Data Sources**:
+- `predictive/golden/{client}/{component}.csv`
+- Component operating hours via `load_component_hours` for clients in
+  `component_hours_allowed_clients` (CDA, ENEX)
+
+**Status**: ✅ **Implemented**
+
+---
+
+### 4. **Integración / Reportes / Administración**
+
+Reserved top-level navigation sections (`dashboard/layout.py`) that currently render a generic
+"En Desarrollo" placeholder (`create_placeholder_content`). No functionality is implemented yet.
+
+**Status**: 🔄 Planned
 
 ---
 
 ## 🏢 Multi-Client Architecture
 
-The dashboard is designed as a **SaaS platform** supporting multiple clients with isolated data:
+The dashboard is designed as a **SaaS platform** supporting multiple clients with isolated data.
+Active clients (`config/settings.py::Settings.clients`): **CDA, EMIN, ENEX, CAPSTONE**, each with
+its own logo served from `dashboard/logos/` and its own set of user accounts in `config/users.py`.
 
 ### Client Isolation
 
-- **Data Separation**: Each client has dedicated folders
-- **Independent Processing**: Clients processed separately
+- **Data Separation**: Each client has dedicated folders (`data/{technique}/{layer}/{client}/`)
+- **Independent Processing**: Clients processed separately upstream
 - **Isolated Limits**: Thresholds calculated per client
-- **Secure Access**: Authentication and authorization per client
+- **Secure Access**: Authentication and per-client authorization (`dashboard/auth.py`,
+  `config/users.py`)
+- **Module Gating**: Some sections (Predictivo, Component Hours) are restricted to a subset of
+  clients via `predictive_allowed_clients` / `component_hours_allowed_clients`
 
 ### Client Selection
 
-Users select their client context through a global dropdown that filters all dashboard views to show only relevant data.
+Users select their client context through a global dropdown in the header (`client-selector`)
+that filters all dashboard views to show only relevant data.
 
 ### Scalability
 
@@ -421,6 +438,10 @@ Alerts are generated through technique-specific logic:
 - AI-powered diagnosis
 - System/subsystem/component mapping
 
+### Predictive Failure Modes
+- Per-component (Motor, Transmisión, …) risk scoring combining oil and telemetry evidence
+- Priority ranking and narrative insights, restricted to `predictive_allowed_clients`
+
 ---
 
 ## 🎯 User Benefits
@@ -449,6 +470,28 @@ Alerts are generated through technique-specific logic:
 ---
 
 ## 🔄 Version History
+
+### Version 2.2.0 (July 2026)
+- **Predictivo Module**: New Predictive section with per-component (Motor, Transmisión) failure-mode
+  KPIs, priority cards, and evidence views, auto-discovered per client and gated by
+  `predictive_allowed_clients`
+- **Resumen Restructure**: Overview section split into "General" (unified per-unit status table
+  spanning Telemetría/Alertas/Mantenciones/Tribología) and "Estado de Datos" (data freshness
+  traffic-light table)
+- **Lab Compliance**: New "Cumplimiento Laboratorio" tab inside Aceite tracking sample transit
+  and lab turnaround times
+- **Telemetry Simplification**: Consolidated to two tabs (Vista de Flota, Detalle de Unidad);
+  the previously-planned signal-level baseline/limits UI is not currently wired into navigation
+- **Standalone Limits Section Removed from Nav**: The former top-level "Limits" sidebar section
+  (Oil Limits, Telemetry Limits) is no longer part of navigation; Stewart Limits data is now
+  surfaced contextually inside the Aceite → Detalle de Reporte view. The old standalone
+  Stewart Limits/Machines/Reports tabs, Health Index, Menace Control, Hot Sheet, and Mantenciones
+  General tabs remain in the codebase but are commented out of `dashboard/layout.py`
+- **New Client**: Added CAPSTONE (alongside CDA, EMIN, ENEX), each with a dedicated logo
+- **Expanded User Base**: Additional named admin/client accounts in `config/users.py`
+- **Dashboard-Only Repository**: Data processing (`main.py`, `src/processing/classification.py`)
+  moved out of this repo; the dashboard now consumes Gold-layer output directly and syncs it from
+  S3 on startup if missing locally
 
 ### Version 2.1.0 (April 2026)
 - **Major UI/UX Redesign**: Professional dashboard layout overhaul
