@@ -65,6 +65,44 @@ M2 = 10  # Minutes after alert
 MAPBOX_TOKEN = settings.mapbox_token
 
 
+def _normalise_alert_identifier(value) -> str:
+    """Return an alert identifier in the same text form used by CSV data."""
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    return str(value).strip()
+
+
+def _select_telemetry_alert_data(
+    telemetry_golden: pd.DataFrame,
+    alert_row: pd.Series,
+) -> tuple[pd.DataFrame, list[str], str]:
+    """Select detail rows using Capstone's textual telemetry identifiers.
+
+    Detail artifacts may key ``AlertID`` with either the consolidated
+    ``TelemetryID`` or ``FusionID``. Both are strings, often with a ``CAP-``
+    prefix, so matching must remain textual and must not coerce IDs to ints.
+    """
+    identifiers = []
+    for field in ("TelemetryID", "FusionID"):
+        identifier = _normalise_alert_identifier(alert_row.get(field))
+        if identifier and identifier not in identifiers:
+            identifiers.append(identifier)
+
+    unit_id = _normalise_alert_identifier(alert_row.get("UnitId"))
+    if not identifiers or not unit_id:
+        return telemetry_golden.iloc[0:0].copy(), identifiers, unit_id
+
+    alert_keys = telemetry_golden["AlertID"].map(_normalise_alert_identifier)
+    unit_keys = telemetry_golden["Unit"].map(_normalise_alert_identifier)
+    mask = alert_keys.isin(identifiers) & unit_keys.eq(unit_id)
+    return telemetry_golden.loc[mask].copy(), identifiers, unit_id
+
+
 # ========================================
 # TAB SWITCHING CALLBACK
 # ========================================
@@ -691,28 +729,38 @@ def create_telemetry_evidence_section(alert_row: pd.Series, client: str) -> html
             ])
         
         # Filter for this specific alert
-        alert_id = alert_row.get('TelemetryID')
-        if pd.isna(alert_id):
+        alert_ids = list(dict.fromkeys(
+            identifier
+            for identifier in (
+                _normalise_alert_identifier(alert_row.get('TelemetryID')),
+                _normalise_alert_identifier(alert_row.get('FusionID')),
+            )
+            if identifier
+        ))
+        if not alert_ids:
             return html.Div([
-                dbc.Alert("Esta alerta no tiene TelemetryID asociado", color="info")
+                dbc.Alert("Esta alerta no tiene un identificador asociado", color="info")
             ])
         
         # Get unit ID
-        unit_id = alert_row.get('UnitId')
-        if pd.isna(unit_id):
+        unit_id = _normalise_alert_identifier(alert_row.get('UnitId'))
+        if not unit_id:
             return html.Div([
                 dbc.Alert("Esta alerta no tiene UnitId asociado", color="info")
             ])
         
-        # Filter telemetry data by BOTH AlertID AND Unit (AlertID is unique per unit, not globally)
-        alert_data = telemetry_golden[
-            (telemetry_golden['AlertID'] == int(alert_id)) & 
-            (telemetry_golden['Unit'] == unit_id)
-        ].copy()
+        # Filter telemetry data by BOTH AlertID AND Unit (AlertID is unique
+        # per unit, not globally). Keep the comparison textual: Capstone IDs
+        # are deterministic strings such as CAP-....
+        alert_data, _, _ = _select_telemetry_alert_data(telemetry_golden, alert_row)
         
         if alert_data.empty:
             return html.Div([
-                dbc.Alert(f"No se encontraron datos de telemetría para AlertID: {alert_id}", color="warning")
+                dbc.Alert(
+                    "No se encontraron datos de telemetría para los identificadores: "
+                    f"{', '.join(alert_ids)}",
+                    color="warning",
+                )
             ])
         
         # Drop columns with all NaN values

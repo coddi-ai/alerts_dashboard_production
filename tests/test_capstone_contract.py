@@ -3,6 +3,7 @@ import json
 import pandas as pd
 
 from dashboard.components.alerts_charts import FEATURE_NAMES_ES
+from dashboard.callbacks.alerts_callbacks import _select_telemetry_alert_data
 from dashboard.components.alerts_report import prepare_alert_rows
 from dashboard.components.alerts_tables import parse_ia_message_sections
 from src.data.loaders import _load_alerts_data_cached, load_alerts_data
@@ -71,3 +72,29 @@ def test_capstone_loader_uses_configured_data_root(tmp_path, monkeypatch):
     assert loaded.loc[0, "Timestamp"].tzinfo is None
     assert bool(loaded.loc[0, "has_telemetry"])
     assert bool(loaded.loc[0, "has_tribology"])
+
+
+def test_capstone_telemetry_detail_matches_string_telemetry_or_fusion_id():
+    telemetry_detail = pd.DataFrame(
+        [
+            {"AlertID": "CAP-fusion-1", "Unit": "CA-42", "value": 10},
+            {"AlertID": "CAP-other", "Unit": "CA-43", "value": 20},
+        ]
+    )
+    alert = pd.Series(
+        {
+            "TelemetryID": "CAP-telemetry-1",
+            "FusionID": "CAP-fusion-1",
+            "UnitId": "CA-42",
+        }
+    )
+
+    selected, identifiers, unit_id = _select_telemetry_alert_data(telemetry_detail, alert)
+
+    assert identifiers == ["CAP-telemetry-1", "CAP-fusion-1"]
+    assert unit_id == "CA-42"
+    assert selected["AlertID"].tolist() == ["CAP-fusion-1"]
+
+    telemetry_keyed = pd.DataFrame([{"AlertID": "CAP-telemetry-1", "Unit": "CA-42"}])
+    selected, _, _ = _select_telemetry_alert_data(telemetry_keyed, alert)
+    assert selected["AlertID"].tolist() == ["CAP-telemetry-1"]
