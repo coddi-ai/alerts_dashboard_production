@@ -702,8 +702,15 @@ def register_reports_callbacks(app):
         {'title': 'Silicio & Aluminio', 'essays': ['Silicio', 'Aluminio']},
         {'title': 'Sodio & Potasio', 'essays': ['Sodio', 'Potasio']},
         {'title': 'Combustible & Agua', 'essays': ['Combustible', 'Agua']},
-        {'title': 'Viscocidad', 'essays': ['Viscocidad']},
+        {'title': 'Viscocidad', 'essays': ['Viscocidad'], 'show_lower_limit': True},
         {'title': 'Hollín & Oxidación', 'essays': ['Hollín', 'Oxidación']},
+    ]
+
+    # Colorblind-safe palette for the "Paquete de Aditivos" chart, which can plot
+    # more essays than the 2-color palette used by the other paired charts.
+    ADITIVOS_PALETTE = [
+        '#0072B2', '#009E73', '#56B4E9', '#332288',
+        '#44AA99', '#88CCEE', '#117733', '#999933',
     ]
 
     @app.callback(
@@ -733,6 +740,7 @@ def register_reports_callbacks(app):
         settings = get_settings()
         reports_file = settings.get_classified_reports_path(client)
         limits_file = settings.get_stewart_limits_path(client)
+        limits_inferior_file = settings.get_stewart_limits_inferior_path(client)
 
         if not reports_file.exists():
             return html.P("No hay datos disponibles", className="text-muted")
@@ -740,6 +748,7 @@ def register_reports_callbacks(app):
         try:
             df = safe_read_parquet(reports_file)
             limits = load_stewart_limits(limits_file) if limits_file.exists() else None
+            limits_inferior = load_stewart_limits(limits_inferior_file) if limits_inferior_file.exists() else None
 
             # Filter to equipment + component
             history = df[(df['unitId'] == equipo) & (df['componentName'] == component)].copy()
@@ -759,19 +768,42 @@ def register_reports_callbacks(app):
                 return html.P("Sin datos en el rango seleccionado", className="text-muted")
 
             # Get limits for this component
-            comp_limits = {}
-            oil_hour_range = 'UNKNOWN'
-            if limits:
-                familia = history.iloc[0].get('machineName', '')
-                component_normalized = history.iloc[0].get('componentNameNormalized', component)
-                comp_limits = limits.get(client, {}).get(familia, {}).get(component_normalized, {})
-                oil_hour_range = history.iloc[-1].get('oilHourRange', 'UNKNOWN')
+            familia = history.iloc[0].get('machineName', '')
+            component_normalized = history.iloc[0].get('componentNameNormalized', component)
+            oil_hour_range = history.iloc[-1].get('oilHourRange', 'UNKNOWN')
 
-            # Generate 9 charts in a 3x3 grid
+            comp_limits = {}
+            if limits:
+                comp_limits = limits.get(client, {}).get(familia, {}).get(component_normalized, {})
+
+            comp_limits_inferior = {}
+            if limits_inferior:
+                comp_limits_inferior = limits_inferior.get(client, {}).get(familia, {}).get(component_normalized, {})
+
+            # Discover all "Aditivo" essays from the essays mapping table and build the
+            # "Paquete de Aditivos" full-width chart config for this render
+            charts_to_render = list(TIME_SERIES_CHARTS)
+            essays_file = Path("data/oil/essays_elements.xlsx")
+            if essays_file.exists():
+                essays_df = pd.read_excel(essays_file)
+                essays_df = essays_df.dropna(subset=['ElementNameSpanish', 'GroupElement'])
+                aditivo_essays = essays_df[essays_df['GroupElement'] == 'Aditivo']['ElementNameSpanish'].tolist()
+                if aditivo_essays:
+                    charts_to_render.append({
+                        'title': 'Paquete de Aditivos',
+                        'essays': aditivo_essays,
+                        'palette': ADITIVOS_PALETTE,
+                        'full_width': True,
+                        'show_lower_limit': True,
+                    })
+
+            # Generate charts in a 2-column grid, with any full-width charts spanning both columns
             chart_elements = []
-            for chart_config in TIME_SERIES_CHARTS:
+            for chart_config in charts_to_render:
                 essays = chart_config['essays']
                 title = chart_config['title']
+                is_full_width = chart_config.get('full_width', False)
+                col_width = 12 if is_full_width else 6
 
                 # Check if any essay has data
                 available_essays = [e for e in essays if e in history.columns and history[e].notna().any()]
@@ -785,16 +817,18 @@ def register_reports_callbacks(app):
                                     html.P("Sin datos", className="text-muted text-center small")
                                 ])
                             ], className="h-100")
-                        ], md=4, className="mb-3")
+                        ], md=col_width, className="mb-3")
                     )
                     continue
 
                 # Create figure
                 fig = go.Figure()
-                colors = ['#1f77b4', '#ff7f0e']
+                colors = chart_config.get('palette', ['#1f77b4', '#ff7f0e'])
 
                 # Collect limits for deduplication
                 limit_entries = []  # [(value, essay_name), ...]
+                limit_entries_lower = []  # [(value, essay_name), ...]
+                show_lower_limit = chart_config.get('show_lower_limit', False)
 
                 for idx, essay in enumerate(available_essays):
                     essay_values = history[essay].dropna()
@@ -807,7 +841,7 @@ def register_reports_callbacks(app):
                         y=essay_values,
                         mode='lines+markers',
                         name=essay,
-                        line=dict(color=colors[idx % 2], width=2),
+                        line=dict(color=colors[idx % len(colors)], width=2),
                         marker=dict(size=4),
                     ))
 
@@ -815,6 +849,12 @@ def register_reports_callbacks(app):
                     essay_limits = get_essay_limits(comp_limits, essay, oil_hour_range)
                     if essay_limits and 'threshold_critic' in essay_limits:
                         limit_entries.append((essay_limits['threshold_critic'], essay))
+
+                    # Collect lower condemnation limit (threshold_critic from the inferior table)
+                    if show_lower_limit:
+                        essay_limits_lower = get_essay_limits(comp_limits_inferior, essay, oil_hour_range)
+                        if essay_limits_lower and 'threshold_critic' in essay_limits_lower:
+                            limit_entries_lower.append((essay_limits_lower['threshold_critic'], essay))
 
                 # Consolidate duplicate limits (same value → one line, combined label)
                 limit_by_value = {}
@@ -835,9 +875,28 @@ def register_reports_callbacks(app):
                         annotation_font=dict(size=8, color='#dc3545'),
                     )
 
+                # Consolidate duplicate lower limits the same way
+                limit_by_value_lower = {}
+                for val, name in limit_entries_lower:
+                    rounded_val = round(val, 2)
+                    limit_by_value_lower.setdefault(rounded_val, []).append(name)
+
+                for val, names in limit_by_value_lower.items():
+                    if len(names) > 1:
+                        label = " y ".join(names) + " Límite Inferior"
+                    else:
+                        label = f"Límite Inferior {names[0]}" if len(available_essays) > 1 else "Límite Inferior"
+                    fig.add_hline(
+                        y=val,
+                        line=dict(color='#0072B2', width=1.5, dash='dash'),
+                        annotation_text=label,
+                        annotation_position="bottom right",
+                        annotation_font=dict(size=8, color='#0072B2'),
+                    )
+
                 fig.update_layout(
                     title=dict(text=title, font=dict(size=12), x=0.5, xanchor='center'),
-                    height=220,
+                    height=280 if is_full_width else 220,
                     margin=dict(l=40, r=15, t=35, b=30),
                     showlegend=True,
                     legend=dict(
@@ -856,7 +915,7 @@ def register_reports_callbacks(app):
                 chart_elements.append(
                     dbc.Col([
                         dcc.Graph(figure=fig, config={'displayModeBar': False})
-                    ], md=4, className="mb-3")
+                    ], md=col_width, className="mb-3")
                 )
 
             if not chart_elements:

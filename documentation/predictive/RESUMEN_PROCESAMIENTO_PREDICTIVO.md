@@ -1,5 +1,13 @@
 # Resumen del Procesamiento Predictivo
 
+> **Nota**: Este documento es una nota informal de implementación y puede quedar desactualizado.
+> La documentación formal y mantenida vive en [project_overview.md](project_overview.md) (qué
+> hace el módulo y cómo se arma el modelo) y [data_contracts.md](data_contracts.md) (esquema de
+> columnas de los CSV). En particular, la sección 3.2 de este documento (clasificación de estado
+> por percentil P80) ya no refleja el código actual — ver
+> [project_overview.md](project_overview.md#processing-pipeline-in-the-dashboard) para la lógica
+> de umbrales fijos vigente.
+
 ## 1. Fuente de Datos
 
 Los datos predictivos se almacenan en la capa **Golden** del pipeline de datos:

@@ -422,14 +422,25 @@ def create_main_dashboard(user_data: dict) -> html.Div:
             ]
         })
 
+    # Agentes section (always visible)
+    navigation_items.append({
+        'section': 'agents',
+        'label': 'Agentes',
+        'icon': 'fas fa-robot',
+        'subsections': [
+            {'id': 'agents-campbell-ai', 'label': 'Campbell AI', 'tab': lambda: create_placeholder_content('Campbell AI')}
+        ]
+    })
+
     # Additional sections (always visible)
     navigation_items.extend([
         {
             'section': 'integration',
-            'label': 'Integración',
+            'label': 'Conexión ERP',
             'icon': 'fas fa-plug',
             'subsections': [
-                {'id': 'integration-sap', 'label': 'SAP Connection', 'tab': lambda: create_placeholder_content('SAP Connection')}
+                {'id': 'integration-validacion-avisos', 'label': 'Validación de Avisos', 'tab': lambda: create_placeholder_content('Validación de Avisos')},
+                {'id': 'integration-seguimiento-avisos', 'label': 'Seguimiento de Avisos', 'tab': lambda: create_placeholder_content('Seguimiento de Avisos')}
             ]
         },
         {

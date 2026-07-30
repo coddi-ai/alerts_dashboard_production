@@ -1,7 +1,7 @@
 # Data Contracts - Oil Analysis Data Product
 
-**Version**: 2.6  
-**Last Updated**: July 17, 2026  
+**Version**: 2.7  
+**Last Updated**: July 29, 2026  
 **Owner**: Oil Analysis Data Product Team
 
 ---
@@ -34,6 +34,11 @@ This document defines the data contracts for the Oil Analysis Data Product, spec
 **Processing Modes**:
 1. **Historical**: One-time bulk processing with Stewart Limits calculation
 2. **Incremental**: Daily processing using existing Stewart Limits
+
+**Key Enhancements (v2.7)**:
+- **Stewart Limits Inferior**: New lower ("too low") thresholds for essays in groups Aditivo, Conteo, and Fisico Quimico (e.g. additive depletion), stored separately in `stewart_limits_inferior.parquet` for retro-compatibility
+- **`limit_source_inferior` column**: New classified.parquet column tracking which lower-limit lookup was used
+- **`direction` field in breached_essays**: Each breach entry now records whether it came from the upper (`'upper'`) or lower (`'lower'`) limit
 
 **Key Enhancements (v2.6)**:
 - **Data Quality Fixes**: breached_essays serialized as JSON string for reliable Parquet storage
@@ -74,13 +79,17 @@ data/
 │
 ├── golden/                       # Golden Layer (Analysis-ready outputs)
 │   ├── cda/
-│   │   ├── classified.parquet         # Classified oil analysis reports
-│   │   ├── machine_status.parquet     # Aggregated machine health status
-│   │   └── stewart_limits.parquet     # Statistical thresholds for CDA
+│   │   ├── classified.parquet              # Classified oil analysis reports
+│   │   ├── machine_status.parquet          # Aggregated machine health status
+│   │   ├── stewart_limits.parquet          # Statistical thresholds for CDA (upper)
+│   │   ├── stewart_limits_inferior.parquet # Statistical thresholds for CDA (lower)
+│   │   └── stewart_limits_ratio.parquet    # Evolution ratio thresholds for CDA
 │   └── emin/
 │       ├── classified.parquet
 │       ├── machine_status.parquet
-│       └── stewart_limits.parquet
+│       ├── stewart_limits.parquet
+│       ├── stewart_limits_inferior.parquet
+│       └── stewart_limits_ratio.parquet
 │
 └── essays_elements.xlsx          # Auxiliary: Essay metadata and mappings
 ```
@@ -96,11 +105,15 @@ s3://{BUCKET_NAME}/MultiTechnique Alerts/oil/
     ├── cda/
     │   ├── classified.parquet
     │   ├── machine_status.parquet
-    │   └── stewart_limits.parquet
+    │   ├── stewart_limits.parquet
+    │   ├── stewart_limits_inferior.parquet
+    │   └── stewart_limits_ratio.parquet
     └── emin/
         ├── classified.parquet
         ├── machine_status.parquet
-        └── stewart_limits.parquet
+        ├── stewart_limits.parquet
+        ├── stewart_limits_inferior.parquet
+        └── stewart_limits_ratio.parquet
 ```
 
 ---
@@ -317,7 +330,7 @@ S3: s3://{BUCKET}/MultiTechnique Alerts/oil/golden/{client}/
 | `essay_status_{essay}` | string | Essay classification | 'Normal', 'Marginal', 'Condenatorio', 'Critico' |
 | `essays_broken` | int | Total count of essays exceeding thresholds | 3 |
 | `desgaste_essays_broken` | int | Count of essays with UseForClassification=1 (v2.6) | 2 |
-| `breached_essays` | string (JSON) | JSON-serialized list of breached essay details (v2.6) | '[{"essay": "Hierro", "group": "Desgaste", "points": 5}]' |
+| `breached_essays` | string (JSON) | JSON-serialized list of breached essay details, each entry includes `direction` (v2.7) | '[{"essay": "Hierro", "group": "Desgaste", "points": 5, "direction": "upper"}]' |
 | `severity_score` | int | Total points from ALL breached essays | 14 |
 | `classification_score` | int | Points from ONLY UseForClassification=1 essays (v2.6) | 8 |
 | `report_status` | string | Overall report status (based on classification_score) | 'Normal', 'Alerta', 'Anormal' |
@@ -325,14 +338,20 @@ S3: s3://{BUCKET}/MultiTechnique Alerts/oil/golden/{client}/
 | `ai_recommendation` | string | AI-generated maintenance advice (always present) | 'Se recomienda...' |
 | `ai_analysis` | string | AI analysis of breached essays | 'Niveles elevados de...' |
 | **Oil-Hour Stratification (v2.3)** | | | |
-| `limit_source` | string | Which limit was used for classification | 'oil_hour_stratified', 'fallback_global', 'missing' |
+| `limit_source` | string | Which upper limit was used for classification | 'oil_hour_stratified', 'fallback_global', 'missing' |
 | `ratio_limit_source` | string | Which ratio limit was used | 'oil_hour_stratified', 'fallback_global', 'not_implemented', 'missing' |
+| **Stewart Limits Inferior (v2.7)** | | | |
+| `limit_source_inferior` | string | Which lower limit was used for classification (only meaningful for Aditivo/Conteo/Fisico Quimico essays) | 'oil_hour_stratified', 'fallback_global', 'missing' |
 
 **Limit Source Values (v2.3)**:
 - `oil_hour_stratified`: Exact match for oilHourRange (preferred, v2.3+)
 - `backward_compatible`: Using old non-stratified limits (v2.2 format)
 - `fallback_global`: Averaged across all oil hour ranges (when stratified unavailable)
 - `missing`: No limits available for this machine/component/essay
+
+**Breach Direction Values (v2.7)**:
+- `upper`: Essay value exceeded a `stewart_limits.parquet` threshold ("too high")
+- `lower`: Essay value fell below a `stewart_limits_inferior.parquet` threshold ("too low") — only possible for essays in groups Aditivo, Conteo, or Fisico Quimico, and only recorded when the essay did NOT also breach its upper limit
 
 **Essay Status Values**:
 - `Normal`: Below 90th percentile
@@ -532,6 +551,48 @@ sample_count: 6910 (all oil ages combined)
 
 ---
 
+#### 5. Stewart Limits Inferior (`stewart_limits_inferior.parquet`) 🆕 v2.7
+
+**Purpose**: Statistical thresholds for lower ("too low") essay classification — e.g. additive depletion
+
+**Schema**: Identical to `stewart_limits.parquet` (same columns: `client`, `machine`, `component`, `essay`, `oilHourRange`, `threshold_normal`, `threshold_alert`, `threshold_critic`, `sample_count`, `calculation_date`). Stored in a **separate file** for retro-compatibility — consumers that only know about `stewart_limits.parquet` are unaffected.
+
+**Scope**: Only essays whose `GroupElement` (from `essays_elements.xlsx`) is `Aditivo`, `Conteo`, or `Fisico Quimico` get rows in this file. Desgaste and Contaminante essays never appear here — more wear/contamination is never a "too low" problem.
+
+**Calculation**:
+- Uses the **inverse** of the default upper percentiles: 10th percentile → `threshold_normal`, 5th → `threshold_alert`, 2nd → `threshold_critic`
+- Ordering is inverted vs. upper limits: `threshold_normal > threshold_alert > threshold_critic` (lower is worse)
+- Values must never tie — adjacent thresholds are forced apart by 1 unit if they compute equal or inverted
+- **Positivity rule**: if any of the three computed thresholds is `<= 0`, the essay/component/oilHourRange combination gets **no row at all** in this file (not a zero/negative floor)
+- **Stratified by oilHourRange**, same as `stewart_limits.parquet`
+
+**Oil-Age Constraint (inverted from upper limits)**:
+- **Rule**: `GE_1000 thresholds <= LT_1000 thresholds` for all essay/threshold combinations
+- **Rationale**: Additives deplete and physical/chemical properties drift as oil ages, so aged oil is expected to run lower on these essays — the "too low" floor should be more permissive (lower) for aged oil, the opposite of the upper-limit constraint
+- **Enforcement**: Automatically applied during calculation — if calculated `GE_1000 > LT_1000`, the system adjusts `GE_1000` downward to equal `LT_1000`
+
+**Example**:
+```
+Client: CDA
+Machine: camion
+Component: motor diesel
+Essay: Calcio (Aditivo group)
+
+LT_1000 (fresh oil):
+  threshold_normal: 1900.0
+  threshold_alert: 1800.0
+  threshold_critic: 1700.0
+
+GE_1000 (aged oil, additives depleted — lower/more permissive floor):
+  threshold_normal: 1200.0
+  threshold_alert: 1100.0
+  threshold_critic: 1000.0
+```
+
+**Capstone**: Does **not** have Stewart Limits Inferior — no lower-bound source data is provided by the Coddi Lab.
+
+---
+
 ## ☁️ S3 Storage
 
 ### Upload Behavior
@@ -542,13 +603,14 @@ sample_count: 6910 (all oil ages combined)
 
 ### Upload Scope
 
-✅ **Uploaded**:
+✅ **Uploaded** (see `S3Uploader.upload_golden_layer()` in [src/data/s3_uploader.py](src/data/s3_uploader.py)):
 - Silver layer: `{CLIENT}.parquet`
-- Golden layer: All 3 files per client
+- Golden layer: `classified.parquet`, `machine_status.parquet`, `stewart_limits.parquet`, `stewart_limits_inferior.parquet` (NEW v2.7), `cleaned_component_hours.parquet`
 
 ❌ **Not Uploaded**:
 - Bronze layer (raw data stays local)
 - Auxiliary files (`essays_elements.xlsx`)
+- `stewart_limits_ratio.parquet` (not currently wired into the S3 uploader, despite being a Golden layer file — local-only today)
 
 ### S3 Paths
 
@@ -557,7 +619,8 @@ s3://{BUCKET_NAME}/MultiTechnique Alerts/oil/silver/{CLIENT}.parquet
 s3://{BUCKET_NAME}/MultiTechnique Alerts/oil/golden/{client}/classified.parquet
 s3://{BUCKET_NAME}/MultiTechnique Alerts/oil/golden/{client}/machine_status.parquet
 s3://{BUCKET_NAME}/MultiTechnique Alerts/oil/golden/{client}/stewart_limits.parquet
-s3://{BUCKET_NAME}/MultiTechnique Alerts/oil/golden/{client}/stewart_limits_ratio.parquet  (NEW v2.3)
+s3://{BUCKET_NAME}/MultiTechnique Alerts/oil/golden/{client}/stewart_limits_inferior.parquet  (NEW v2.7)
+s3://{BUCKET_NAME}/MultiTechnique Alerts/oil/golden/{client}/cleaned_component_hours.parquet
 ```
 
 ### Configuration
@@ -595,6 +658,39 @@ AWS_S3_PREFIX=MultiTechnique Alerts/oil/
 ---
 
 ## 📝 Change Log
+
+### Version 2.7 (July 29, 2026) - STEWART LIMITS INFERIOR (LOWER LIMITS)
+**Major Feature**: Statistical lower ("too low") thresholds for essays where depletion/low readings indicate a problem
+
+#### New Golden Layer File
+- **`stewart_limits_inferior.parquet`**: Same schema as `stewart_limits.parquet` (retro-compatible, separate file)
+  - Only computed for essays whose `GroupElement` (from `essays_elements.xlsx`) is `Aditivo`, `Conteo`, or `Fisico Quimico`
+  - Percentiles are the inverse of the upper-limit defaults: 10th/5th/2nd (vs. 90th/95th/98th), so `threshold_normal > threshold_alert > threshold_critic`
+  - Adjacent thresholds are forced apart by 1 unit if a tie/inversion is computed
+  - **Positivity rule**: if any computed threshold is `<= 0`, the essay/component/oilHourRange gets no row at all (no lower limit)
+  - Stratified by `oilHourRange`, with an **inverted** oil-age constraint vs. upper limits: `GE_1000 <= LT_1000` (aged oil is expected to run lower on additives/particle counts, so the floor is more permissive for aged oil)
+  - Not computed for Capstone (no lower-bound source data)
+  - Not uploaded to S3 for evolution ratio limits (unaffected — this is a separate, new file)
+
+#### Golden Layer Changes (`classified.parquet`)
+- **`limit_source_inferior`**: **NEW COLUMN** (string) — tracks which lower-limit lookup was used (`oil_hour_stratified`, `fallback_global`, `missing`), mirroring `limit_source`
+- **`breached_essays`**: entries now include a **`direction`** field (`'upper'` or `'lower'`) indicating which limit table produced the breach
+  - An essay is only checked against its lower limit if it did NOT already breach its upper limit
+  - `UseForClassification` hierarchy rule applies identically regardless of direction
+
+#### Pipeline Changes
+- `src/processing/stewart_limits.py`: new `calculate_stewart_limits_inferior()` and `calculate_all_limits_inferior()`
+- `src/processing/classification.py`: new `identify_threshold_inferior()`; `classify_essays()` and `classify_all_samples()` accept an optional `limits_inferior` parameter
+- `src/processing/essay_metadata.py`: **NEW MODULE** — `load_essay_groups()` (moved from `classification.py`) and `LOWER_LIMIT_GROUPS` constant, shared by `stewart_limits.py` and `classification.py` to avoid a circular import
+- `src/pipeline/silver_to_gold.py`: computes/loads/saves `stewart_limits_inferior.parquet` alongside the existing upper limits and ratio limits
+- `src/data/s3_uploader.py`: uploads `stewart_limits_inferior.parquet` as part of the Golden layer
+
+#### Migration Notes
+- Fully additive and backward compatible: `stewart_limits.parquet` schema and existing consumers are unaffected
+- `limit_source_inferior` on old (pre-v2.7) classified rows will be absent until the pipeline is re-run
+- Existing `breached_essays` entries from before v2.7 will lack the `direction` field — treat a missing `direction` as `'upper'` (the only kind of breach that existed before this version)
+
+---
 
 ### Version 2.6 (July 17, 2026) - DATA QUALITY & CLASSIFICATION TRANSPARENCY
 **Major Feature**: Reliable serialization, nullable fields, and classification hierarchy transparency

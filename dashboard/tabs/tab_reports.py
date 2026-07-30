@@ -89,21 +89,27 @@ def create_reports_tab() -> dbc.Container:
             dbc.CardBody([
                 html.P(
                     "Evolución de variables de análisis de aceite. "
-                    "Seleccione un rango de fechas para filtrar los gráficos.",
+                    "El rango por defecto cubre los últimos 9 meses desde el reporte más reciente.",
                     className="text-muted mb-3"
                 ),
-                dbc.Row([
-                    dbc.Col([
-                        html.Label("Rango de Fechas:", className="fw-bold small"),
-                        dcc.DatePickerRange(
-                            id='reports-date-range-picker',
-                            display_format='YYYY-MM-DD',
-                            start_date_placeholder_text='Fecha inicio',
-                            end_date_placeholder_text='Fecha fin',
-                            className="mb-3"
-                        )
-                    ], md=5),
-                ], className="mb-3"),
+                # Dedicated filter toolbar — visually separated from the chart grid (FR-04)
+                html.Div([
+                    dbc.Row([
+                        dbc.Col([
+                            html.Label("Rango de fechas", className="fw-bold small mb-1 d-block"),
+                            dcc.DatePickerRange(
+                                id='reports-date-range-picker',
+                                display_format='YYYY-MM-DD',
+                                start_date_placeholder_text='Fecha inicio',
+                                end_date_placeholder_text='Fecha fin',
+                            )
+                        ], width="auto"),
+                    ], align="center", className="g-3"),
+                ], className="p-3 mb-4", style={
+                    'backgroundColor': '#f8f9fa',
+                    'border': '1px solid #e9ecef',
+                    'borderRadius': '6px'
+                }),
                 dcc.Loading(
                     html.Div(id='reports-time-series-grid'),
                     type="circle"

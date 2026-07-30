@@ -150,7 +150,11 @@ class Settings(BaseSettings):
     def get_stewart_limits_path(self, client: str) -> Path:
         """Get Stewart limits path for oil technique."""
         return self.get_technique_file('oil', 'golden', client, 'stewart_limits.parquet')
-    
+
+    def get_stewart_limits_inferior_path(self, client: str) -> Path:
+        """Get lower-bound Stewart limits path for oil technique (v2.7)."""
+        return self.get_technique_file('oil', 'golden', client, 'stewart_limits_inferior.parquet')
+
     def get_component_hours_path(self, client: str) -> Path:
         """Get cleaned component hours path for oil technique."""
         return self.get_technique_file('oil', 'golden', client, 'cleaned_component_hours.parquet')

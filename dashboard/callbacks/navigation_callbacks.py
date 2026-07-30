@@ -99,7 +99,9 @@ def register_navigation_callbacks(app: dash.Dash) -> None:
         # Predictive sections are handled dynamically below
         # 'limits-oil': create_limits_tab,  # Commented - not active
         # New placeholder sections
-        'integration-sap': lambda: create_placeholder_content('SAP Connection'),
+        'agents-campbell-ai': lambda: create_placeholder_content('Campbell AI'),
+        'integration-validacion-avisos': lambda: create_placeholder_content('Validación de Avisos'),
+        'integration-seguimiento-avisos': lambda: create_placeholder_content('Seguimiento de Avisos'),
         'reporting-main': lambda: create_placeholder_content('Reportabilidad'),
         'admin-main': lambda: create_placeholder_content('Administración'),
     }
@@ -241,7 +243,8 @@ def register_navigation_callbacks(app: dash.Dash) -> None:
                                      'monitoring-telemetry', 
                                      'monitoring-mantentions']:
                     content = content_generator(client)
-                elif active_section in ['integration-sap', 'reporting-main', 'admin-main']:
+                elif active_section in ['agents-campbell-ai', 'integration-validacion-avisos',
+                                       'integration-seguimiento-avisos', 'reporting-main', 'admin-main']:
                     # Placeholder sections don't need client parameter
                     content = content_generator()
                 else:
