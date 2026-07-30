@@ -57,8 +57,7 @@ def register_auth_callbacks(app):
     
     @app.callback(
         Output('page-content', 'children'),
-        Input('user-info-store', 'data'),
-        prevent_initial_call=True
+        Input('user-info-store', 'data')
     )
     def display_page(user_data):
         """Display login page or main dashboard based on auth status."""

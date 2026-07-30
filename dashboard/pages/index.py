@@ -5,7 +5,11 @@ from dash import dcc
 
 
 def layout(**kwargs):
-    return dcc.Location(id="index-redirect", pathname=dash.get_relative_path("/overview/general"))
+    return dcc.Location(
+        id="index-redirect",
+        pathname=dash.get_relative_path("/overview/general"),
+        refresh=False,
+    )
 
 
 dash.register_page(__name__, path="/", layout=layout)
