@@ -7,6 +7,7 @@ Functions to create Dash DataTables for alerts listings.
 import pandas as pd
 import re
 import ast
+import json
 from dash import dash_table, html
 import dash_bootstrap_components as dbc
 from typing import List, Optional, Dict
@@ -15,6 +16,37 @@ from src.utils.logger import get_logger
 from dashboard.components.alerts_charts import FEATURE_NAMES_ES
 
 logger = get_logger(__name__)
+
+
+def _translate_signal_text(value: object) -> str:
+    """Translate canonical Capstone signal keys in client-facing text."""
+    text = "" if value is None else str(value)
+    for key in sorted(FEATURE_NAMES_ES, key=len, reverse=True):
+        label = FEATURE_NAMES_ES[key]
+        text = re.sub(
+            rf"(?<![A-Za-z0-9_]){re.escape(key)}(?![A-Za-z0-9_])",
+            label,
+            text,
+        )
+    return text
+
+
+def _translate_system(value: object) -> str:
+    mapping = {"motor": "Motor", "Motor": "Motor"}
+    key = str(value or "").strip()
+    return mapping.get(key, key or "Sin sistema")
+
+
+def _translate_component(value: object) -> str:
+    mapping = {
+        "engine": "Motor",
+        "post_engine": "Posterior al motor",
+        "rifle": "Conducto principal de aceite",
+        "crankcase": "Cárter",
+        "lubrication": "Lubricación",
+    }
+    key = str(value or "").strip()
+    return mapping.get(key, key or "Sin componente")
 
 
 def parse_ia_message_sections(mensaje_ia: str) -> Dict[str, str]:
@@ -36,6 +68,31 @@ def parse_ia_message_sections(mensaje_ia: str) -> Dict[str, str]:
     
     if not mensaje_ia or pd.isna(mensaje_ia):
         return sections
+
+    # Capstone stores the structured IA contract as JSON. Decode it before
+    # applying the legacy CDA section regex so the cards show readable
+    # diagnosis and recommendation instead of raw JSON fragments.
+    try:
+        parsed = json.loads(str(mensaje_ia))
+        if isinstance(parsed, dict) and any(
+            key in parsed for key in ("diagnostic", "recommended_actions", "evidence")
+        ):
+            sections['diagnostico'] = _translate_signal_text(
+                str(parsed.get('diagnostic') or '').strip()
+            )
+            actions = parsed.get('recommended_actions') or parsed.get('actions') or []
+            if isinstance(actions, (list, tuple)):
+                sections['acciones'] = _translate_signal_text(
+                    '\n'.join(str(item).strip() for item in actions if str(item).strip())
+                )
+            else:
+                sections['acciones'] = _translate_signal_text(str(actions).strip())
+            sections['causa_probable'] = (
+                'No se infiere una causa probable con la evidencia disponible.'
+            )
+            return sections
+    except (TypeError, ValueError, json.JSONDecodeError):
+        pass
     
     # Patrones para identificar secciones (case insensitive)
     patterns = {
@@ -55,21 +112,21 @@ def parse_ia_message_sections(mensaje_ia: str) -> Dict[str, str]:
                     text = text.replace('DIRECTO:', '').strip()
                     # Clean up any extra spaces
                     text = re.sub(r'\s+', ' ', text)
-                sections[key] = text
+                sections[key] = _translate_signal_text(text)
         
         # Fallback: dividir por párrafos si no se encontraron secciones
         if not any([sections['diagnostico'], sections['causa_probable'], sections['acciones']]):
             paragraphs = [p.strip() for p in mensaje_ia.split('\n\n') if p.strip()]
             if len(paragraphs) >= 1:
-                sections['diagnostico'] = paragraphs[0]
+                sections['diagnostico'] = _translate_signal_text(paragraphs[0])
             if len(paragraphs) >= 2:
-                sections['causa_probable'] = paragraphs[1]
+                sections['causa_probable'] = _translate_signal_text(paragraphs[1])
             if len(paragraphs) >= 3:
-                sections['acciones'] = '\n'.join(paragraphs[2:])
+                sections['acciones'] = _translate_signal_text('\n'.join(paragraphs[2:]))
     
     except Exception as e:
         logger.warning(f"Error parseando mensaje IA: {e}")
-        sections['diagnostico'] = mensaje_ia
+        sections['diagnostico'] = _translate_signal_text(mensaje_ia)
     
     return sections
 
@@ -101,7 +158,14 @@ def create_alerts_datatable(alerts_df: pd.DataFrame) -> dash_table.DataTable:
         table_df = table_df.sort_values('Timestamp', ascending=False)
         
         # Truncate AI message for display
-        table_df['mensaje_ia_short'] = table_df['mensaje_ia'].str[:80] + '...'
+        table_df['mensaje_ia_short'] = table_df['mensaje_ia'].map(
+            lambda value: (parse_ia_message_sections(value).get('diagnostico') or _translate_signal_text(value))[:80] + '...'
+        )
+        table_df['sistema'] = table_df['sistema'].map(_translate_system)
+        table_df['componente'] = table_df['componente'].map(_translate_component)
+        table_df['Trigger_type'] = table_df['Trigger_type'].map(
+            {"Telemetria": "Telemetría", "Tribologia": "Tribología"}
+        ).fillna(table_df['Trigger_type'])
         
         # Convert booleans to symbols
         table_df['Telemetría'] = table_df['has_telemetry'].map({True: '✓', False: '✗'})
@@ -221,8 +285,8 @@ def create_alerts_report_table(alerts_df: pd.DataFrame) -> dash_table.DataTable:
                 "ID": row.get("FusionID", "-"),
                 "Fecha": pd.to_datetime(row.get("Timestamp"), errors="coerce").strftime("%d/%m/%Y %H:%M") if pd.notna(row.get("Timestamp")) else "-",
                 "Unidad": row.get("UnitId", "-"),
-                "Sistema": row.get("sistema", "-"),
-                "Componente": row.get("componente", "-"),
+                "Sistema": _translate_system(row.get("sistema", "-")),
+                "Componente": _translate_component(row.get("componente", "-")),
                 "Señal / variable": signal_label,
                 "Fuente": source,
                 "Diagnóstico": sections.get("diagnostico", "Sin diagnóstico IA disponible"),

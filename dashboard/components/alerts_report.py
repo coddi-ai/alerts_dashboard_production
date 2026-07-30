@@ -19,6 +19,7 @@ SYSTEM_TRANSLATION = {
     "Dirección": "Dirección",
     "Tren de Fuerza": "Tren de fuerza",
     "Motor": "Motor",
+    "motor": "Motor",
     "Frenos": "Frenos",
 }
 
@@ -30,6 +31,14 @@ SOURCE_TRANSLATION = {
     "Mixto": "Mixto",
 }
 
+COMPONENT_TRANSLATION = {
+    "engine": "Motor",
+    "post_engine": "Posterior al motor",
+    "rifle": "Conducto principal de aceite",
+    "crankcase": "Cárter",
+    "lubrication": "Lubricación",
+}
+
 
 def translate_alert_system(value: Any) -> str:
     return SYSTEM_TRANSLATION.get(str(value), str(value or "Sin sistema"))
@@ -37,6 +46,11 @@ def translate_alert_system(value: Any) -> str:
 
 def translate_alert_source(value: Any) -> str:
     return SOURCE_TRANSLATION.get(str(value), str(value or "Sin fuente"))
+
+
+def translate_alert_component(value: Any) -> str:
+    key = str(value or "").strip()
+    return COMPONENT_TRANSLATION.get(key, key or "Sin componente")
 
 
 def _bool(value: Any) -> bool:
@@ -85,6 +99,7 @@ def prepare_alert_rows(alerts_df: pd.DataFrame) -> pd.DataFrame:
         frame["Timestamp"] = pd.to_datetime(frame["Timestamp"], errors="coerce")
     frame["system_display"] = frame.get("sistema", "").map(translate_alert_system)
     frame["source_display"] = frame.get("Trigger_type", "").map(translate_alert_source)
+    frame["component_display"] = frame.get("componente", "").map(translate_alert_component)
     frame["signal_display"] = frame.get("Trigger_Var", "").map(_signal_labels)
     sections = frame.get("mensaje_ia", pd.Series("", index=frame.index)).map(_message_sections)
     frame["diagnosis_display"] = sections.map(lambda item: item.get("diagnostico") or "Sin diagnóstico IA disponible")

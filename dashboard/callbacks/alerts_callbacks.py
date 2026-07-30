@@ -753,7 +753,8 @@ def create_telemetry_evidence_section(alert_row: pd.Series, client: str) -> html
             feature_names=feature_names,
             unit_id=unit_id,
             alert_time=alert_time,
-            feature_name_map=feature_name_map
+            feature_name_map=feature_name_map,
+            client=client
         )
         
         # Create GPS map (if GPS data available)

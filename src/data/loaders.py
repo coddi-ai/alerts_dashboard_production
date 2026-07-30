@@ -9,6 +9,7 @@ Load data from different layers:
 
 import pandas as pd
 import json
+import os
 import warnings
 from functools import lru_cache
 from pathlib import Path
@@ -18,6 +19,11 @@ from src.utils.logger import get_logger
 from src.utils.file_utils import list_excel_files, safe_read_excel, safe_read_parquet
 
 logger = get_logger(__name__)
+
+
+def _data_path(*parts: str) -> Path:
+    """Resolve dashboard data below the mounted/configured data root."""
+    return Path(os.getenv("DASHBOARD_DATA_ROOT", "data")).expanduser().joinpath(*parts)
 
 
 # These files are read by several Dash callbacks during a single interaction
@@ -403,7 +409,7 @@ def _load_alerts_data_cached(client: str) -> pd.DataFrame:
     Returns:
         DataFrame with alerts data including derived columns (has_telemetry, has_tribology, Month)
     """
-    file_path = Path(f"data/alerts/golden/{client.lower()}/consolidated_alerts.csv")
+    file_path = _data_path("alerts", "golden", client.lower(), "consolidated_alerts.csv")
     logger.info(f"Loading alerts data from {file_path}")
     
     if not file_path.exists():
@@ -413,13 +419,22 @@ def _load_alerts_data_cached(client: str) -> pd.DataFrame:
     try:
         df = pd.read_csv(file_path)
         
-        # Parse timestamp
-        df['Timestamp'] = pd.to_datetime(df['Timestamp'])
+        # Normalize event timestamps to timezone-naive UTC. Capstone emits
+        # ISO timestamps with offsets while the Dash date picker emits naive
+        # calendar dates; one representation avoids aware/naive comparisons.
+        df['Timestamp'] = pd.to_datetime(df['Timestamp'], utc=True).dt.tz_convert(None)
         
         # Fill sistema, subsistema and componente missing values
         df['sistema'] = df['sistema'].fillna('Desconocido')
         df['subsistema'] = df['subsistema'].fillna('Desconocido')
         df['componente'] = df['componente'].fillna('Desconocido')
+        if 'TribologyID' in df.columns:
+            df['TribologyID'] = (
+                df['TribologyID']
+                .fillna('')
+                .astype(str)
+                .str.replace(r'\.0$', '', regex=True)
+            )
         
         # Derive additional columns
         df['has_telemetry'] = df['Trigger_type'].isin(['Telemetria', 'Mixto'])
@@ -449,7 +464,7 @@ def load_telemetry_values(client: str) -> pd.DataFrame:
     Returns:
         DataFrame with telemetry values (Fecha, Unit, sensor columns)
     """
-    file_path = Path(f"data/telemetry/silver/{client.lower()}/telemetry_values_wide.parquet")
+    file_path = _data_path("telemetry", "silver", client.lower(), "telemetry_values_wide.parquet")
     logger.info(f"Loading telemetry values from {file_path}")
     
     if not file_path.exists():
@@ -477,7 +492,7 @@ def load_telemetry_states(client: str) -> pd.DataFrame:
     Returns:
         DataFrame with telemetry states (Fecha, Unit, Estado, EstadoCarga)
     """
-    file_path = Path(f"data/telemetry/silver/{client.lower()}/telemetry_states.parquet")
+    file_path = _data_path("telemetry", "silver", client.lower(), "telemetry_states.parquet")
     logger.info(f"Loading telemetry states from {file_path}")
     
     if not file_path.exists():
@@ -505,7 +520,7 @@ def load_telemetry_limits(client: str) -> pd.DataFrame:
     Returns:
         DataFrame with limits (Unit, Feature, Estado, EstadoCarga, Limit_Lower, Limit_Upper)
     """
-    file_path = Path(f"data/telemetry/silver/{client.upper()}/limits_config.parquet")
+    file_path = _data_path("telemetry", "silver", client.upper(), "limits_config.parquet")
     logger.info(f"Loading telemetry limits from {file_path}")
     
     if not file_path.exists():
@@ -532,7 +547,7 @@ def load_telemetry_alerts_metadata(client: str) -> pd.DataFrame:
     Returns:
         DataFrame with alerts metadata (AlertID, Trigger, etc.)
     """
-    file_path = Path(f"data/telemetry/golden/{client.lower()}/alerts_data.csv")
+    file_path = _data_path("telemetry", "golden", client.lower(), "alerts_data.csv")
     logger.info(f"Loading telemetry alerts metadata from {file_path}")
     
     if not file_path.exists():
@@ -560,7 +575,7 @@ def load_component_mapping(client: str) -> pd.DataFrame:
     Returns:
         DataFrame with Component, PrimaryFeature, System, SubSystem, Meaning, RelatedFeatures
     """
-    file_path = Path(f"data/telemetry/golden/{client.lower()}/component_mapping.parquet")
+    file_path = _data_path("telemetry", "golden", client.lower(), "component_mapping.parquet")
     logger.info(f"Loading component mapping from {file_path}")
     
     if not file_path.exists():
@@ -587,7 +602,7 @@ def load_feature_names(client: str) -> Dict[str, str]:
     Returns:
         Dictionary mapping feature codes to Spanish names
     """
-    file_path = Path("data/telemetry/features_mapping_name.json")
+    file_path = _data_path("telemetry", "features_mapping_name.json")
     logger.info(f"Loading feature names from {file_path}")
     
     if not file_path.exists():
@@ -623,7 +638,7 @@ def _load_telemetry_alerts_detail_golden_cached(client: str) -> pd.DataFrame:
         - {Feature}_Value: Sensor values
         - {Feature}_{Kind}_Limit: Limit values (Upper/Lower)
     """
-    file_path = Path(f"data/telemetry/golden/{client.lower()}/alerts_detail_wide_with_gps.csv")
+    file_path = _data_path("telemetry", "golden", client.lower(), "alerts_detail_wide_with_gps.csv")
     logger.info(f"Loading telemetry alerts detail from golden layer: {file_path}")
     
     if not file_path.exists():
@@ -632,7 +647,7 @@ def _load_telemetry_alerts_detail_golden_cached(client: str) -> pd.DataFrame:
     
     try:
         df = pd.read_csv(file_path)
-        df['TimeStart'] = pd.to_datetime(df['TimeStart'])
+        df['TimeStart'] = pd.to_datetime(df['TimeStart'], utc=True).dt.tz_convert(None)
         logger.info(f"Loaded {len(df)} telemetry alert detail records from golden layer")
         return df
     
@@ -657,7 +672,7 @@ def _load_oil_classified_cached(client: str) -> pd.DataFrame:
     Returns:
         DataFrame with classified oil samples (sampleNumber, essay columns, report_status, etc.)
     """
-    file_path = Path(f"data/oil/golden/{client.lower()}/classified.parquet")
+    file_path = _data_path("oil", "golden", client.lower(), "classified.parquet")
     logger.info(f"Loading oil classified data from {file_path}")
     
     if not file_path.exists():
@@ -1092,7 +1107,7 @@ def load_maintenance_week(client: str, week: str) -> pd.DataFrame:
     Returns:
         DataFrame with maintenance records for the week
     """
-    file_path = Path(f"data/mantentions/golden/{client.lower()}/{week}.csv")
+    file_path = _data_path("mantentions", "golden", client.lower(), f"{week}.csv")
     logger.info(f"Loading maintenance data from {file_path}")
     
     if not file_path.exists():
