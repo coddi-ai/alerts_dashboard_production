@@ -9,21 +9,9 @@ Custom CSS for navigation and layout styling is automatically loaded from:
 
 from dash import dcc, html
 import dash_bootstrap_components as dbc
+import dash
 import os
 from pathlib import Path
-# Commented tabs - not currently active in navigation
-# from dashboard.tabs.tab_limits import create_limits_tab
-# from dashboard.tabs.tab_machines import create_machines_tab
-# from dashboard.tabs.tab_reports import create_reports_tab
-from dashboard.tabs.tab_alerts import create_layout as create_alerts_tab
-# from dashboard.tabs.tab_mantenciones_general import layout_mantenciones_general
-from dashboard.tabs.tab_telemetry import create_layout as create_telemetry_tab
-from dashboard.tabs.tab_overview_general import create_layout as create_overview_general_tab
-from dashboard.tabs.tab_data_freshness import create_layout as create_data_freshness_tab
-from dashboard.tabs.tab_oil import create_layout as create_oil_tab
-# from dashboard.tabs.tab_health_index import create_layout as create_health_index_tab
-# from dashboard.tabs.tab_menace_control import create_layout as create_menace_control_tab
-# from dashboard.tabs.tab_hot_sheet import create_layout as create_hot_sheet_tab
 from config.settings import get_settings
 
 
@@ -32,6 +20,28 @@ PREDICTIVE_COMPONENT_ICONS = {
     "motor": "fas fa-cog",
     "transmision": "fas fa-exchange-alt",
 }
+
+# Static nav-id -> URL path map. Predictive ids ('predictive-<component>') are
+# resolved dynamically instead of listed here.
+NAV_PATHS = {
+    'overview-general': '/overview/general',
+    'overview-data-freshness': '/overview/data-freshness',
+    'monitoring-alerts': '/monitoring/alerts',
+    'monitoring-telemetry': '/monitoring/telemetry',
+    'monitoring-oil': '/monitoring/oil',
+    'agents-campbell-ai': '/agents/campbell-ai',
+    'integration-validacion-avisos': '/integration/validacion-avisos',
+    'integration-seguimiento-avisos': '/integration/seguimiento-avisos',
+    'reporting-main': '/reporting',
+    'admin-main': '/admin',
+}
+
+
+def _nav_path(nav_id: str) -> str:
+    """Resolve a nav-item id to its URL path (predictive ids are dynamic)."""
+    if nav_id.startswith('predictive-'):
+        return f"/predictive/{nav_id.split('predictive-', 1)[1]}"
+    return NAV_PATHS[nav_id]
 
 
 def _discover_predictive_components(client: str) -> list:
@@ -389,8 +399,8 @@ def create_main_dashboard(user_data: dict) -> html.Div:
             'label': 'Resumen',
             'icon': 'fas fa-tachometer-alt',
             'subsections': [
-                {'id': 'overview-general', 'label': 'General', 'tab': create_overview_general_tab},
-                {'id': 'overview-data-freshness', 'label': 'Estado de Datos', 'tab': create_data_freshness_tab}
+                {'id': 'overview-general', 'label': 'General'},
+                {'id': 'overview-data-freshness', 'label': 'Estado de Datos'}
             ]
         },
         {
@@ -398,13 +408,9 @@ def create_main_dashboard(user_data: dict) -> html.Div:
             'label': 'Monitoreo',
             'icon': 'fas fa-chart-line',
             'subsections': [
-                # {'id': 'monitoring-hot-sheet', 'label': 'Hot Sheet', 'tab': create_hot_sheet_tab},
-                {'id': 'monitoring-alerts', 'label': 'Alertas', 'tab': create_alerts_tab},
-                # {'id': 'monitoring-menace-control', 'label': 'Control de Amenazas', 'tab': create_menace_control_tab},
-                {'id': 'monitoring-telemetry', 'label': 'Telemetría', 'tab': create_telemetry_tab},
-                # {'id': 'monitoring-health-index', 'label': 'Índice de Salud', 'tab': create_health_index_tab},
-                # {'id': 'monitoring-mantentions', 'label': 'Mantenciones', 'tab': layout_mantenciones_general},
-                {'id': 'monitoring-oil', 'label': 'Aceite', 'tab': create_oil_tab}
+                {'id': 'monitoring-alerts', 'label': 'Alertas'},
+                {'id': 'monitoring-telemetry', 'label': 'Telemetría'},
+                {'id': 'monitoring-oil', 'label': 'Aceite'}
             ]
         },
     ]
@@ -428,7 +434,7 @@ def create_main_dashboard(user_data: dict) -> html.Div:
         'label': 'Agentes',
         'icon': 'fas fa-robot',
         'subsections': [
-            {'id': 'agents-campbell-ai', 'label': 'Campbell AI', 'tab': lambda: create_placeholder_content('Campbell AI')}
+            {'id': 'agents-campbell-ai', 'label': 'Campbell AI'}
         ]
     })
 
@@ -439,8 +445,8 @@ def create_main_dashboard(user_data: dict) -> html.Div:
             'label': 'Conexión ERP',
             'icon': 'fas fa-plug',
             'subsections': [
-                {'id': 'integration-validacion-avisos', 'label': 'Validación de Avisos', 'tab': lambda: create_placeholder_content('Validación de Avisos')},
-                {'id': 'integration-seguimiento-avisos', 'label': 'Seguimiento de Avisos', 'tab': lambda: create_placeholder_content('Seguimiento de Avisos')}
+                {'id': 'integration-validacion-avisos', 'label': 'Validación de Avisos'},
+                {'id': 'integration-seguimiento-avisos', 'label': 'Seguimiento de Avisos'}
             ]
         },
         {
@@ -448,7 +454,7 @@ def create_main_dashboard(user_data: dict) -> html.Div:
             'label': 'Reportes',
             'icon': 'fas fa-file-alt',
             'subsections': [
-                {'id': 'reporting-main', 'label': 'Reportabilidad', 'tab': lambda: create_placeholder_content('Reportabilidad')}
+                {'id': 'reporting-main', 'label': 'Reportabilidad'}
             ]
         },
         {
@@ -456,7 +462,7 @@ def create_main_dashboard(user_data: dict) -> html.Div:
             'label': 'Administración',
             'icon': 'fas fa-cog',
             'subsections': [
-                {'id': 'admin-main', 'label': 'Administración', 'tab': lambda: create_placeholder_content('Administración')}
+                {'id': 'admin-main', 'label': 'Administración'}
             ]
         },
     ])
@@ -489,13 +495,13 @@ def create_main_dashboard(user_data: dict) -> html.Div:
         # Subsections - improved interaction states
         for subsection in section['subsections']:
             menu_items.append(
-                dbc.Button(
+                dbc.NavLink(
                     [
                         html.I(className="fas fa-chevron-right me-2 nav-chevron", style={"fontSize": "0.7rem"}),
                         subsection['label']
                     ],
-                    id={'type': 'nav-button', 'index': subsection['id']},
-                    color="link",
+                    href=dash.get_relative_path(_nav_path(subsection['id'])),
+                    active="exact",
                     className="nav-menu-item text-start w-100 mb-1 px-3 py-2",
                     style={
                         "textDecoration": "none",
@@ -548,8 +554,8 @@ def create_main_dashboard(user_data: dict) -> html.Div:
     
     # Content area with proper spacing from header and sidebar
     content_area = html.Div([
-        # Dynamic content
-        html.Div(id='section-content')
+        # Routed page content
+        dash.page_container
     ], style={
         "marginLeft": "260px",
         "marginTop": "80px",
@@ -557,14 +563,11 @@ def create_main_dashboard(user_data: dict) -> html.Div:
         "backgroundColor": "#f8f9fa",
         "minHeight": "calc(100vh - 80px)"
     })
-    
+
     return html.Div([
         create_navbar(user_data, available_clients),
         left_menu,
-        content_area,
-        
-        # Store for active section
-        dcc.Store(id='active-section-store', data='overview-general')
+        content_area
     ])
 
 

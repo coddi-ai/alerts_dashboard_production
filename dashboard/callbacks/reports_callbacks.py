@@ -781,7 +781,8 @@ def register_reports_callbacks(app):
                 comp_limits_inferior = limits_inferior.get(client, {}).get(familia, {}).get(component_normalized, {})
 
             # Discover all "Aditivo" essays from the essays mapping table and build the
-            # "Paquete de Aditivos" full-width chart config for this render
+            # "Paquete de Aditivos" charts for this render. Split into two side-by-side
+            # charts (same 2-column layout as the pairs above) so the lines stay readable.
             charts_to_render = list(TIME_SERIES_CHARTS)
             essays_file = Path("data/oil/essays_elements.xlsx")
             if essays_file.exists():
@@ -789,13 +790,22 @@ def register_reports_callbacks(app):
                 essays_df = essays_df.dropna(subset=['ElementNameSpanish', 'GroupElement'])
                 aditivo_essays = essays_df[essays_df['GroupElement'] == 'Aditivo']['ElementNameSpanish'].tolist()
                 if aditivo_essays:
-                    charts_to_render.append({
-                        'title': 'Paquete de Aditivos',
-                        'essays': aditivo_essays,
-                        'palette': ADITIVOS_PALETTE,
-                        'full_width': True,
-                        'show_lower_limit': True,
-                    })
+                    primary_aditivos = [e for e in ['Calcio', 'Zinc', 'Fósforo'] if e in aditivo_essays]
+                    other_aditivos = [e for e in aditivo_essays if e not in primary_aditivos]
+                    if primary_aditivos:
+                        charts_to_render.append({
+                            'title': 'Aditivos: Calcio, Zinc & Fósforo',
+                            'essays': primary_aditivos,
+                            'palette': ADITIVOS_PALETTE,
+                            'show_lower_limit': True,
+                        })
+                    if other_aditivos:
+                        charts_to_render.append({
+                            'title': 'Aditivos: Otros',
+                            'essays': other_aditivos,
+                            'palette': ADITIVOS_PALETTE,
+                            'show_lower_limit': True,
+                        })
 
             # Generate charts in a 2-column grid, with any full-width charts spanning both columns
             chart_elements = []

@@ -67,6 +67,9 @@ from dashboard.callbacks.predictive_callbacks import register_callbacks as regis
 # Import component hours callbacks
 from dashboard.callbacks.component_hours_callbacks import register_component_hours_callbacks
 
+# Import predictive pages callbacks (reactive content for /predictive/* pages)
+from dashboard.callbacks.predictive_pages_callbacks import register_predictive_pages_callbacks
+
 
 def normalize_prefix(prefix: str | None) -> str:
     """
@@ -92,12 +95,30 @@ PATH_PREFIX = normalize_prefix(os.getenv("DASH_PATH_PREFIX"))
 # Initialize Dash app with Bootstrap theme
 app = dash.Dash(
     __name__,
+    use_pages=True,
+    pages_folder="",  # Pages are registered explicitly below, no folder auto-discovery
     external_stylesheets=[dbc.themes.BOOTSTRAP, dbc.icons.FONT_AWESOME],
     suppress_callback_exceptions=True,
     title="Multi-Technical Alerts",
     url_base_pathname=PATH_PREFIX,
     serve_locally=True
 )
+
+# Import page modules so their dash.register_page() calls run (must happen
+# after the app is created since register_page() looks up the active app).
+import dashboard.pages.index
+import dashboard.pages.overview_general
+import dashboard.pages.overview_data_freshness
+import dashboard.pages.monitoring_alerts
+import dashboard.pages.monitoring_telemetry
+import dashboard.pages.monitoring_oil
+import dashboard.pages.predictive_motor
+import dashboard.pages.predictive_transmision
+import dashboard.pages.agents_campbell_ai
+import dashboard.pages.integration_validacion_avisos
+import dashboard.pages.integration_seguimiento_avisos
+import dashboard.pages.reporting_main
+import dashboard.pages.admin_main
 
 # Set app layout
 app.layout = create_app_layout()
@@ -140,6 +161,7 @@ register_overview_general_callbacks(app)
 register_health_index_callbacks(app)
 register_predictive_callbacks(app)
 register_component_hours_callbacks(app)
+register_predictive_pages_callbacks(app)
 
 
 if __name__ == '__main__':
