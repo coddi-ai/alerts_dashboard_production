@@ -2,7 +2,10 @@ import json
 
 import pandas as pd
 
-from dashboard.components.alerts_charts import FEATURE_NAMES_ES
+from dashboard.components.alerts_charts import (
+    FEATURE_NAMES_ES,
+    create_context_kpis_cards_golden,
+)
 from dashboard.callbacks.alerts_callbacks import _select_telemetry_alert_data
 from dashboard.components.alerts_report import prepare_alert_rows
 from dashboard.components.alerts_tables import parse_ia_message_sections
@@ -98,3 +101,32 @@ def test_capstone_telemetry_detail_matches_string_telemetry_or_fusion_id():
     telemetry_keyed = pd.DataFrame([{"AlertID": "CAP-telemetry-1", "Unit": "CA-42"}])
     selected, _, _ = _select_telemetry_alert_data(telemetry_keyed, alert)
     assert selected["AlertID"].tolist() == ["CAP-telemetry-1"]
+
+
+def test_capstone_context_kpis_use_canonical_engine_signals():
+    context = create_context_kpis_cards_golden(
+        pd.DataFrame(
+            [
+                {
+                    "TimeStart": pd.Timestamp("2026-07-10 12:00:00"),
+                    "engine_load_pct_Value": 42.5,
+                    "engine_speed_rpm_Value": 1234.0,
+                }
+            ]
+        ),
+        pd.Timestamp("2026-07-10 12:00:00"),
+        "engine_speed_rpm",
+    )
+
+    def component_text(component):
+        if isinstance(component, (list, tuple)):
+            return " ".join(component_text(child) for child in component)
+        children = getattr(component, "children", None)
+        if children is not None:
+            return component_text(children)
+        return str(component)
+
+    rendered = component_text(context)
+
+    assert "42%" in rendered
+    assert "1234 RPM" in rendered

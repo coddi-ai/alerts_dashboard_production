@@ -1411,6 +1411,33 @@ def create_gps_route_map_golden(
         )
 
 
+def _first_numeric_context_value(alert_point: pd.Series, column_names: List[str]) -> Optional[float]:
+    """Return the first non-null numeric context value from candidate columns."""
+    for column_name in column_names:
+        if column_name not in alert_point.index:
+            continue
+
+        raw_value = alert_point[column_name]
+        if pd.isna(raw_value):
+            continue
+
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            logger.warning(
+                "Ignoring non-numeric context value in %s: %r",
+                column_name,
+                raw_value,
+            )
+            continue
+
+        if pd.notna(value):
+            logger.info("Found context value in column: %s with value: %s", column_name, value)
+            return value
+
+    return None
+
+
 def create_context_kpis_cards_golden(
     alert_data: pd.DataFrame,
     alert_time: pd.Timestamp,
@@ -1482,15 +1509,18 @@ def create_context_kpis_cards_golden(
         # Log available columns for debugging
         logger.info(f"Available columns for KPI: {list(alert_point.index)[:10]}...")  # First 10 columns
         
-        # Check multiple possible column names for EngLoad
-        engload_cols = ['EngLoad_Value', 'EngLoad', 'Engine Load', 'EngineLoad']
-        engload_value = None
-        
-        for col in engload_cols:
-            if col in alert_point.index and pd.notna(alert_point[col]):
-                engload_value = alert_point[col]
-                logger.info(f"Found EngLoad in column: {col} with value: {engload_value}")
-                break
+        # Capstone publishes canonical snake_case signals and may also carry
+        # the legacy aliases. Prefer the canonical contract, while retaining
+        # the aliases used by the CDA golden layer.
+        engload_cols = [
+            'engine_load_pct_Value',
+            'EngLoad_Value',
+            'engine_load_pct',
+            'EngLoad',
+            'Engine Load',
+            'EngineLoad',
+        ]
+        engload_value = _first_numeric_context_value(alert_point, engload_cols)
         
         if engload_value is not None:
             engine_load = f"⚙️ {engload_value:.0f}%"
@@ -1509,8 +1539,16 @@ def create_context_kpis_cards_golden(
         engine_rpm = "N/A"
         rpm_color = "success"
         
-        if 'EngSpd_Value' in alert_point and pd.notna(alert_point['EngSpd_Value']):
-            rpm_value = alert_point['EngSpd_Value']
+        rpm_value = _first_numeric_context_value(
+            alert_point,
+            [
+                'engine_speed_rpm_Value',
+                'EngSpd_Value',
+                'engine_speed_rpm',
+                'EngSpd',
+            ],
+        )
+        if rpm_value is not None:
             engine_rpm = f"🏎️ {rpm_value:.0f} RPM"
         
         # Create 4 KPI cards in vertical layout (1 column x 4 rows)
