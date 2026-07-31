@@ -194,6 +194,17 @@ class Settings(BaseSettings):
     def get_consolidated_alerts_path(self, client: str) -> Path:
         """Get consolidated alerts path."""
         return self.get_technique_file('alerts', 'golden', client, 'consolidated_alerts.csv')
+
+    # ERP (Conexión ERP) convenience methods
+    def get_erp_warning_path(self, client: str, state: str) -> Path:
+        """Get Parquet path for one client's warnings in a given lifecycle state.
+
+        Layout is `data/warnings/{client}/{state}.parquet` — client nested
+        under a top-level `warnings` folder (not the technique/layer/client
+        shape used by oil/telemetry/alerts), matching where the ERP pipeline
+        actually writes this data.
+        """
+        return self.data_root / 'warnings' / client.lower() / f'{state}.parquet'
     
     def create_directories(self) -> None:
         """Create necessary directories if they don't exist."""

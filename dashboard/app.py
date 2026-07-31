@@ -55,6 +55,9 @@ import dashboard.callbacks.menace_control_callbacks
 # Import hot sheet callbacks (uses @callback decorator, auto-registered on import)
 import dashboard.callbacks.hot_sheet_callbacks
 
+# Import Conexión ERP callbacks (uses @callback decorator, auto-registered on import)
+import dashboard.callbacks.integration_avisos_callbacks
+
 # Import health index callbacks module
 from dashboard.callbacks.health_index_callbacks import register_health_index_callbacks
 
