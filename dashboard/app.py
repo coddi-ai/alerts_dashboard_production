@@ -59,6 +59,8 @@ import dashboard.callbacks.data_freshness_callbacks
 
 # Import predictive callbacks
 from dashboard.callbacks.predictive_callbacks import register_callbacks as register_predictive_callbacks
+from dashboard.campbell_ai.callbacks import register_campbell_ai_callbacks
+from config.settings import get_settings
 
 
 def normalize_prefix(prefix: str | None) -> str:
@@ -92,6 +94,14 @@ app = dash.Dash(
     serve_locally=True
 )
 
+# Campbell AI inherits the authenticated dashboard identity from this signed session.
+app.server.secret_key = get_settings().secret_key
+app.server.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=os.getenv("SESSION_COOKIE_SECURE", "false").lower() == "true",
+)
+
 # Set app layout
 app.layout = create_app_layout()
 
@@ -110,6 +120,7 @@ register_mantenciones_general_callbacks(app)
 register_overview_general_callbacks(app)
 register_health_index_callbacks(app)
 register_predictive_callbacks(app)
+register_campbell_ai_callbacks(app)
 
 
 if __name__ == '__main__':

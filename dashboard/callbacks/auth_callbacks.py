@@ -5,6 +5,7 @@ Authentication callbacks for Multi-Technical-Alerts dashboard.
 from dash import Input, Output, State, html
 from dash.exceptions import PreventUpdate
 import dash_bootstrap_components as dbc
+from flask import session as flask_session
 from dashboard.auth import authenticate_user
 from src.utils.auth_logger import log_authentication
 import logging
@@ -38,6 +39,9 @@ def register_auth_callbacks(app):
         if n_clicks is None and n_submit is None:
             logger.warning("Login callback triggered but both n_clicks and n_submit are None")
             raise PreventUpdate
+
+        if not username or not password:
+            flask_session.pop("dashboard_user", None)
         
         if not username or not password:
             logger.warning("Login attempt with empty username or password")
@@ -48,10 +52,12 @@ def register_auth_callbacks(app):
         if user:
             logger.info(f"Login successful for user: {username}")
             log_authentication(username, success=True)
+            flask_session["dashboard_user"] = username
             return user, "", False
         else:
             logger.warning(f"Login failed for user: {username}")
             log_authentication(username, success=False)
+            flask_session.pop("dashboard_user", None)
             return None, "Usuario o contraseña inválidos", True
     
     
@@ -85,4 +91,5 @@ def register_auth_callbacks(app):
     )
     def logout(n_clicks):
         """Handle user logout."""
+        flask_session.clear()
         return None

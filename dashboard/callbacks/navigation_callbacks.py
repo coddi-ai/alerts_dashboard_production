@@ -15,6 +15,7 @@ from dashboard.tabs.tab_overview_general import create_layout as create_overview
 from dashboard.tabs.tab_data_freshness import create_layout as create_data_freshness_tab
 from dashboard.tabs.tab_oil import create_layout as create_oil_tab
 from dashboard.tabs.tab_telemetry import create_layout as create_telemetry_tab
+from dashboard.campbell_ai.layout import create_campbell_ai_layout
 
 # Commented tabs - not currently active
 # from dashboard.tabs.tab_limits import create_limits_tab
@@ -96,6 +97,7 @@ def register_navigation_callbacks(app: dash.Dash) -> None:
         # 'monitoring-health-index': create_health_index_tab,  # Commented - not active
         # 'monitoring-mantentions': lambda client: layout_mantenciones_general(),  # Commented - not active
         'monitoring-oil': create_oil_tab,
+        'campbell-ai-chat': create_campbell_ai_layout,
         # Predictive sections are handled dynamically below
         # 'limits-oil': create_limits_tab,  # Commented - not active
         # New placeholder sections

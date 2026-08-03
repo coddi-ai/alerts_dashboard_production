@@ -10,14 +10,48 @@ services:
       # Override specific variables if needed
       - DASHBOARD_HOST=0.0.0.0
       - DASHBOARD_PORT=8050
+      - CAMPBELL_AI_ENABLED=${CAMPBELL_AI_ENABLED:-true}
+      - CAMPBELL_AI_API_URL=http://campbell-api:8000
+      - CAMPBELL_AI_INTERNAL_TOKEN=${CAMPBELL_AI_INTERNAL_TOKEN:?CAMPBELL_AI_INTERNAL_TOKEN is required}
       # MAPBOX_TOKEN will be read from .env file
       # Or set explicitly: MAPBOX_TOKEN=${MAPBOX_TOKEN}
     volumes:
-      - ./data:/data:ro
+      - ./data:/app/data:ro
       - ./logs:/app/logs
       - ./dashboard:/app/dashboard
       - ./config:/app/config
       - ./src:/app/src
     ports:
       - "8050:8050"
+    depends_on:
+      campbell-api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  campbell-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: campbell-ai-api
+    command: ["uvicorn", "src.campbell_ai.api:app", "--host", "0.0.0.0", "--port", "8000"]
+    env_file:
+      - .env
+    environment:
+      - CAMPBELL_AI_ENABLED=${CAMPBELL_AI_ENABLED:-true}
+      - CAMPBELL_AI_DATA_ROOT=/app/data
+      - CAMPBELL_AI_INTERNAL_TOKEN=${CAMPBELL_AI_INTERNAL_TOKEN:?CAMPBELL_AI_INTERNAL_TOKEN is required}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+    volumes:
+      - ./data:/app/data:ro
+      - ./logs:/app/logs
+      - ./config:/app/config:ro
+      - ./src:/app/src:ro
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/campbell-ai/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
     restart: unless-stopped
