@@ -146,3 +146,57 @@
 .card {
     animation: fadeInUp 0.5s ease-out;
 }
+
+/* ========================================
+   CLIENT LOGO STYLING
+   ======================================== */
+
+/* Base client logo styling - displayed without background by default */
+#client-logo-img {
+    object-fit: contain;
+}
+
+/* Hide broken images - prevents broken icon from showing */
+#client-logo-img[src=""],
+#client-logo-img:not([src]) {
+    display: none !important;
+}
+
+/* Smooth transition when logo appears/disappears */
+#client-logo-img {
+    transition: opacity 0.3s ease;
+}
+
+/* White background box for all client logos EXCEPT ENEX */
+#client-logo-img.client-logo-cda,
+#client-logo-img.client-logo-emin,
+#client-logo-img.client-logo-capstone {
+    background-color: white;
+    border-radius: 6px;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+/* ENEX logo: no background (displays directly on dark header) */
+#client-logo-img.client-logo-enex {
+    background-color: transparent;
+    border-radius: 0;
+    box-shadow: none;
+}
+
+/* Alert detail selector: keep the searchable option list above nearby content
+   without creating a sticky layer that can cover the fixed application banner. */
+.alerts-detail-selector-card {
+    position: relative;
+    z-index: 1;
+}
+
+.alerts-detail-selector-dropdown,
+.alerts-detail-selector-dropdown .Select,
+.alerts-detail-selector-dropdown .Select-control {
+    position: relative;
+    z-index: 2;
+}
+
+.alerts-detail-selector-dropdown .Select-menu-outer {
+    z-index: 10 !important;
+}

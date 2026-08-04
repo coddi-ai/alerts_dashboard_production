@@ -82,6 +82,20 @@ def _load_component_data(filepath: Path, component: str):
     new_cols["avg_ranking_30d"] = latest_rolling["ranking_30d"].values if "ranking_30d" in latest_rolling.columns else df_latest["ranking"].values
     new_cols["avg_ranking_60d"] = latest_rolling["ranking_60d"].values if "ranking_60d" in latest_rolling.columns else df_latest["ranking"].values
     new_cols["ranking_acum_90d"] = latest_rolling["ranking_90d"].values if "ranking_90d" in latest_rolling.columns else df_latest["ranking"].values
+
+    # Compute max failure mode 30d average per unit (for status classification)
+    fm_30d_cols = [f"{col}_30d" for col in fm_keys if f"{col}_30d" in latest_rolling.columns]
+    if fm_30d_cols:
+        new_cols["max_fm_30d"] = latest_rolling[fm_30d_cols].max(axis=1).values
+        # Also merge individual FM rolling columns (30d, 60d, 90d) for display
+        for col in fm_keys:
+            for suffix in ["_30d", "_60d", "_90d"]:
+                col_name = f"{col}{suffix}"
+                if col_name in latest_rolling.columns:
+                    new_cols[col_name] = latest_rolling[col_name].values
+    else:
+        new_cols["max_fm_30d"] = 0.0
+
     df_latest = df_latest.assign(**new_cols)
 
     # Previous ranking (second-to-last date)
@@ -136,7 +150,7 @@ def _driver_bar(name: str, value: float):
     ], className="driver-row")
 
 
-def _priority_card(unit, score, acum_30d, delta, status, drivers):
+def _priority_card(unit, score, acum_30d, delta, status, drivers, horometro_text="—"):
     colors = _status_colors(status)
 
     if delta > 1:
@@ -156,7 +170,16 @@ def _priority_card(unit, score, acum_30d, delta, status, drivers):
             html.Span(f"{score:.0f}", className="pc-score"),
             html.Span(delta_txt, className=delta_cls),
         ], className="pc-score-row"),
-        html.Div(f"Prom 30d: {acum_30d:.1f}", className="pc-acum"),
+        html.Div([
+            html.Span(f"Prom 30d: {acum_30d:.1f}", className="pc-acum"),
+            html.Span([
+                html.I(className="fas fa-clock", style={"fontSize": "10px", "marginRight": "4px", "opacity": "0.7"}),
+                horometro_text,
+            ], style={
+                "fontSize": "11px", "color": "#0891B2", "fontWeight": "600",
+                "display": "inline-flex", "alignItems": "center",
+            }),
+        ], style={"display": "flex", "justifyContent": "space-between", "alignItems": "center", "marginBottom": "8px"}),
         html.Div("Factores principales", className="drivers-label"),
         *[_driver_bar(name, val) for name, val in drivers],
     ], className="priority-card",
@@ -166,6 +189,17 @@ def _priority_card(unit, score, acum_30d, delta, status, drivers):
 def _failure_table(sorted_df, sort_col, failure_modes):
     fm_keys = list(failure_modes.keys())
     fm_labels = list(failure_modes.values())
+
+    # Determine which FM suffix to use based on selected period
+    # "ranking" (Hoy) → raw values, "avg_ranking_30d" → _30d, etc.
+    _fm_suffix_map = {
+        "ranking": "",              # Hoy → raw values
+        "avg_ranking_30d": "_30d",
+        "avg_ranking_60d": "_60d",
+        "ranking_acum_90d": "_90d",
+    }
+    # If sort_col is a FM key, keep current period (default 30d)
+    fm_suffix = _fm_suffix_map.get(sort_col, "_30d")
 
     def _th(label, col_id):
         is_active = col_id == sort_col
@@ -222,7 +256,9 @@ def _failure_table(sorted_df, sort_col, failure_modes):
         ]
 
         for key in fm_keys:
-            val = float(r[key]) if key in r.index and pd.notna(r[key]) else 0.0
+            # Use the column matching the selected period
+            col_name = f"{key}{fm_suffix}" if fm_suffix else key
+            val = float(r[col_name]) if col_name in r.index and pd.notna(r[col_name]) else 0.0
             style = _score_cell_style(val)
             is_sort = key == sort_col
             cells.append(html.Td(
@@ -241,19 +277,24 @@ def _failure_table(sorted_df, sort_col, failure_modes):
 
 # ── Component Overview Renderer ───────────────────────────────────────────────
 
-def _render_component_overview(df_latest, prev_ranking, component: str):
+def _render_component_overview(df_latest, prev_ranking, component: str, client: str = None):
     """Render overview content for a specific component."""
     failure_modes = get_failure_modes_dict(component)
 
-    # Status classification
+    # Status classification (fixed thresholds)
     latest = df_latest.copy()
-    p80_30d = float(latest["avg_ranking_30d"].quantile(0.80))
     avg_ranking = float(latest["ranking"].mean())
 
+    # Saludable: avg_ranking_30d < 30 AND max_fm_30d < 50
+    # Alerta: 30 <= avg_ranking_30d < 60 OR 50 <= max_fm_30d < 80
+    # Crítico: avg_ranking_30d >= 60 OR max_fm_30d >= 80
     latest["status"] = "Saludable"
-    latest.loc[latest["avg_ranking_30d"] >= p80_30d, "status"] = "Alerta"
     latest.loc[
-        (latest["ranking"] > 80) & (latest["avg_ranking_30d"] >= p80_30d),
+        (latest["avg_ranking_30d"] >= 30) | (latest["max_fm_30d"] >= 50),
+        "status",
+    ] = "Alerta"
+    latest.loc[
+        (latest["avg_ranking_30d"] >= 60) | (latest["max_fm_30d"] >= 80),
         "status",
     ] = "Crítica"
 
@@ -273,25 +314,63 @@ def _render_component_overview(df_latest, prev_ranking, component: str):
         ], style={"marginBottom": "16px"}),
         create_kpi_row([
             create_kpi_card(f"{avg_ranking:.1f}", "Ranking Flota", "fas fa-tachometer-alt", "primary", "promedio actual"),
-            create_kpi_card(n_critical, "Unidades Críticas", "fas fa-exclamation-triangle", "danger", "unidades > P80 + >80"),
-            create_kpi_card(n_alert, "Unidades en Alerta", "fas fa-exclamation-circle", "warning", "unidades > P80"),
-            create_kpi_card(n_healthy, "Unidades Saludables", "fas fa-check-circle", "success", "bajo umbral"),
+            create_kpi_card(n_critical, "Unidades Críticas", "fas fa-exclamation-triangle", "danger", "media 30d ≥60 ó modo falla ≥80"),
+            create_kpi_card(n_alert, "Unidades en Alerta", "fas fa-exclamation-circle", "warning", "media 30d ≥30 ó modo falla ≥50"),
+            create_kpi_card(n_healthy, "Unidades Saludables", "fas fa-check-circle", "success", "media 30d <30 y modos falla <50"),
         ])
     ])
 
-    # Priority cards
+    # Priority cards — load horómetro data
+    import re as _re
+    horometro_map = {}  # {unit_normalized: hours_text}
+    if client:
+        try:
+            from src.data.loaders import load_component_hours
+            settings = get_settings()
+            allowed = [c.upper() for c in settings.component_hours_allowed_clients]
+            if client.upper() in allowed:
+                comp_hours_file = settings.get_component_hours_path(client.lower())
+                if comp_hours_file.exists():
+                    all_hours = load_component_hours(comp_hours_file)
+                    if not all_hours.empty:
+                        def _norm_uid(uid):
+                            m = _re.match(r'^([A-Za-z]+_)0*(\d+)$', str(uid))
+                            return f"{m.group(1)}{m.group(2)}" if m else str(uid)
+
+                        comp_hours = all_hours[all_hours['componentName'] == component].copy()
+                        if not comp_hours.empty:
+                            comp_hours['_uid_norm'] = comp_hours['unitId'].apply(_norm_uid)
+                            idx = comp_hours.groupby('_uid_norm')['sampleDate'].idxmax()
+                            latest_hours = comp_hours.loc[idx]
+                            for _, row_h in latest_hours.iterrows():
+                                uid = row_h['_uid_norm']
+                                hrs = row_h['componentHours_cleaned']
+                                if pd.notna(hrs):
+                                    horometro_map[uid] = f"{hrs:,.0f} h"
+        except Exception as e:
+            logger.warning(f"Could not load component hours for overview cards: {e}")
+
+    def _norm_uid_simple(uid):
+        m = _re.match(r'^([A-Za-z]+_)0*(\d+)$', str(uid))
+        return f"{m.group(1)}{m.group(2)}" if m else str(uid)
+
     cards = []
     for _, r in latest.sort_values("avg_ranking_30d", ascending=False).iterrows():
         score = r["ranking"]
         delta = score - prev_ranking.get(r["Unit"], score)
+        # Use 30d averages for failure mode drivers (consistent with status classification)
         drivers = sorted(
-            [(failure_modes[c], r[c]) for c in failure_modes if c in r.index and pd.notna(r[c])],
+            [(failure_modes[c], float(r[f"{c}_30d"])) for c in failure_modes
+             if f"{c}_30d" in r.index and pd.notna(r[f"{c}_30d"])],
             key=lambda x: x[1], reverse=True,
         )[:3]
+        unit_norm = _norm_uid_simple(r["Unit"])
+        horo_text = horometro_map.get(unit_norm, "—")
         cards.append(_priority_card(
             unit=r["Unit"], score=score,
             acum_30d=float(r["avg_ranking_30d"]),
             delta=delta, status=r["status"], drivers=drivers,
+            horometro_text=horo_text,
         ))
 
     priority = html.Div([
@@ -387,4 +466,4 @@ def layout(client: str, component: str):
                    className="text-muted", style={"padding": "40px", "textAlign": "center"})
         ])
 
-    return _render_component_overview(df_latest, prev_ranking, component)
+    return _render_component_overview(df_latest, prev_ranking, component, client)

@@ -16,7 +16,9 @@ services:
       # MAPBOX_TOKEN will be read from .env file
       # Or set explicitly: MAPBOX_TOKEN=${MAPBOX_TOKEN}
     volumes:
+      # Read the freshly downloaded data from the same path used by the app.
       - ./data:/app/data:ro
+      - ./data:/data:ro
       - ./logs:/app/logs
       - ./dashboard:/app/dashboard
       - ./config:/app/config

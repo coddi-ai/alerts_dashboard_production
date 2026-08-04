@@ -113,13 +113,18 @@ def transform_machine_status_to_viewmodel(df: pd.DataFrame) -> List[MachineStatu
     view_models = []
     
     for _, row in df.iterrows():
-        # Parse component_details JSON
+        # Parse component_details (may be numpy array or JSON string)
         component_details = []
-        if pd.notna(row.get('component_details')):
-            try:
-                component_details = json.loads(row['component_details'])
-            except (json.JSONDecodeError, TypeError):
-                component_details = []
+        cd_raw = row.get('component_details')
+        if cd_raw is not None and not (isinstance(cd_raw, float) and pd.isna(cd_raw)):
+            import numpy as np
+            if isinstance(cd_raw, (np.ndarray, list)):
+                component_details = list(cd_raw)
+            elif isinstance(cd_raw, str):
+                try:
+                    component_details = json.loads(cd_raw)
+                except (json.JSONDecodeError, TypeError):
+                    component_details = []
         
         vm = MachineStatusViewModel(
             unit_id=str(row['unit_id']).upper(),
@@ -153,13 +158,26 @@ def transform_classified_reports_to_viewmodel(df: pd.DataFrame) -> List[Componen
     view_models = []
     
     for _, row in df.iterrows():
-        # Parse breached_essays JSON
+        # Parse breached_essays (may be numpy array or JSON string)
         breached_essays = []
-        if pd.notna(row.get('breached_essays')):
-            try:
-                breached_essays = json.loads(row['breached_essays'])
-            except (json.JSONDecodeError, TypeError):
-                breached_essays = []
+        breached_raw = row.get('breached_essays')
+        if breached_raw is not None and not (isinstance(breached_raw, float) and pd.isna(breached_raw)):
+            import numpy as np
+            if isinstance(breached_raw, (np.ndarray, list)):
+                # Parquet stores list-of-struct as ndarray
+                breached_essays = [
+                    item.get('essay', '') if isinstance(item, dict) else str(item)
+                    for item in breached_raw
+                ]
+            elif isinstance(breached_raw, str):
+                try:
+                    parsed = json.loads(breached_raw)
+                    breached_essays = [
+                        item.get('essay', '') if isinstance(item, dict) else str(item)
+                        for item in parsed
+                    ]
+                except (json.JSONDecodeError, TypeError):
+                    breached_essays = []
         
         vm = ComponentStatusViewModel(
             unit_id=str(row['unitId']).upper(),

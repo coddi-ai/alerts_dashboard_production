@@ -1,0 +1,89 @@
+"""
+Callbacks for the predictive pages (dashboard/pages/predictive_*.py).
+
+Those pages register a single placeholder container per component
+(id={'type': 'predictive-page-content', 'component': <name>}) because the
+content depends on the globally-selected client (client-selector in the
+navbar) and must refresh live when the client changes, without a page
+reload. This mirrors what the old section-content routing callback used to
+do for the 'predictive-{component}' sections.
+"""
+
+from pathlib import Path
+
+from dash import Input, Output, State, html
+from dash.dependencies import ALL
+import dash
+
+from dashboard.layout import create_placeholder_content
+from config.settings import get_settings
+from src.utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+def _resolve_client(selected_client, user_data) -> str:
+    """Resolve the active client the same way the legacy section router did."""
+    if selected_client:
+        return selected_client.lower()
+    if user_data and user_data.get('clients'):
+        return user_data['clients'][0].lower()
+    settings = get_settings()
+    return settings.clients[0].lower() if settings.clients else 'cda'
+
+
+def _render_component(client: str, component: str):
+    settings = get_settings()
+    predictive_allowed = [c.lower() for c in settings.predictive_allowed_clients]
+    if client not in predictive_allowed:
+        logger.warning(
+            f"Predictive module accessed by non-allowed client: {client}. "
+            f"Allowed: {predictive_allowed}"
+        )
+        return create_placeholder_content('Predictivo (Solo disponible para CDA)')
+
+    data_dir = Path(settings.data_root) / "predictive" / "golden" / client
+    component_file = data_dir / f"{component}.csv"
+
+    if not data_dir.exists() or not component_file.exists():
+        logger.warning(
+            f"No predictive data found for client {client}, component {component} at {component_file}"
+        )
+        return html.Div([
+            html.Div([
+                html.Div([
+                    html.I(className="fas fa-database fa-3x mb-3 text-muted"),
+                    html.H4("Sin datos predictivos disponibles", className="text-muted"),
+                    html.P(
+                        f"No se encontraron datos predictivos de {component.title()} para el cliente {client.upper()}.",
+                        className="text-muted mb-2"
+                    ),
+                    html.P(
+                        "Los datos se generarán cuando exista historial suficiente de aceite y telemetría para este componente.",
+                        className="text-muted small"
+                    )
+                ], className="text-center py-5")
+            ], className="card shadow-sm", style={"marginTop": "16px"})
+        ])
+
+    from dashboard.tabs.tab_predictive_component import layout as predictive_component_layout
+    return predictive_component_layout(client, component)
+
+
+def register_predictive_pages_callbacks(app: dash.Dash) -> None:
+    """Register the reactive content callback for predictive component pages."""
+
+    # Output uses ALL (not MATCH): the triggering inputs (client-selector,
+    # user-info-store) are plain, non-pattern ids, so Dash fans this callback
+    # out across every currently-mounted 'predictive-page-content' container
+    # in one dispatch and expects a list of results back, one per container
+    # (in practice at most one, since only one page is ever mounted at a time).
+    @app.callback(
+        Output({'type': 'predictive-page-content', 'component': ALL}, 'children'),
+        [Input('client-selector', 'value'),
+         Input('user-info-store', 'data')],
+        [State({'type': 'predictive-page-content', 'component': ALL}, 'id')],
+    )
+    def render_predictive_component(selected_client, user_data, container_ids):
+        client = _resolve_client(selected_client, user_data)
+        return [_render_component(client, container_id['component']) for container_id in container_ids]

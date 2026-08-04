@@ -61,6 +61,10 @@ def _load_component_data(filepath: Path, component: str):
     df = pd.read_csv(filepath)
     df["Fecha"] = pd.to_datetime(df["Fecha"])
 
+    # Get failure mode keys for this component
+    failure_modes = get_failure_modes_dict(component)
+    fm_keys = list(failure_modes.keys())
+
     # Compute rolling averages (concat at once to avoid fragmentation)
     df_sorted = df.sort_values(["Unit", "Fecha"]).copy()
     rolling_cols = {
@@ -71,13 +75,25 @@ def _load_component_data(filepath: Path, component: str):
             lambda x: x.rolling(90, min_periods=1).mean()
         ),
     }
+    # Also compute 30d rolling for each failure mode (for status classification)
+    for fm in fm_keys:
+        if fm in df_sorted.columns:
+            rolling_cols[f"{fm}_30d"] = df_sorted.groupby("Unit")[fm].transform(
+                lambda x: x.rolling(30, min_periods=1).mean()
+            )
     df_sorted = pd.concat([df_sorted, pd.DataFrame(rolling_cols, index=df_sorted.index)], axis=1)
 
     # Latest snapshot
     df_latest = df_sorted.sort_values("Fecha").groupby("Unit").last().reset_index()
+
+    # Compute max failure mode 30d average per unit
+    fm_30d_cols = [f"{fm}_30d" for fm in fm_keys if f"{fm}_30d" in df_latest.columns]
+    max_fm_30d = df_latest[fm_30d_cols].max(axis=1) if fm_30d_cols else 0.0
+
     df_latest = df_latest.assign(
         avg_ranking_30d=df_latest["ranking_30d"],
         ranking_acum_90d=df_latest["ranking_90d"],
+        max_fm_30d=max_fm_30d,
     )
 
     return df_sorted, df_latest
@@ -462,16 +478,22 @@ def _build_insight_panel(insight):
 
 # ── Render functions (called by callbacks) ────────────────────────────────────
 
-def render_initial_content(unit, df, df_latest, component="motor"):
+def render_initial_content(unit, df, df_latest, component="motor", client=None):
     """Render KPIs and fleet comparison for a unit."""
     failure_modes = get_failure_modes_dict(component)
 
     latest = df_latest.copy()
-    p80_90d = float(latest["ranking_acum_90d"].quantile(0.80)) if "ranking_acum_90d" in latest.columns else 50.0
+    # Status classification (fixed thresholds)
+    # Saludable: avg_ranking_30d < 30 AND max_fm_30d < 50
+    # Alerta: 30 <= avg_ranking_30d < 60 OR 50 <= max_fm_30d < 80
+    # Crítico: avg_ranking_30d >= 60 OR max_fm_30d >= 80
     latest["status"] = "Saludable"
-    latest.loc[latest["ranking_acum_90d"] >= p80_90d, "status"] = "Alerta"
     latest.loc[
-        (latest["ranking"] > 80) & (latest["ranking_acum_90d"] >= p80_90d),
+        (latest["avg_ranking_30d"] >= 30) | (latest["max_fm_30d"] >= 50),
+        "status",
+    ] = "Alerta"
+    latest.loc[
+        (latest["avg_ranking_30d"] >= 60) | (latest["max_fm_30d"] >= 80),
         "status",
     ] = "Crítica"
 
@@ -485,9 +507,9 @@ def render_initial_content(unit, df, df_latest, component="motor"):
         return html.Div(html.P("No hay datos disponibles.", className="text-muted text-center", style={"padding": "40px"}))
     row = row.iloc[0]
 
-    # Dominant failure mode
+    # Dominant failure mode (use 30d averages for consistency)
     fm_keys = list(failure_modes.keys())
-    fm_scores = {k: float(row[k]) if k in row.index and pd.notna(row[k]) else 0.0 for k in fm_keys}
+    fm_scores = {k: float(row[f"{k}_30d"]) if f"{k}_30d" in row.index and pd.notna(row[f"{k}_30d"]) else 0.0 for k in fm_keys}
     dominant_mode = max(fm_scores, key=fm_scores.get) if fm_scores else fm_keys[0]
     dominant_label = failure_modes[dominant_mode]
 
@@ -496,17 +518,67 @@ def render_initial_content(unit, df, df_latest, component="motor"):
     ranking_90d_val = float(row.get("ranking_acum_90d", 0))
 
     df_unit = df[df["Unit"] == unit].sort_values("Fecha")
-    last_date_str = df_unit["Fecha"].max().strftime("%d %b %Y") if not df_unit.empty else "—"
+    last_evidence_date = df_unit["Fecha"].max() if not df_unit.empty else None
+    last_date_str = last_evidence_date.strftime("%d %b %Y") if last_evidence_date is not None else "—"
+
+    # ── Load component horómetro at last evidence date ──
+    horometro_value = "—"
+    horometro_sub = "horas acumuladas del componente"
+    if client and last_evidence_date is not None:
+        try:
+            from config.settings import get_settings as _get_settings
+            from src.data.loaders import load_component_hours
+            import re as _re
+            _settings = _get_settings()
+            allowed = [c.upper() for c in _settings.component_hours_allowed_clients]
+            if client.upper() in allowed:
+                comp_hours_file = _settings.get_component_hours_path(client.lower())
+                if comp_hours_file.exists():
+                    all_hours = load_component_hours(comp_hours_file)
+                    if not all_hours.empty:
+                        # Normalize unit IDs for matching (T_09 vs T_9)
+                        def _normalize_unit(uid):
+                            m = _re.match(r'^([A-Za-z]+_)0*(\d+)$', str(uid))
+                            return f"{m.group(1)}{m.group(2)}" if m else str(uid)
+
+                        unit_norm = _normalize_unit(unit)
+                        all_hours['_unitId_norm'] = all_hours['unitId'].apply(_normalize_unit)
+
+                        # Filter by normalized unit and component
+                        unit_comp_hours = all_hours[
+                            (all_hours['_unitId_norm'] == unit_norm) &
+                            (all_hours['componentName'] == component)
+                        ].copy()
+
+                        if not unit_comp_hours.empty:
+                            # Find reading closest to last evidence date
+                            unit_comp_hours['date_diff'] = abs(
+                                unit_comp_hours['sampleDate'] - last_evidence_date
+                            )
+                            closest = unit_comp_hours.sort_values('date_diff').iloc[0]
+                            hrs = closest['componentHours_cleaned']
+                            date_val = closest['sampleDate']
+                            if pd.notna(hrs):
+                                horometro_value = f"{hrs:,.0f}"
+                            if pd.notna(date_val):
+                                horometro_sub = f"al {pd.to_datetime(date_val).strftime('%d %b %Y')}"
+                        else:
+                            logger.info(f"No component hours found for unit={unit} (norm={unit_norm}), component={component}")
+        except Exception as e:
+            logger.warning(f"Could not load component hours for KPI: {e}")
+
+    component_label = (component or "").title()
 
     kpis = [
         _kpi_card("Ranking actual", f"{ranking_val:.0f}", _ranking_color(ranking_val), "escala 0-100"),
         _kpi_card("Riesgo acum. 90d", f"{ranking_90d_val:.1f}", _ranking_color(ranking_90d_val), "índice histórico"),
+        _kpi_card(f"Horas del {component_label}", horometro_value, "#0891B2", horometro_sub),
         _kpi_card("Modo dominante", dominant_label, "#7C3AED", f"Score: {fm_scores[dominant_mode]:.1f}"),
-        _kpi_card("Última evidencia", last_date_str, "#0891B2", "fecha más reciente"),
+        _kpi_card("Última evidencia", last_date_str, "#6B7280", "fecha más reciente"),
     ]
 
     # Fleet charts
-    scatter_fig = create_fleet_scatter(latest, unit, STATUS_COLORS, p80_90d)
+    scatter_fig = create_fleet_scatter(latest, unit, STATUS_COLORS, 30.0)
     bar_fig = create_comparative_bars(row, latest, failure_modes)
 
     return html.Div([
@@ -573,24 +645,21 @@ def render_detailed_evidence(unit, df, df_latest, failure_mode, component="motor
     oil_vars = get_oil_variables_for_mode(failure_mode, component)
     oil_subtitle = f"Variables asociadas a {selected_label}"
 
+    # Build oil variable options for the selector (all associated vars, pre-selected)
+    oil_var_options = [{"label": OIL_LABELS.get(v, v), "value": v} for v in oil_vars if v in df_unit.columns]
+    oil_var_defaults = [v for v in oil_vars if v in df_unit.columns]
+
+    # Get oil range for threshold display
+    oil_range_val = "LT_1000"
     if oil_vars and not df_unit.empty:
-        # Get oil range for threshold display
         df_sorted_oil = df_unit.sort_values("sampleDate")
         last_sample = df_sorted_oil.iloc[-1]
-        oil_range = last_sample.get("oilHourRange", "LT_1000")
-        
-        # Pass thresholds when there's only 1 variable (for limit lines)
-        ts_fig = create_oil_timeseries_90d(
-            df_unit, oil_vars, OIL_LABELS,
-            oil_thresholds=OIL_THRESHOLDS,
-            oil_range=oil_range,
-        )
-        oil_chart = dcc.Graph(figure=ts_fig, config={"displayModeBar": False}) if ts_fig else html.P(
-            "No hay suficientes datos históricos.", style={"color": "var(--text-muted)", "fontSize": "13px"})
+        oil_range_val = last_sample.get("oilHourRange", "LT_1000")
+
+    # Oil variables table (static, always shows all vars for the mode)
+    if oil_vars and not df_unit.empty:
         oil_table = create_oil_variables_table(df_unit, oil_vars, OIL_LABELS, OIL_THRESHOLDS)
     else:
-        oil_chart = html.P("Este modo de falla no tiene variables de aceite asociadas.",
-                           style={"color": "var(--text-muted)", "fontSize": "13px", "fontStyle": "italic"})
         oil_table = html.Div()
 
     # Telemetry evidence
@@ -633,9 +702,32 @@ def render_detailed_evidence(unit, df, df_latest, failure_mode, component="motor
                         className="text-primary mb-3 mt-4 pb-2 border-bottom"),
                 html.P(oil_subtitle, className="text-muted mb-3"),
             ]),
+            # Oil variable selector
+            html.Div([
+                html.Div([
+                    html.I(className="fas fa-filter me-2", style={"color": "#0891B2"}),
+                    html.Span("Variables de aceite:", className="fw-500", style={"fontSize": "13px"}),
+                ], style={"display": "flex", "alignItems": "center", "marginBottom": "8px"}),
+                dcc.Dropdown(
+                    id="predictive-oil-var-selector",
+                    options=oil_var_options,
+                    value=oil_var_defaults,
+                    multi=True,
+                    placeholder="Seleccionar variables de aceite...",
+                    className="mb-3",
+                    style={"fontSize": "13px"},
+                ),
+                html.P([
+                    html.I(className="fas fa-info-circle me-1"),
+                    "Si seleccionas 1 sola variable, se muestran las líneas de límite (Normal, Alerta, Crítico)."
+                ], className="text-muted", style={"fontSize": "11px", "fontStyle": "italic", "marginBottom": "12px"}),
+            ], style={"marginBottom": "8px"}),
+            # Hidden stores for oil chart callback
+            dcc.Store(id="predictive-oil-range-store", data=oil_range_val),
             html.Span([html.I(className="fas fa-calendar-alt me-1"), "Ventana: últimos 90 días"],
                       className="text-muted", style={"fontSize": "11px", "display": "inline-block", "marginBottom": "8px"}),
-            html.Div(oil_chart, style={"marginBottom": "24px"}),
+            # Dynamic oil chart (updated by callback)
+            html.Div(id="predictive-oil-chart-container", style={"marginBottom": "24px"}),
             html.Div([
                 html.Span([html.I(className="fas fa-table me-1"), "Resumen de variables"],
                           className="fw-500", style={"fontSize": "13px", "display": "block", "marginBottom": "8px"}),

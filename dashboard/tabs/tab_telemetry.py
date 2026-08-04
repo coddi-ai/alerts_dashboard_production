@@ -1,10 +1,4 @@
-"""
-Main Telemetry Tab — Fleet Health Monitor.
-
-Two-page layout:
-- Fleet Overview: Fleet status donut, system heatmap, priority table, AI assessments
-- Unit Detail: System risk table, signal cards with time series + KPI tables
-"""
+"""Main Telemetry tab with executive fleet and unit evidence views."""
 
 from dash import html, dcc
 import dash_bootstrap_components as dbc
@@ -20,20 +14,20 @@ def create_layout(client: str = 'cda') -> html.Div:
             dbc.Col([
                 html.H2([
                     html.I(className="fas fa-heartbeat me-3"),
-                    "Fleet Health Monitor"
+                    "Monitoreo de salud de la flota"
                 ], className="text-primary mb-1"),
                 html.P(
                     "Monitoreo de salud de flota basado en telemetría multi-técnica",
                     className="text-muted"
                 )
-            ])
+            ]),
+            dbc.Col([
+                html.Div(id='telemetry-reference-date', className="text-end")
+            ], width="auto", className="d-flex align-items-center")
         ], className="mb-4"),
 
-        # Client restriction notice
-        dbc.Alert([
-            html.I(className="fas fa-info-circle me-2"),
-            "Este módulo está disponible únicamente para el cliente CDA"
-        ], color="info", className="mb-4"),
+        # Availability notice is populated from the selected client's data.
+        html.Div(id='telemetry-availability-notice', className="mb-4"),
 
         # Internal Tabs
         dcc.Tabs(
@@ -54,6 +48,12 @@ def create_layout(client: str = 'cda') -> html.Div:
                 )
             ],
             className='mb-4'
+        ),
+
+        # Navigation context shared by the fleet and unit detail views.
+        dcc.Store(
+            id='telemetry-navigation-state',
+            data={'unit': None, 'system': None, 'signal': None, 'source': None}
         ),
 
         # Tab content container

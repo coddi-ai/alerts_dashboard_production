@@ -1,0 +1,9 @@
+client_id: cda
+client_erp_type: sap
+asset_id_format: equipment
+sap:
+  notification_type: M2
+  planning_plant: "1000"
+  planner_group: MEC
+  main_work_center: MEC01
+dedup_time_window_minutes: 1440

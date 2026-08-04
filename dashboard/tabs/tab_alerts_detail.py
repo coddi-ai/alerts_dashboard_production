@@ -136,7 +136,8 @@ def create_layout() -> html.Div:
                             id='alert-selector-dropdown',
                             placeholder="Buscar por ID, unidad, sistema...",
                             clearable=True,
-                            searchable=True
+                            searchable=True,
+                            className='alerts-detail-selector-dropdown'
                         )
                     ], md=12)
                 ]),
@@ -147,7 +148,7 @@ def create_layout() -> html.Div:
                     ], className="text-muted mt-2 d-block")
                 ])
             ])
-        ], className="shadow-sm mb-4"),
+        ], className="alerts-detail-selector-card shadow-sm mb-4"),
         
         # Loading indicator
         dcc.Loading(

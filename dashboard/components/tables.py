@@ -216,6 +216,14 @@ def create_machine_detail_table(df: pd.DataFrame) -> dash_table.DataTable:
     if 'componentName' in df.columns:
         df['componentName'] = df['componentName'].str.title()
     
+    # Format component hours (horómetro) if available
+    if 'componentHours_cleaned' in df.columns:
+        df['horometro_display'] = df['componentHours_cleaned'].apply(
+            lambda x: f"{x:,.0f} hrs" if pd.notna(x) else 'N/A'
+        )
+    else:
+        df['horometro_display'] = 'N/A'
+    
     # Parse breached_essays to extract essay names from list of dictionaries
     if 'breached_essays' in df.columns:
         def extract_essay_names(x):
@@ -261,15 +269,32 @@ def create_machine_detail_table(df: pd.DataFrame) -> dash_table.DataTable:
         df['ai_text'] = df['ai_recommendation'].apply(format_ai_recommendation)
     else:
         df['ai_text'] = 'N/A'
+
+    # Format anomaly type (July 2026)
+    if 'anomalyType' in df.columns:
+        df['anomaly_display'] = df['anomalyType'].apply(
+            lambda x: str(x) if pd.notna(x) and x != 'Normal' else '—'
+        )
+    else:
+        df['anomaly_display'] = '—'
     
-    # Define columns: Component, Status, Sample Date, Essays Broken, AI Recommendation
+    # Define columns: Component, Status, Anomaly, Horómetro, Sample Date, Essays Broken, AI Recommendation
+    has_horometro = 'componentHours_cleaned' in df.columns
+    
     columns = [
         {'name': 'Componente', 'id': 'componentName'},
         {'name': 'Estado', 'id': 'report_status'},
+        {'name': 'Anomalía', 'id': 'anomaly_display'},
+    ]
+    
+    if has_horometro:
+        columns.append({'name': 'Horómetro', 'id': 'horometro_display'})
+    
+    columns.extend([
         {'name': 'Fecha Muestra', 'id': 'sampleDate'},
         {'name': 'Ensayos Anormales', 'id': 'essays_broken_names'},
         {'name': 'Recomendación IA', 'id': 'ai_text'}
-    ]
+    ])
     
     return dash_table.DataTable(
         id='machine-detail-table',
@@ -328,9 +353,10 @@ def create_machine_detail_table(df: pd.DataFrame) -> dash_table.DataTable:
             }
         ],
         style_cell_conditional=[
-            {'if': {'column_id': 'ai_summary'}, 'width': '25%', 'minWidth': '180px'},
-            {'if': {'column_id': 'breached_essays_text'}, 'width': '20%', 'minWidth': '150px'},
-            {'if': {'column_id': 'componentName'}, 'width': '15%'}
+            {'if': {'column_id': 'ai_text'}, 'width': '25%', 'minWidth': '180px'},
+            {'if': {'column_id': 'essays_broken_names'}, 'width': '18%', 'minWidth': '130px'},
+            {'if': {'column_id': 'componentName'}, 'width': '14%'},
+            {'if': {'column_id': 'anomaly_display'}, 'width': '15%', 'minWidth': '120px'}
         ],
         sort_action='native',
         page_size=20

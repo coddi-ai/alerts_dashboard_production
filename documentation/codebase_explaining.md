@@ -1,0 +1,246 @@
+# Codebase Explainer (Cold-Start Guide)
+
+**Purpose of this file**: a fast orientation doc for anyone (human or agent) new to this repo.
+Read this first, then jump to the specific doc pointed to for the area you're touching. It
+explains *how the pieces fit together*, not the full detail of any one piece.
+
+If something here ever contradicts the code, trust the code and fix this file.
+
+---
+
+## 1. What this repo is
+
+**TDS / Multi-Technical Alerts Dashboard** — a Dash (Plotly) web app that lets mining-fleet
+maintenance teams monitor equipment health across several monitoring techniques (oil analysis,
+telemetry, maintenance records, consolidated alerts, predictive failure models) for multiple
+clients (CDA, EMIN, ENEX, CAPSTONE).
+
+**Critical mental model**: this repo is **dashboard-only**. It does not compute the analytics it
+displays. An upstream data pipeline (outside this repo) produces "Gold layer" Parquet/CSV files
+and uploads them to S3; this app's only jobs are:
+
+1. Sync those files into a local `data/` folder if missing (`src/data/s3_downloader.py`, invoked
+   once at startup by `dashboard/app.py` — never re-syncs while running)
+2. Read `data/` and render it
+
+There is **no `main.py`** and **no `src/processing/`** in this repo — if you see older docs or
+comments referencing "run the pipeline" or `classification.py`, that logic has moved elsewhere.
+Don't go looking for it here.
+
+---
+
+## 2. Data flow, end to end
+
+```
+Upstream data pipeline (separate repo/process)
+        │  produces Gold-layer files, uploads to S3 bucket "MultiTechnique Alerts/"
+        ▼
+S3 bucket
+        │  src/data/s3_downloader.py — pulled automatically on dashboard startup
+        │  ONLY IF the local data/ folder doesn't already exist
+        ▼
+data/{technique}/{layer}/{client}/{file}        ← the Data Mesh (see §5)
+        │  read directly by dashboard callbacks (mostly via src/data/loaders.py,
+        │  src/data/maintenance_loaders.py, or ad-hoc pandas/parquet reads in callback files)
+        ▼
+dashboard/callbacks/*.py  →  dashboard/components/*.py (charts/tables)  →  dashboard/tabs/*.py (layout)
+        ▼
+Browser (Dash/React runtime)
+```
+
+If a page shows no data, the first two questions are always: (1) does `data/{technique}/golden/{client}/`
+actually contain the expected file, and (2) does the logged-in user's client list include that client.
+
+---
+
+## 3. Top-level directory map
+
+| Path | What it is | Should an agent edit it? |
+|---|---|---|
+| `dashboard/` | The Dash application itself — UI, routing, callbacks | Yes, this is the main app |
+| `config/` | Runtime settings (`settings.py`) and user accounts (`users.py`) | Yes, for config/access changes |
+| `src/` | Data access layer: loaders, transformers, schemas, S3 sync, logging | Yes, when data-loading logic needs to change |
+| `data/` | Local copy of Gold/Silver-layer files, organized by technique/layer/client | Usually not — this is synced/mounted data, not source |
+| `documentation/` | Per-technique data contracts and design docs (source of truth for data shape) | Read frequently, edit when contracts/features change |
+| `ai_docs/` | Dev-authored implementation notes/specs from past feature work | Read for historical context; treat as informal, may be stale |
+| `notebooks/` | Jupyter notebooks used for one-off data exploration | Don't treat as production code; not imported by the app |
+| `tests/` | A handful of standalone test scripts (not a full pytest suite) | Yes, if adding tests |
+| `new_dashboard/dashboard-ers/` | **A separate git submodule** — a prototype/next-gen dashboard rewrite. Not wired into this app, not deployed from here. See §7. | Only if explicitly asked to work on the new dashboard |
+| `logs/` | Runtime log output (`dashboard.log`), gitignored content | No |
+| `Dockerfile`, `docker-compose.yml` | Container build/run for the dashboard | Yes, for deployment changes |
+| `README.md` (root) | Spanish-language quick-start/ops doc | Keep in sync with `dashboard/README.md` when either changes |
+
+---
+
+## 4. `dashboard/` — the app itself
+
+### Entry point
+
+`dashboard/app.py` is what you run (`python dashboard/app.py` or `python -m dashboard.app`).
+It:
+- Adds the project root to `sys.path` and configures logging to `logs/dashboard.log`
+- Builds the Dash `app` with a `DASH_PATH_PREFIX` env var for mounting behind a reverse
+  proxy/ALB, and exposes `<prefix>/health` for health checks
+- Serves per-client logos from `dashboard/logos/` at `/logos/<file>`
+- Imports every callback module (registering their `@callback`-decorated functions) and calls
+  every `register_*_callbacks(app)` function
+- On direct execution (`if __name__ == '__main__'`), syncs `data/` from S3 if missing, then
+  calls `app.run(...)`
+
+### The tabs / callbacks / components convention
+
+Each feature area follows the same three-file pattern:
+
+- `dashboard/tabs/tab_<name>.py` — pure layout (what the page looks like), often just a shell
+  with an internal `dcc.Tabs` for sub-views (e.g. `tab_alerts.py` wraps
+  `tab_alerts_general.py` + `tab_alerts_detail.py`)
+- `dashboard/callbacks/<name>_callbacks.py` — interactivity: reads data, computes derived
+  values, updates the layout. Some modules use `register_<name>_callbacks(app)` called
+  explicitly from `app.py`; others use the `@callback` decorator directly and are registered
+  just by being imported in `app.py` (both patterns coexist — check `app.py` to see which)
+- `dashboard/components/<name>_charts.py` / `_tables.py` — reusable Plotly figures / DataTables
+  used by that feature's callbacks
+
+### Navigation: what's actually live vs. shelved
+
+`dashboard/layout.py::create_main_dashboard` builds the sidebar from a Python list
+(`navigation_items`), **not** from the filesystem — a tab file existing does not mean it's
+reachable in the UI. As of this writing:
+
+**Live in navigation:**
+- Resumen → General, Estado de Datos
+- Monitoreo → Alertas, Telemetría, Aceite (Aceite's internal tabs include Cumplimiento
+  Laboratorio; a Component Hours internal tab exists in code but is commented out)
+- Predictivo → one subsection per auto-discovered component CSV, **only shown if the logged-in
+  user's client is in `settings.predictive_allowed_clients`**
+- Integración / Reportes / Administración → static "En Desarrollo" placeholders, no real content
+
+**Exists in code but commented out of `layout.py` (shelved/in-progress, don't assume it's live):**
+`tab_limits.py`, `tab_machines.py`, `tab_reports.py` (superseded by Aceite's internal tabs),
+`tab_mantenciones_general.py`, `tab_health_index.py`, `tab_menace_control.py`,
+`tab_hot_sheet.py`. Their callback modules may still be imported/registered in `app.py` even
+though nothing routes to them — that's not a bug, just dead code kept around for later.
+
+Before editing a tab, **grep `dashboard/layout.py` for its module name** to confirm whether it's
+actually wired into navigation.
+
+### Auth
+
+`dashboard/auth.py` has the login/permission logic; `config/users.py` has the actual account
+data (username → SHA-256 password hash, role `admin`/`client`, list of accessible clients).
+There's no session/JWT system beyond Dash's browser-local `dcc.Store` — auth state lives
+client-side in `user-info-store`.
+
+More detail: [dashboard/README.md](../dashboard/README.md).
+
+---
+
+## 5. `data/` — the Data Mesh
+
+Path pattern: **`data/{technique}/{layer}/{client}/{file}`**
+
+- **technique**: `oil`, `telemetry`, `mantentions`, `alerts`, `predictive` (plus a non-conforming
+  `auxiliar/{client}/` folder used only for data-freshness timestamps)
+- **layer**: `bronze` (raw), `silver` (harmonized/schema-normalized), `golden` (analysis-ready,
+  what the dashboard reads almost exclusively)
+- **client**: lowercase client folder name (`cda`, `emin`, `enex`, `capstone`)
+
+The dashboard reads **golden** layer almost everywhere for performance. Bronze/silver exist
+mostly for the upstream pipeline's own use and for a few loaders in `src/data/loaders.py` that
+predate the golden-layer optimization.
+
+Path resolution should go through `config/settings.py::Settings` helpers
+(`get_technique_path`, `get_machine_status_path`, `get_stewart_limits_path`,
+`get_consolidated_alerts_path`, etc.) rather than hand-building path strings, so behavior stays
+consistent between local dev and the Docker-mounted path.
+
+---
+
+## 6. `config/` and `src/`
+
+- **`config/settings.py`** — a Pydantic `Settings` object (env-driven via `.env`) holding API
+  keys, thresholds (Stewart Limits percentiles, classification cutoffs), and
+  **module access-control lists** (`predictive_allowed_clients`, `component_hours_allowed_clients`)
+  that gate entire nav sections per client. Accessed as a singleton via `get_settings()`.
+- **`config/users.py`** — the user/auth database (see §4).
+- **`src/data/`** — loaders (`loaders.py`, `maintenance_loaders.py`), a repository layer for
+  maintenance data (`maintenance_repository.py`), Pydantic schemas mirroring the data contracts
+  (`schemas.py`), transformers/validators (used by the upstream pipeline more than the
+  dashboard), a view-model layer for oil data (`oil_view_models.py`), and the S3
+  downloader/uploader scripts.
+- **`src/utils/`** — logging setup, safe file-reading helpers (`file_utils.py`), date helpers,
+  and `auth_logger.py` (appends login attempts to a parquet file and re-uploads it to S3 so the
+  audit log survives data resyncs).
+
+---
+
+## 7. Other directories you'll encounter
+
+- **`ai_docs/`** — informal implementation write-ups from past feature work (Hot Sheet, Menace
+  Control, alerts specs v1-v3, etc.). Useful for *why* a shelved feature looks the way it does,
+  but not guaranteed current — cross-check against actual code.
+- **`notebooks/`** — exploration notebooks, not imported by the app. Good for understanding raw
+  data shape before it's processed, not for understanding current dashboard behavior.
+- **`new_dashboard/dashboard-ers/`** — a **separate git repository** wired in as a submodule. It
+  is an independent prototype/rewrite effort with its own `app.py`, `Dockerfile`,
+  `docker-compose.yml`, etc. It is **not** part of the running `alerts_dashboard_production` app
+  and changes here don't affect it (and vice versa). Don't conflate the two when searching for
+  "where is X implemented" — always confirm you're in `dashboard/`, not
+  `new_dashboard/dashboard-ers/`, unless the task explicitly targets the new dashboard.
+- **`tests/`** — a small number of standalone script-style tests (run directly with `python`,
+  not a pytest suite with fixtures/config). Check a test file's own `if __name__` block for how
+  it's meant to be invoked.
+
+---
+
+## 8. Documentation map — where to look for what
+
+| Question | Look here |
+|---|---|
+| High-level feature overview, current nav structure, version history | [documentation/general/dashboard_overview.md](general/dashboard_overview.md) |
+| How to run/deploy the dashboard, tab-by-tab feature summary | [dashboard/README.md](../dashboard/README.md) |
+| Spanish quick-start / ops cheatsheet | [README.md](../README.md) (root) |
+| Oil data shape/contract | [documentation/oil/](oil/) |
+| Telemetry data shape/contract | [documentation/telemetry/](telemetry/) |
+| Alerts data shape/contract | [documentation/alerts/](alerts/) |
+| Mantentions data shape/contract | [documentation/mantentions/](mantentions/) |
+| Predictive module processing notes | [documentation/predictive/](predictive/) |
+| Data freshness feature design | [documentation/general/DATA_FRESHNESS_TAB.md](general/DATA_FRESHNESS_TAB.md), [DATA_FRESHNESS_IMPLEMENTATION.md](general/DATA_FRESHNESS_IMPLEMENTATION.md) |
+| Historical implementation notes for shelved features | `ai_docs/` |
+
+**Known duplication**: `documentation/general/dashboard_overview.md` and
+`documentation/alerts/dashboard_overview.md` both exist with similar names but different scope —
+check the folder, not just the filename, when following a link.
+
+---
+
+## 9. Running it locally
+
+```bash
+pip install -r requirements.txt
+# .env needs at minimum BUCKET_NAME/ACCESS_KEY/SECRET_KEY (for S3 sync) if you don't already
+# have a local data/ folder; OPENAI_API_KEY and MAPBOX_TOKEN are optional (AI text, GPS maps)
+python dashboard/app.py
+# → http://localhost:8080 (or DASHBOARD_PORT)
+```
+
+Or via Docker: `docker-compose up -d` (builds from root `Dockerfile`, mounts `./data` read-only
+plus live-reload mounts for `./dashboard`, `./config`, `./src`).
+
+---
+
+## 10. Gotchas worth remembering
+
+- **`main.py` doesn't exist.** Don't look for a data-processing entry point in this repo.
+- **A tab file existing ≠ a tab being reachable.** Always check `dashboard/layout.py`'s
+  `navigation_items` (and, for Aceite specifically, `dashboard/callbacks/oil_callbacks.py`'s
+  internal-tab router) before assuming a feature is live.
+- **Module access is per-client, not per-role.** Predictive and Component Hours visibility
+  depend on the *client's* entry in `config/settings.py` allow-lists, independent of whether the
+  logged-in user is `admin` or `client`.
+- **`new_dashboard/dashboard-ers/` is a different app.** It's a submodule, not a folder of this
+  app's code.
+- **Golden layer is king.** If you're adding a dashboard feature, read from `golden/`, not
+  `bronze/`/`silver/`, unless there's a specific reason not to.
+- **This repo doesn't process data.** If a bug looks like "the classification/AI output is
+  wrong," it's very likely an upstream pipeline issue, not something fixable in this repo.

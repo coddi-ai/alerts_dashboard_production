@@ -38,6 +38,23 @@ SIGNAL_LABELS: dict[str, str] = {
     "EngSpd": "Velocidad del motor",
     "LckupSlip": "Deslizamiento del embrague de bloqueo",
     "TrnSlip": "Deslizamiento de la transmisión",
+    # Tribology variables that can appear alongside a telemetry signal in a
+    # mixed-trigger alert.
+    "Hierro": "Hierro",
+    "Aluminio": "Aluminio",
+    "Zinc": "Zinc",
+    "Calcio": "Calcio",
+    "Fósforo": "Fósforo",
+    "Índice PQ": "Índice PQ",
+    "Oxidación": "Oxidación",
+    "Hollín": "Hollín",
+    "Silicio": "Silicio",
+    "Potasio": "Potasio",
+    "Níquel": "Níquel",
+    "Cobre": "Cobre",
+    "Cromo": "Cromo",
+    "Plomo": "Plomo",
+    "Estaño": "Estaño",
 }
 
 # Signals the dashboard omits from its views.
