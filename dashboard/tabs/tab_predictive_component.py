@@ -42,19 +42,19 @@ def layout(client: str, component: str):
         ])
 
     # Load overview data
-    df_ov, df_latest, prev_ranking = _load_overview_data(filepath, component)
+    df_ov, df_latest, prev_ranking = _load_overview_data(filepath, component, client)
 
     # Build overview content
     if df_latest is not None and not df_latest.empty:
-        overview_content = _render_component_overview(df_latest, prev_ranking, component, client)
+        overview_content = _render_component_overview(df_latest, prev_ranking, component, client, df=df_ov)
     else:
         overview_content = html.P(f"No hay datos de resumen para {component}.",
                                   className="text-muted text-center", style={"padding": "40px"})
 
     # Load evidence data for initial render
-    df_ev, df_ev_latest = _load_evidence_data(filepath, component)
+    df_ev, df_ev_latest = _load_evidence_data(filepath, component, client)
     units = sorted(df_ev["Unit"].unique()) if df_ev is not None else []
-    failure_mode_options = get_failure_mode_options(component)
+    failure_mode_options = get_failure_mode_options(component, client)
 
     # Build evidence content (interactive - populated by callbacks)
     evidence_content = html.Div([
