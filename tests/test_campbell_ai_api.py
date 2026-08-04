@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
+
 from fastapi.testclient import TestClient
 
 from src.campbell_ai.api import app
 from src.campbell_ai.config import reset_campbell_settings
+from src.campbell_ai.errors import CampbellConfigurationError
 from src.campbell_ai.models import (
     FeedbackResponse,
     HistoryResponse,
@@ -31,6 +34,20 @@ class FakeService:
             session_id=session_id,
             company_id=company_id.lower(),
         )
+
+    async def stream_message(self, username, company_id, session_id, message):
+        yield {"type": "status", "stage": "analyzing"}
+        yield {"type": "delta", "text": f"Respuesta para {message}"}
+        yield {
+            "type": "done",
+            "response": f"Respuesta para {message}",
+            "request_type": "agents",
+            "message_id": "msg_test",
+            "visualizations": [],
+            "session_id": session_id,
+            "company_id": company_id.lower(),
+            "messages": [],
+        }
 
     async def history(self, username, company_id, session_id):
         return HistoryResponse(
@@ -119,9 +136,73 @@ def test_api_initialize_message_history_and_clear(monkeypatch):
     assert "pareto" in capabilities.json()["chart_types"]
     assert "heatmap" in capabilities.json()["chart_types"]
     assert capabilities.json()["explicit_time_windows"] is True
+    # The catalogue and session backend are declared so a deployment can assert them.
+    assert "telemetry_fleet_status" in capabilities.json()["named_charts"]
+    assert capabilities.json()["session_backend"] in {"memory", "redis"}
     assert sent.status_code == 200
     assert sent.json()["request_type"] == "agents"
     assert history.status_code == 200
     assert feedback.status_code == 200
     assert feedback.json()["accepted"] is True
     assert cleared.status_code == 200
+
+
+def test_api_streams_events_and_ends_with_done(monkeypatch):
+    """Streaming must emit SSE frames and finish with a `done` payload."""
+    monkeypatch.setenv("CAMPBELL_AI_INTERNAL_TOKEN", "secret-token")
+    reset_campbell_settings()
+    app.state.service = FakeService()
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/v1/campbell-ai/message/stream",
+        headers={"X-Campbell-Token": "secret-token"},
+        json={
+            "username": "user",
+            "company_id": "CDA",
+            "session_id": "campbell_test",
+            "message": "Estado del equipo",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    events = [
+        json.loads(block.split("data:", 1)[1].strip())
+        for block in response.text.split("\n\n")
+        if "data:" in block
+    ]
+    assert [event["type"] for event in events] == ["status", "delta", "done"]
+    final = events[-1]
+    assert final["response"] == "Respuesta para Estado del equipo"
+    # The final event carries history so a consumer needs no follow-up call.
+    assert final["messages"] == []
+    assert final["session_id"] == "campbell_test"
+
+
+def test_api_reports_a_configuration_error_before_streaming_starts(monkeypatch):
+    """A failure raised before the first event must be a real HTTP status."""
+    monkeypatch.setenv("CAMPBELL_AI_INTERNAL_TOKEN", "secret-token")
+    reset_campbell_settings()
+
+    class DisabledStreamService(FakeService):
+        async def stream_message(self, *args, **kwargs):
+            raise CampbellConfigurationError("El streaming de Campbell AI está deshabilitado")
+            yield  # pragma: no cover - makes this an async generator
+
+    app.state.service = DisabledStreamService()
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/v1/campbell-ai/message/stream",
+        headers={"X-Campbell-Token": "secret-token"},
+        json={
+            "username": "user",
+            "company_id": "CDA",
+            "session_id": "campbell_test",
+            "message": "Estado del equipo",
+        },
+    )
+
+    assert response.status_code == 503
+    assert "streaming" in response.json()["detail"].lower()

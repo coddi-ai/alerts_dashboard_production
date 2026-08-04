@@ -6,7 +6,13 @@ from dash import Input, Output, State, html
 from dash.exceptions import PreventUpdate
 import dash_bootstrap_components as dbc
 from flask import session as flask_session
-from dashboard.auth import authenticate_user
+from dashboard.auth import (
+    IDENTITY_PROOF_FIELD,
+    add_identity_proof,
+    authenticate_user,
+    resolve_authenticated_username,
+    should_process_login,
+)
 from src.utils.auth_logger import log_authentication
 import logging
 
@@ -36,8 +42,8 @@ def register_auth_callbacks(app):
         logger.info(f"Login callback triggered - n_clicks: {n_clicks}, n_submit: {n_submit}, username: {username}")
         
         # Check if callback was triggered (either button click or enter key)
-        if n_clicks is None and n_submit is None:
-            logger.warning("Login callback triggered but both n_clicks and n_submit are None")
+        if not should_process_login(n_clicks, n_submit):
+            logger.debug("Ignoring login callback without a user action")
             raise PreventUpdate
 
         if not username or not password:
@@ -53,7 +59,7 @@ def register_auth_callbacks(app):
             logger.info(f"Login successful for user: {username}")
             log_authentication(username, success=True)
             flask_session["dashboard_user"] = username
-            return user, "", False
+            return add_identity_proof(user), "", False
         else:
             logger.warning(f"Login failed for user: {username}")
             log_authentication(username, success=False)
@@ -64,17 +70,24 @@ def register_auth_callbacks(app):
     @app.callback(
         Output('page-content', 'children'),
         Input('user-info-store', 'data'),
-        prevent_initial_call=True
     )
     def display_page(user_data):
         """Display login page or main dashboard based on auth status."""
-        logger.info(f"Display page callback triggered - user_data: {user_data}")
+        username = resolve_authenticated_username(user_data)
+        logger.info(
+            "Display page callback triggered - authenticated_user: %s",
+            username or "none",
+        )
+        has_identity_proof = bool(
+            isinstance(user_data, dict)
+            and user_data.get(IDENTITY_PROOF_FIELD)
+        )
         from dashboard.layout import create_main_dashboard
         
         # When user logs in (user_data is not None), show dashboard
         # When user logs out (user_data is None), the logout callback will trigger a page reload
-        if user_data is not None:
-            logger.info(f"Showing dashboard for user: {user_data.get('username')}")
+        if user_data is not None and username and has_identity_proof:
+            logger.info("Showing dashboard for user: %s", username)
             return create_main_dashboard(user_data)
         else:
             # User logged out - could show login page or trigger reload
@@ -91,5 +104,11 @@ def register_auth_callbacks(app):
     )
     def logout(n_clicks):
         """Handle user logout."""
+        if not n_clicks:
+            # The logout button is inserted dynamically when the dashboard
+            # renders after login; Dash fires this callback once for that
+            # mount event even with prevent_initial_call=True, since the
+            # component didn't exist at the initial page load. Ignore it.
+            raise PreventUpdate
         flask_session.clear()
         return None

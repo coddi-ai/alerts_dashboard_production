@@ -33,29 +33,14 @@ STATE_COLORS = {
 }
 
 # Spanish feature names mapping
-FEATURE_NAMES_ES = {
-    "EngCoolTemp": 'Temperatura del refrigerante del motor',
-    "RAftrclrTemp": 'Temperatura del post-enfriador del motor',
-    "EngOilPres": 'Presión del aceite del motor',
-    "EngOilFltr": 'Estado del filtro de aceite del motor',
-    "CnkcasePres": 'Presión del cárter del motor',
-    "RtLtExhTemp": 'Diferencia de temperatura del escape derecho e izquierdo',
-    "RtExhTemp": 'Temperatura del escape derecho del motor',
-    "LtExhTemp": 'Temperatura del escape izquierdo del motor',
-    "AirFltr": 'Estado del filtro de aire del motor',
-    "DiffLubePres": 'Presión del lubricante del diferencial',
-    "DiffTemp": 'Temperatura del diferencial',
-    "TrnLubeTemp": 'Temperatura del lubricante de la transmisión',
-    "TCOutTemp": 'Temperatura de salida del convertidor de par',
-    "RtRBrkTemp": 'Temperatura del freno trasero derecho',
-    "RtFBrkTemp": 'Temperatura del freno delantero derecho',
-    "LtRBrkTemp": 'Temperatura del freno trasero izquierdo',
-    "LtFBrkTemp": 'Temperatura del freno delantero izquierdo',
-    "StrgOilTemp": 'Temperatura del aceite de dirección'
-}
+# Signal labels live in src/charts/signals.py so the dashboard and Campbell AI use
+# the same catalogue; re-exported here for existing importers.
+from src.charts.signals import OMITTED_SIGNALS, SIGNAL_LABELS
+
+FEATURE_NAMES_ES = SIGNAL_LABELS
 
 # Features to omit from dashboard
-OMITTED_FEATURES = ['GroundSpd', 'EngLoad']
+OMITTED_FEATURES = list(OMITTED_SIGNALS)
 
 
 def create_alerts_per_unit_chart(alerts_df: pd.DataFrame) -> go.Figure:

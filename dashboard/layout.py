@@ -300,7 +300,8 @@ def create_navbar(user_data: dict, available_clients: list[str] = None) -> html.
                                 color="danger",
                                 size="sm",
                                 className="px-3",
-                                style={"fontWeight": "500"}
+                                style={"fontWeight": "500"},
+                                n_clicks=0
                             )
                         ], className="d-flex align-items-center")
                     ], width="auto")

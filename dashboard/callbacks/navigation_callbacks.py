@@ -241,6 +241,8 @@ def register_navigation_callbacks(app: dash.Dash) -> None:
                 elif active_section in ['integration-sap', 'reporting-main', 'admin-main']:
                     # Placeholder sections don't need client parameter
                     content = content_generator()
+                elif active_section == 'campbell-ai-chat':
+                    content = create_campbell_ai_layout(user_data)
                 else:
                     content = content_generator()
             except TypeError as e:

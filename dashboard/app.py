@@ -60,6 +60,7 @@ import dashboard.callbacks.data_freshness_callbacks
 # Import predictive callbacks
 from dashboard.callbacks.predictive_callbacks import register_callbacks as register_predictive_callbacks
 from dashboard.campbell_ai.callbacks import register_campbell_ai_callbacks
+from dashboard.campbell_ai.stream import register_campbell_ai_stream
 from config.settings import get_settings
 
 
@@ -121,6 +122,9 @@ register_overview_general_callbacks(app)
 register_health_index_callbacks(app)
 register_predictive_callbacks(app)
 register_campbell_ai_callbacks(app)
+# Same-origin SSE proxy for progressive Campbell AI answers; inert unless
+# CAMPBELL_AI_STREAMING is enabled.
+register_campbell_ai_stream(app)
 
 
 if __name__ == '__main__':

@@ -8,9 +8,10 @@ import json
 import pandas as pd
 import pytest
 
+from src.charts.theme import BRAND_ACCENT, BRAND_TITLE, STATUS_COLORS
 from src.campbell_ai.config import CampbellSettings
 from src.campbell_ai.data import DashboardDataRepository
-from src.campbell_ai.errors import CampbellAuthorizationError
+from src.campbell_ai.errors import CampbellAuthorizationError, CampbellDataError
 from src.campbell_ai.identity import resolve_dashboard_principal
 from src.campbell_ai.prompts import load_prompt
 from src.campbell_ai.security import deterministic_guard, requests_unsupported_capability
@@ -50,6 +51,14 @@ def _settings(data_root) -> CampbellSettings:
         model_planner="test-model",
         model_data_analyst="test-model",
         model_technical_expert="test-model",
+        model_dashboard_guide="test-model",
+        max_turns_data_analyst=10,
+        max_turns_head=10,
+        session_backend="memory",
+        redis_url="",
+        redis_namespace="campbell:test",
+        session_lock_timeout_seconds=300,
+        streaming_enabled=False,
     )
 
 
@@ -140,6 +149,273 @@ def test_versioned_prompts_keep_query_visualization_and_five_whys():
     assert "PDF" in head_prompt
 
 
+def test_prompts_document_detail_tools_and_answer_formatting():
+    """Detail escalation and bold formatting are the behaviours users compared against."""
+    query_prompt = load_prompt("data_analyst_query.md")
+    head_prompt = load_prompt("head_maintenance_base.md")
+
+    for tool in (
+        "query_alert_detail",
+        "query_oil_components",
+        "query_telemetry_components",
+        "query_maintenance_summary",
+        "query_predictive_risk",
+    ):
+        assert tool in query_prompt, tool
+    assert "no disponible" in query_prompt
+    assert "Formato de la respuesta" in head_prompt
+    assert "**T_18**" in head_prompt
+    assert "superlativo" in head_prompt
+    assert "predictiv" in head_prompt
+
+
+def test_detail_queries_expose_components_signals_and_measured_values(tmp_path):
+    """The fleet-level tools alone could not answer 'which component / which signal'."""
+    telemetry = tmp_path / "telemetry" / "golden" / "cda"
+    telemetry.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "unit_id": "T_18",
+                "component": "Direccion",
+                "evaluation_week": 14,
+                "evaluation_year": 2026,
+                "component_status": "Normal",
+                "component_score": 4.0,
+                "triggering_signals": "[]",
+                "criticality": "Medium",
+            },
+            {
+                "unit_id": "T_18",
+                "component": "Direccion",
+                "evaluation_week": 15,
+                "evaluation_year": 2026,
+                "component_status": "Anormal",
+                "component_score": 1.0,
+                "triggering_signals": "['StrgOilTemp']",
+                "criticality": "Medium",
+            },
+        ]
+    ).to_parquet(telemetry / "classified.parquet", index=False)
+    pd.DataFrame(
+        [
+            {
+                "AlertID": 63,
+                "Unit": "T_18",
+                "Trigger": "EngCoolTemp",
+                "TimeStart": "2026-07-09T20:13:00",
+                "State": "Operacional",
+                "EngCoolTemp_Value": 100.9,
+                "EngCoolTemp_Upper_Limit": 95.0,
+            },
+            {
+                "AlertID": 63,
+                "Unit": "T_18",
+                "Trigger": "EngCoolTemp",
+                "TimeStart": "2026-07-09T20:12:00",
+                "State": "Operacional",
+                "EngCoolTemp_Value": 90.0,
+                "EngCoolTemp_Upper_Limit": 95.0,
+            },
+        ]
+    ).to_csv(telemetry / "alerts_detail_wide_with_gps.csv", index=False)
+    repository = DashboardDataRepository(tmp_path)
+
+    components = json.loads(repository.query_telemetry_components("CDA", status="Anormal"))
+    detail = json.loads(repository.query_alert_detail("CDA", alert_id="63"))
+
+    # Only the newest evaluated week is reported, so a resolved status is not double counted.
+    assert components["total_rows"] == 1
+    assert components["records"][0]["triggering_signals"] == "StrgOilTemp"
+    assert components["records"][0]["evaluation_week"] == 15
+    # One row per alert with the peak against its published limit.
+    assert detail["alerts_matched"] == 1
+    assert detail["records"][0]["peak_value"] == 100.9
+    assert detail["records"][0]["upper_limit"] == 95.0
+    assert detail["records"][0]["samples_above_limit"] == 1
+
+
+def test_alert_detail_resolves_fusion_ids_and_never_merges_units(tmp_path):
+    """AlertID repeats across units, and the alerts source exposes FusionID instead."""
+    telemetry = tmp_path / "telemetry" / "golden" / "cda"
+    telemetry.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "AlertID": 63,
+                "Unit": unit,
+                "Trigger": "EngCoolTemp",
+                "TimeStart": "2026-07-09T20:13:00",
+                "EngCoolTemp_Value": value,
+                "EngCoolTemp_Upper_Limit": 105.0,
+            }
+            for unit, value in (("T_18", 100.9), ("T_9", 80.0))
+        ]
+    ).to_csv(telemetry / "alerts_detail_wide_with_gps.csv", index=False)
+    repository = DashboardDataRepository(tmp_path)
+
+    scoped = json.loads(
+        repository.query_alert_detail("CDA", alert_id="F-63-1783624380", unit_id="T_18")
+    )
+    missed = json.loads(repository.query_alert_detail("CDA", unit_id="T_18", trigger="refrigeracion"))
+
+    # A FusionID resolves to the numeric detail key, and the unit keeps the rows apart.
+    assert scoped["records"][0]["unit_id"] == "T_18"
+    assert scoped["records"][0]["peak_value"] == 100.9
+    assert len(scoped["records"]) == 1
+    # A subsystem name is not a signal name; the hint names the signals that exist.
+    assert missed["alerts_matched"] == 0
+    assert missed["filter_hints"]["available_triggers"] == ["EngCoolTemp"]
+
+
+def test_predictive_risk_reports_bands_and_a_missing_ranking(tmp_path):
+    """A source with no computed ranking must say so instead of looking empty."""
+    predictive = tmp_path / "predictive" / "golden" / "cda"
+    predictive.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {"Unit": "T_09", "Fecha": "2026-07-18", "ranking": 80.0, "blowby_risk": 70.0},
+            {"Unit": "T_15", "Fecha": "2026-07-16", "ranking": 40.0, "blowby_risk": 12.0},
+        ]
+    ).to_csv(predictive / "motor.csv", index=False)
+    pd.DataFrame(
+        [{"Unit": "T_09", "Fecha": "2026-07-18", "ranking": None, "bearing_risk": 5.0}]
+    ).to_csv(predictive / "transmision.csv", index=False)
+    repository = DashboardDataRepository(tmp_path)
+
+    motor = json.loads(repository.query_predictive_risk("CDA", domain="motor"))
+    transmission = json.loads(repository.query_predictive_risk("CDA", domain="transmision"))
+
+    assert motor["records"][0]["unit_id"] == "T_09"
+    assert motor["records"][0]["band"] == "Critico"
+    assert motor["records"][1]["band"] == "Monitoreo"
+    assert transmission["source_available"] is True
+    assert transmission["ranking_available"] is False
+    assert "no lo sustituyas" in transmission["note"]
+
+
+def test_predictive_access_follows_the_dashboard_module_allowlist(tmp_path, monkeypatch):
+    """The Predictive section is client-restricted; the agent must obey the same rule."""
+    from src.campbell_ai import data as data_module
+
+    predictive = tmp_path / "predictive" / "golden" / "emin"
+    predictive.mkdir(parents=True)
+    pd.DataFrame(
+        [{"Unit": "T_1", "Fecha": "2026-07-18", "ranking": 80.0}]
+    ).to_csv(predictive / "motor.csv", index=False)
+    monkeypatch.setattr(
+        data_module, "predictive_module_allows", lambda client: client.lower() == "cda"
+    )
+    repository = DashboardDataRepository(tmp_path)
+
+    with pytest.raises(CampbellDataError):
+        repository.query_predictive_risk("EMIN", domain="motor")
+    # A blocked source is not advertised to the analyst either.
+    assert "predictive_motor" not in repository.describe_catalog("EMIN")
+
+
+def test_unit_filter_matches_the_id_formats_used_across_techniques(tmp_path):
+    """Techniques write T_9, T_09 and T9 for the same equipment."""
+    _write_alerts(tmp_path)
+    target = tmp_path / "alerts" / "golden" / "cda" / "consolidated_alerts.csv"
+    pd.DataFrame(
+        [
+            {"UnitId": "T_9", "Timestamp": "2026-07-30T12:00:00", "sistema": "Motor"},
+            {"UnitId": "T_15", "Timestamp": "2026-07-30T13:00:00", "sistema": "Motor"},
+        ]
+    ).to_csv(target, index=False)
+    repository = DashboardDataRepository(tmp_path)
+
+    for requested in ("T_9", "T-9", "T9", "T_09"):
+        result = json.loads(repository.query_alerts("CDA", unit_id=requested))
+        assert result["total"] == 1, requested
+        assert result["records"][0]["UnitId"] == "T_9"
+
+
+def test_text_filters_ignore_accents_and_hint_on_a_near_miss(tmp_path):
+    """Users type 'Refrigeración'; the source stores 'Refrigeracion'."""
+    target = tmp_path / "alerts" / "golden" / "cda"
+    target.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "UnitId": "T_18",
+                "Timestamp": "2026-07-09T19:13:00",
+                "sistema": "Motor",
+                "subsistema": "Refrigeracion",
+                "Trigger_Var": "EngCoolTemp",
+            }
+        ]
+    ).to_csv(target / "consolidated_alerts.csv", index=False)
+    repository = DashboardDataRepository(tmp_path)
+
+    matched = json.loads(
+        repository.query_alerts("CDA", subsystem="Refrigeración", days=60)
+    )
+    # The same term passed as a system is a near miss, not proof the event never happened.
+    near_miss = json.loads(repository.query_alerts("CDA", system="refrigeración", days=60))
+
+    assert matched["total"] == 1
+    assert near_miss["total"] == 0
+    assert near_miss["filter_hints"]["available_values"]["system"] == ["Motor"]
+    assert "otra columna" in near_miss["filter_hints"]["detail"]
+
+
+def test_distributions_survive_list_valued_columns(tmp_path):
+    """component_names arrives as an array per row and used to raise TypeError."""
+    target = (
+        tmp_path / "mantentions" / "golden" / "cda" / "Maintance_Labeler_Views"
+    )
+    target.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "machine_code": "T18",
+                "change_date": "2026-07-01",
+                "action_type_name": "Reemplazo",
+                "action_system_name": "Sistema de Motor",
+                "component_names": ["Neumáticos", "Filtro"],
+            },
+            {
+                "machine_code": "T18",
+                "change_date": "2026-07-02",
+                "action_type_name": "Inspección",
+                "action_system_name": "Sistema de Motor",
+                "component_names": ["Neumáticos"],
+            },
+        ]
+    ).to_parquet(target / "query_3_actions_all_equipment.parquet", index=False)
+
+    result = json.loads(
+        DashboardDataRepository(tmp_path).query_maintenance("CDA", days=60)
+    )
+
+    assert result["total"] == 2
+    assert result["by_component"]["Neumáticos"] == 1
+    assert result["by_action_type"]["Reemplazo"] == 1
+
+
+def test_validation_reports_row_counts_without_materializing_datasets(tmp_path):
+    """Row counts must respect quoted newlines and skip a full parse."""
+    target = tmp_path / "alerts" / "golden" / "cda"
+    target.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "UnitId": "CAEX-01",
+                "Timestamp": "2026-07-30T12:00:00",
+                "mensaje_ia": "linea uno\nlinea dos\nlinea tres",
+            }
+        ]
+    ).to_csv(target / "consolidated_alerts.csv", index=False)
+    repository = DashboardDataRepository(tmp_path)
+
+    status = repository.validate_client("CDA")
+
+    assert status["datasets"]["alerts"]["rows"] == 1
+    assert repository._cache == {}
+
+
 def test_visualization_uses_dashboard_data_without_creating_files(tmp_path):
     target = tmp_path / "alerts" / "golden" / "cda"
     target.mkdir(parents=True)
@@ -227,6 +503,93 @@ def test_pareto_and_heatmap_are_generated_from_alert_dimensions(tmp_path):
     assert heatmap.figure["data"][0]["type"] == "heatmap"
     assert heatmap.summary["dimension"] == "unit"
     assert heatmap.summary["secondary_dimension"] == "system"
+    # A blanket update_yaxes used to label the cumulative axis with the bar metric.
+    assert pareto.figure["layout"]["yaxis"]["title"]["text"] == "Cantidad"
+    assert pareto.figure["layout"]["yaxis2"]["title"]["text"] == "% acumulado"
+    # Heatmap keys stay readable instead of leaking Python tuples.
+    assert all("×" in key for key in heatmap.summary["top"])
+
+
+def test_charts_use_the_dashboard_palette_and_spanish_labels(tmp_path):
+    """Campbell figures must be indistinguishable from the dashboard's own charts."""
+    alerts = tmp_path / "alerts" / "golden" / "cda"
+    alerts.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {"UnitId": "T_9", "Timestamp": "2026-07-28", "sistema": "Motor"},
+            {"UnitId": "T_15", "Timestamp": "2026-07-30", "sistema": "Frenos"},
+        ]
+    ).to_csv(alerts / "consolidated_alerts.csv", index=False)
+    telemetry = tmp_path / "telemetry" / "golden" / "cda"
+    telemetry.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "unit_id": "T_9",
+                "evaluation_week": 15,
+                "evaluation_year": 2026,
+                "overall_status": "Anormal",
+            },
+            {
+                "unit_id": "T_15",
+                "evaluation_week": 15,
+                "evaluation_year": 2026,
+                "overall_status": "Normal",
+            },
+        ]
+    ).to_parquet(telemetry / "machine_status.parquet", index=False)
+    service = DashboardVisualizationService(DashboardDataRepository(tmp_path))
+
+    bars = service.create_chart(
+        client="CDA", dataset="alerts", chart_type="bar", dimension="unit", days=60
+    )
+    status_pie = service.create_chart(
+        client="CDA",
+        dataset="telemetry_machine_status",
+        chart_type="pie",
+        dimension="status",
+    )
+
+    assert bars.figure["data"][0]["marker"]["color"] == BRAND_ACCENT
+    assert bars.figure["layout"]["xaxis"]["title"]["text"] == "Equipo"
+    assert bars.figure["layout"]["yaxis"]["title"]["text"] == "Cantidad"
+    assert bars.figure["layout"]["font"]["color"] == BRAND_TITLE
+    # Status dimensions reuse the dashboard's single status design language.
+    colors = list(status_pie.figure["data"][0]["marker"]["colors"])
+    assert set(colors) <= set(STATUS_COLORS.values())
+    assert STATUS_COLORS["Anormal"] in colors
+    # The caption states period and leading categories without naming files.
+    assert "registros analizados" in bars.description
+    assert "png" not in bars.description.lower()
+
+
+def test_periodic_sources_are_reduced_to_the_latest_evaluation(tmp_path):
+    """Charting every historical week would inflate current-condition counts."""
+    telemetry = tmp_path / "telemetry" / "golden" / "cda"
+    telemetry.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "unit_id": "T_9",
+                "component": "Motor",
+                "evaluation_week": week,
+                "evaluation_year": 2026,
+                "component_status": "Anormal" if week == 15 else "Normal",
+            }
+            for week in (12, 13, 14, 15)
+        ]
+    ).to_parquet(telemetry / "classified.parquet", index=False)
+    service = DashboardVisualizationService(DashboardDataRepository(tmp_path))
+
+    chart = service.create_chart(
+        client="CDA",
+        dataset="telemetry_components",
+        chart_type="pie",
+        dimension="status",
+    )
+
+    assert chart.summary["records_analyzed"] == 1
+    assert chart.summary["top"] == {"Anormal": 1}
 
 
 def test_feedback_is_bound_to_an_assistant_message(tmp_path, monkeypatch):

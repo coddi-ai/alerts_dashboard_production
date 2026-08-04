@@ -72,6 +72,12 @@ class MessageResponse(BaseModel):
     company_id: str
     request_type: str = "agents"
     visualizations: list[VisualizationArtifact] = Field(default_factory=list)
+    # Full conversation after the exchange, so a consumer can render the thread without
+    # a follow-up history call.
+    messages: list[ConversationMessage] = Field(default_factory=list)
+    # Traceability of the numeric claims in `response`. Diagnostic metadata for the
+    # quality suite and operators; not rendered to the user.
+    grounding: dict[str, Any] = Field(default_factory=dict)
 
 
 class HistoryResponse(BaseModel):
@@ -110,5 +116,8 @@ class CapabilitiesResponse(BaseModel):
     explicit_time_windows: bool = True
     feedback: bool = True
     five_whys: bool = True
+    streaming: bool = False
+    session_backend: str = "memory"
+    named_charts: list[str] = Field(default_factory=list)
     tables: bool = False
     files: bool = False

@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import uuid
+from typing import AsyncIterator
 
 from src.campbell_ai.agents_runtime import CampbellAgentRuntime
 from src.campbell_ai.config import CampbellSettings, get_campbell_settings
 from src.campbell_ai.data import DashboardDataRepository
 from src.campbell_ai.errors import CampbellConfigurationError, CampbellDataError
+from src.campbell_ai.grounding import GroundingReport
 from src.campbell_ai.identity import (
     normalize_session_id,
     resolve_dashboard_principal,
@@ -98,8 +100,15 @@ class CampbellAIService:
                 principal, resolved_session, normalized_message, response
             )
             visualizations = []
+            grounding = GroundingReport()
         else:
-            response, request_type, message_id, visualizations = await self.runtime.answer(
+            (
+                response,
+                request_type,
+                message_id,
+                visualizations,
+                grounding,
+            ) = await self.runtime.answer(
                 principal, resolved_session, normalized_message
             )
         return MessageResponse(
@@ -109,7 +118,69 @@ class CampbellAIService:
             company_id=principal.company_id,
             request_type=request_type,
             visualizations=visualizations,
+            messages=await self.runtime.history(principal, resolved_session),
+            grounding=grounding.as_dict(),
         )
+
+    async def stream_message(
+        self,
+        username: str,
+        company_id: str,
+        session_id: str,
+        message: str,
+    ) -> AsyncIterator[dict]:
+        """Yield progress events for one exchange, ending with a `done` payload.
+
+        The final event carries the same fields as `send_message` plus the refreshed
+        history, so a streaming consumer never needs a follow-up call.
+        """
+        self._ensure_enabled()
+        if not self.settings.streaming_enabled:
+            raise CampbellConfigurationError("El streaming de Campbell AI está deshabilitado")
+        principal = resolve_dashboard_principal(username, company_id)
+        resolved_session = normalize_session_id(session_id)
+        normalized_message = str(message or "").strip()
+        if len(normalized_message) > self.settings.max_message_chars:
+            raise CampbellConfigurationError("La consulta supera el largo permitido")
+
+        if requests_unsupported_capability(normalized_message):
+            message_id = await self.runtime.record_exchange(
+                principal, resolved_session, normalized_message, UNSUPPORTED_CAPABILITY_MESSAGE
+            )
+            yield await self._finalize_stream_event(
+                {
+                    "type": "done",
+                    "response": UNSUPPORTED_CAPABILITY_MESSAGE,
+                    "request_type": "unsupported",
+                    "message_id": message_id,
+                    "visualizations": [],
+                    "grounding": GroundingReport().as_dict(),
+                },
+                principal,
+                resolved_session,
+            )
+            return
+
+        async for event in self.runtime.answer_stream(
+            principal, resolved_session, normalized_message
+        ):
+            if event.get("type") == "done":
+                yield await self._finalize_stream_event(
+                    event, principal, resolved_session
+                )
+            else:
+                yield event
+
+    async def _finalize_stream_event(
+        self, event: dict, principal, resolved_session: str
+    ) -> dict:
+        messages = await self.runtime.history(principal, resolved_session)
+        return {
+            **event,
+            "session_id": resolved_session,
+            "company_id": principal.company_id,
+            "messages": [message.model_dump(mode="json") for message in messages],
+        }
 
     async def history(
         self, username: str, company_id: str, session_id: str

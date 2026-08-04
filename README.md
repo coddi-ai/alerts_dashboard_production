@@ -144,6 +144,19 @@ DEBUG_MODE=False
 CLIENTS=CDA,EMIN
 MAPBOX_TOKEN=pk.xxx          # Opcional, para mapas GPS
 OPENAI_API_KEY=sk-xxx        # Opcional, para features AI
+CAMPBELL_AI_ENABLED=true
+CAMPBELL_AI_API_URL=http://127.0.0.1:8000
+CAMPBELL_AI_INTERNAL_TOKEN=secreto-interno-aleatorio
+CAMPBELL_AI_DATA_ROOT=./data
+```
+
+### Iniciar API Campbell AI
+
+```powershell
+python -m dotenv run -- python -m uvicorn src.campbell_ai.api:app `
+  --host 127.0.0.1 `
+  --port 8000 `
+  --reload
 ```
 
 ### Credenciales

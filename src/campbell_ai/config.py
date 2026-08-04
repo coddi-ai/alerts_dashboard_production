@@ -35,6 +35,14 @@ class CampbellSettings:
     model_planner: str
     model_data_analyst: str
     model_technical_expert: str
+    model_dashboard_guide: str
+    max_turns_data_analyst: int
+    max_turns_head: int
+    session_backend: str
+    redis_url: str
+    redis_namespace: str
+    session_lock_timeout_seconds: int
+    streaming_enabled: bool
 
     @classmethod
     def from_env(cls) -> "CampbellSettings":
@@ -60,6 +68,26 @@ class CampbellSettings:
             model_technical_expert=os.getenv(
                 "CAMPBELL_AI_MODEL_TECHNICAL_EXPERT", "gpt-4.1-mini"
             ),
+            model_dashboard_guide=os.getenv(
+                "CAMPBELL_AI_MODEL_DASHBOARD_GUIDE", "gpt-4.1-mini"
+            ),
+            # The analyst now owns ten data tools; cross-source questions need room to
+            # chain calls before answering.
+            max_turns_data_analyst=int(
+                os.getenv("CAMPBELL_AI_MAX_TURNS_DATA_ANALYST", "10")
+            ),
+            max_turns_head=int(os.getenv("CAMPBELL_AI_MAX_TURNS_HEAD", "10")),
+            # Conversation state lives in-process by default. Any deployment with more
+            # than one worker or replica must switch this to redis.
+            session_backend=os.getenv("CAMPBELL_AI_SESSION_BACKEND", "memory"),
+            redis_url=os.getenv("CAMPBELL_AI_REDIS_URL", ""),
+            redis_namespace=os.getenv(
+                "CAMPBELL_AI_REDIS_NAMESPACE", "campbell:sessions"
+            ),
+            session_lock_timeout_seconds=int(
+                os.getenv("CAMPBELL_AI_SESSION_LOCK_TIMEOUT_SECONDS", "300")
+            ),
+            streaming_enabled=_env_bool("CAMPBELL_AI_STREAMING", False),
         )
 
 

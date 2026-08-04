@@ -2,18 +2,23 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
+import logging
 import os
-import time
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, AsyncIterator
 
+from src.campbell_ai.chart_registry import DashboardChartRegistry
 from src.campbell_ai.config import CampbellSettings
 from src.campbell_ai.data import DashboardDataRepository
-from src.campbell_ai.errors import CampbellConfigurationError, CampbellSessionError
+from src.campbell_ai.errors import (
+    CampbellAIError,
+    CampbellConfigurationError,
+    CampbellSessionError,
+)
 from src.campbell_ai.feedback import FeedbackStore
 from src.campbell_ai.identity import known_dashboard_clients
+from src.campbell_ai.sessions import SessionStore, build_session_store
 from src.campbell_ai.models import (
     ConversationMessage,
     DashboardPrincipal,
@@ -22,13 +27,13 @@ from src.campbell_ai.models import (
 )
 from src.campbell_ai.prompts import load_prompt
 from src.campbell_ai.security import deterministic_guard
+from src.campbell_ai.tool_errors import tool_failure
+from src.campbell_ai.grounding import GroundingReport, audit_response
 from src.campbell_ai.visualization import DashboardVisualizationService
+from src.charts.signals import describe_signals as describe_signal_catalog
 
 
-@dataclass
-class _SessionEntry:
-    messages: list[ConversationMessage] = field(default_factory=list)
-    last_access: float = field(default_factory=time.time)
+logger = logging.getLogger("campbell_ai.runtime")
 
 
 @dataclass
@@ -39,19 +44,24 @@ class _AgentBundle:
     data_analyst: Any
     visualization_analyst: Any
     technical_expert: Any
+    dashboard_guide: Any
 
 
 class CampbellAgentRuntime:
-    """Own agent construction and isolated in-memory conversation histories."""
+    """Own agent construction and per-session conversation history."""
 
-    def __init__(self, repository: DashboardDataRepository, settings: CampbellSettings):
+    def __init__(
+        self,
+        repository: DashboardDataRepository,
+        settings: CampbellSettings,
+        session_store: SessionStore | None = None,
+    ):
         self.repository = repository
         self.settings = settings
         self.visualizations = DashboardVisualizationService(repository)
+        self.charts = DashboardChartRegistry(repository)
         self.feedback = FeedbackStore(settings.feedback_path)
-        self._sessions: dict[tuple[str, str, str], _SessionEntry] = {}
-        self._locks: dict[tuple[str, str, str], asyncio.Lock] = {}
-        self._pool_lock = asyncio.Lock()
+        self.sessions = session_store or build_session_store(settings)
 
     @staticmethod
     def _session_key(
@@ -60,58 +70,35 @@ class CampbellAgentRuntime:
         return principal.username, principal.company_id, session_id
 
     async def initialize(self, principal: DashboardPrincipal, session_id: str) -> None:
-        key = self._session_key(principal, session_id)
-        async with self._pool_lock:
-            self._cleanup_expired_locked()
-            self._sessions.setdefault(key, _SessionEntry())
-            self._locks.setdefault(key, asyncio.Lock())
-
-    def _cleanup_expired_locked(self) -> None:
-        cutoff = time.time() - self.settings.session_ttl_seconds
-        expired = [key for key, entry in self._sessions.items() if entry.last_access < cutoff]
-        for key in expired:
-            self._sessions.pop(key, None)
-            self._locks.pop(key, None)
+        await self.sessions.create_if_absent(self._session_key(principal, session_id))
 
     async def history(
         self, principal: DashboardPrincipal, session_id: str
     ) -> list[ConversationMessage]:
-        key = self._session_key(principal, session_id)
-        async with self._pool_lock:
-            self._cleanup_expired_locked()
-            entry = self._sessions.setdefault(key, _SessionEntry())
-            entry.last_access = time.time()
-            self._locks.setdefault(key, asyncio.Lock())
-            return [message.model_copy(deep=True) for message in entry.messages]
+        return await self.sessions.read(self._session_key(principal, session_id))
 
     async def clear(self, principal: DashboardPrincipal, session_id: str) -> None:
-        key = self._session_key(principal, session_id)
-        async with self._pool_lock:
-            self._sessions[key] = _SessionEntry()
-            self._locks.setdefault(key, asyncio.Lock())
+        await self.sessions.write(self._session_key(principal, session_id), [])
 
-    def _append_to_entry(
+    def _appended(
         self,
-        entry: _SessionEntry,
+        messages: list[ConversationMessage],
         user_message: str,
         assistant_message: str,
         visualizations: list[VisualizationArtifact] | None = None,
-    ) -> str:
+    ) -> tuple[list[ConversationMessage], str]:
+        """Return the trimmed conversation plus the new assistant message id."""
         assistant = ConversationMessage(
             role="assistant",
             content=assistant_message,
             visualizations=visualizations or [],
         )
-        entry.messages.extend(
-            [
-                ConversationMessage(role="user", content=user_message),
-                assistant,
-            ]
-        )
+        updated = list(messages) + [
+            ConversationMessage(role="user", content=user_message),
+            assistant,
+        ]
         max_items = max(2, self.settings.max_history_messages)
-        entry.messages = entry.messages[-max_items:]
-        entry.last_access = time.time()
-        return assistant.message_id
+        return updated[-max_items:], assistant.message_id
 
     async def record_exchange(
         self,
@@ -122,11 +109,13 @@ class CampbellAgentRuntime:
     ) -> str:
         """Record deterministic refusals as part of the visible conversation."""
         key = self._session_key(principal, session_id)
-        await self.initialize(principal, session_id)
-        async with self._locks[key]:
-            return self._append_to_entry(
-                self._sessions[key], user_message, assistant_message
+        async with self.sessions.lock(key):
+            messages = await self.sessions.read(key)
+            updated, message_id = self._appended(
+                messages, user_message, assistant_message
             )
+            await self.sessions.write(key, updated)
+            return message_id
 
     async def record_feedback(
         self,
@@ -138,17 +127,14 @@ class CampbellAgentRuntime:
     ) -> bool:
         """Validate feedback against an assistant message in the isolated session."""
         key = self._session_key(principal, session_id)
-        async with self._pool_lock:
-            self._cleanup_expired_locked()
-            entry = self._sessions.get(key)
-            lock = self._locks.get(key)
-        if entry is None or lock is None:
+        if not await self.sessions.exists(key):
             raise CampbellSessionError("La sesión de Campbell AI no existe o expiró")
-        async with lock:
+        async with self.sessions.lock(key):
+            messages = await self.sessions.read(key)
             target = next(
                 (
                     item
-                    for item in entry.messages
+                    for item in messages
                     if item.message_id == message_id and item.role == "assistant"
                 ),
                 None,
@@ -171,30 +157,58 @@ class CampbellAgentRuntime:
 
     def _build_bundle(
         self, principal: DashboardPrincipal
-    ) -> tuple[_AgentBundle, Any, list[VisualizationArtifact], list[str]]:
+    ) -> tuple[_AgentBundle, Any, list[VisualizationArtifact], list[str], list[str]]:
         Agent, ModelSettings, Runner, function_tool = self._load_sdk()
         client = principal.company_id
         repository = self.repository
         generated_visualizations: list[VisualizationArtifact] = []
         executed_tools: list[str] = []
+        # Raw tool results for this turn. Every number in the final answer must be
+        # traceable to one of these; see grounding.audit_response.
+        tool_outputs: list[str] = []
 
-        def safe_data_call(callback, *args, **kwargs) -> str:
+        def record(payload: str) -> str:
+            tool_outputs.append(payload)
+            return payload
+
+        def safe_data_call(tool_name: str, callback, *args, **kwargs) -> str:
+            """Run a query tool, turning any failure into an actionable retry hint."""
             try:
-                return callback(*args, **kwargs)
+                return record(callback(*args, **kwargs))
             except Exception as exc:
-                return json.dumps(
-                    {
-                        "available": False,
-                        "error": type(exc).__name__,
-                        "detail": "Fuente no disponible para el cliente activo",
-                    },
-                    ensure_ascii=False,
+                dataset = kwargs.get("domain") and (
+                    "predictive_transmission"
+                    if str(kwargs["domain"]).lower().startswith("transmis")
+                    else "predictive_motor"
                 )
+                payload = tool_failure(tool_name, exc, dataset=dataset or None)
+                if not isinstance(exc, CampbellAIError):
+                    logger.exception("Campbell AI tool %s failed unexpectedly", tool_name)
+                return record(payload)
 
         @function_tool
         def inspect_available_data() -> str:
             """List datasets and columns available for the active dashboard client."""
-            return repository.describe_catalog(client)
+            return record(repository.describe_catalog(client))
+
+        @function_tool
+        def inspect_dataset(dataset: str = "") -> str:
+            """Schema and allowed filter values of a dataset; use it to fix a failed query."""
+            return safe_data_call(
+                "inspect_dataset", repository.describe_dataset, client, dataset
+            )
+
+        @function_tool
+        def describe_signals(signal_codes: str = "") -> str:
+            """Official name of telemetry signals. States that no unit is published."""
+            codes = [
+                code.strip()
+                for code in str(signal_codes or "").replace(";", ",").split(",")
+                if code.strip()
+            ]
+            return record(
+                json.dumps(describe_signal_catalog(codes or None), ensure_ascii=False)
+            )
 
         @function_tool
         def query_alerts(
@@ -203,12 +217,15 @@ class CampbellAgentRuntime:
             system: str = "",
             component: str = "",
             trigger_type: str = "",
+            subsystem: str = "",
+            trigger_var: str = "",
             start_date: str = "",
             end_date: str = "",
             limit: int = 20,
         ) -> str:
             """Query alerts using a relative number of days or an explicit ISO date window."""
             return safe_data_call(
+                "query_alerts",
                 repository.query_alerts,
                 client,
                 days=days,
@@ -216,6 +233,8 @@ class CampbellAgentRuntime:
                 system=system,
                 component=component,
                 trigger_type=trigger_type,
+                subsystem=subsystem,
+                trigger_var=trigger_var,
                 start_date=start_date,
                 end_date=end_date,
                 limit=limit,
@@ -234,6 +253,7 @@ class CampbellAgentRuntime:
         ) -> str:
             """Query maintenance actions with equipment, category and date-window filters."""
             return safe_data_call(
+                "query_maintenance",
                 repository.query_maintenance,
                 client,
                 unit_id=unit_id,
@@ -250,15 +270,106 @@ class CampbellAgentRuntime:
         def query_oil_status(unit_id: str = "", limit: int = 20) -> str:
             """Query latest oil-analysis equipment status for the active client."""
             return safe_data_call(
-                repository.query_oil_status, client, unit_id=unit_id, limit=limit
+                "query_oil_status",
+                repository.query_oil_status,
+                client,
+                unit_id=unit_id,
+                limit=limit,
             )
 
         @function_tool
-        def query_telemetry_health(unit_id: str = "", limit: int = 20) -> str:
-            """Query telemetry equipment health for the active client."""
+        def query_telemetry_health(
+            unit_id: str = "", latest_only: bool = True, limit: int = 20
+        ) -> str:
+            """Query telemetry equipment health, by default only the latest evaluated week."""
             return safe_data_call(
+                "query_telemetry_health",
                 repository.query_telemetry_health,
                 client,
+                unit_id=unit_id,
+                latest_only=latest_only,
+                limit=limit,
+            )
+
+        @function_tool
+        def query_telemetry_components(
+            unit_id: str = "",
+            component: str = "",
+            status: str = "",
+            latest_only: bool = True,
+            limit: int = 25,
+        ) -> str:
+            """Component-level telemetry status including the signals that triggered it."""
+            return safe_data_call(
+                "query_telemetry_components",
+                repository.query_telemetry_components,
+                client,
+                unit_id=unit_id,
+                component=component,
+                status=status,
+                latest_only=latest_only,
+                limit=limit,
+            )
+
+        @function_tool
+        def query_oil_components(
+            unit_id: str = "",
+            component: str = "",
+            status: str = "",
+            latest_only: bool = True,
+            limit: int = 25,
+        ) -> str:
+            """Component-level oil condition with breached essays, severity and evolution."""
+            return safe_data_call(
+                "query_oil_components",
+                repository.query_oil_components,
+                client,
+                unit_id=unit_id,
+                component=component,
+                status=status,
+                latest_only=latest_only,
+                limit=limit,
+            )
+
+        @function_tool
+        def query_alert_detail(
+            alert_id: str = "",
+            unit_id: str = "",
+            trigger: str = "",
+            limit: int = 10,
+        ) -> str:
+            """Measured peak value and applicable limit of the signal that raised an alert."""
+            return safe_data_call(
+                "query_alert_detail",
+                repository.query_alert_detail,
+                client,
+                alert_id=alert_id,
+                unit_id=unit_id,
+                trigger=trigger,
+                limit=limit,
+            )
+
+        @function_tool
+        def query_maintenance_summary(unit_id: str = "", limit: int = 10) -> str:
+            """Weekly written maintenance summary per equipment."""
+            return safe_data_call(
+                "query_maintenance_summary",
+                repository.query_maintenance_summary,
+                client,
+                unit_id=unit_id,
+                limit=limit,
+            )
+
+        @function_tool
+        def query_predictive_risk(
+            domain: str = "motor", unit_id: str = "", limit: int = 15
+        ) -> str:
+            """Predictive-model ranking and failure-mode risks for motor or transmision."""
+            return safe_data_call(
+                "query_predictive_risk",
+                repository.query_predictive_risk,
+                client,
+                domain=domain,
                 unit_id=unit_id,
                 limit=limit,
             )
@@ -300,24 +411,28 @@ class CampbellAgentRuntime:
                     title=title,
                 )
                 generated_visualizations.append(artifact)
-                return json.dumps(
-                    {
-                        "created": True,
-                        "chart_id": artifact.chart_id,
-                        "title": artifact.title,
-                        "description": artifact.description,
-                        "summary": artifact.summary,
-                    },
-                    ensure_ascii=False,
+                return record(
+                    json.dumps(
+                        {
+                            "created": True,
+                            "chart_id": artifact.chart_id,
+                            "title": artifact.title,
+                            "description": artifact.description,
+                            "summary": artifact.summary,
+                        },
+                        ensure_ascii=False,
+                    )
                 )
             except Exception as exc:
-                return json.dumps(
-                    {
-                        "created": False,
-                        "error": type(exc).__name__,
-                        "detail": str(exc),
-                    },
-                    ensure_ascii=False,
+                if not isinstance(exc, CampbellAIError):
+                    logger.exception("Campbell AI chart build failed unexpectedly")
+                return record(
+                    tool_failure(
+                        "create_dashboard_chart",
+                        exc,
+                        dataset=str(dataset or "") or None,
+                        extra={"created": False},
+                    )
                 )
 
         planner = Agent(
@@ -330,10 +445,17 @@ class CampbellAgentRuntime:
 
         data_tools = [
             inspect_available_data,
+            inspect_dataset,
+            describe_signals,
             query_alerts,
+            query_alert_detail,
             query_maintenance,
+            query_maintenance_summary,
             query_oil_status,
+            query_oil_components,
             query_telemetry_health,
+            query_telemetry_components,
+            query_predictive_risk,
         ]
         data_analyst = Agent(
             name="Data Analyst Query",
@@ -343,11 +465,65 @@ class CampbellAgentRuntime:
             model_settings=ModelSettings(temperature=0),
         )
 
+        @function_tool
+        def list_dashboard_charts() -> str:
+            """List the named dashboard charts this client is allowed to reproduce."""
+            return record(
+                json.dumps({"charts": self.charts.list_charts(client)}, ensure_ascii=False)
+            )
+
+        @function_tool
+        def render_dashboard_chart(
+            chart_id: str,
+            unit_id: str = "",
+            days: int = 0,
+            top_n: int = 0,
+        ) -> str:
+            """Render a named dashboard chart, reproducing the dashboard's own visual."""
+            parameters = {
+                key: value
+                for key, value in (("unit_id", unit_id), ("days", days), ("top_n", top_n))
+                if value
+            }
+            try:
+                artifact = self.charts.render(client, chart_id, parameters)
+                generated_visualizations.append(artifact)
+                return record(
+                    json.dumps(
+                        {
+                            "created": True,
+                            "chart_id": artifact.chart_id,
+                            "title": artifact.title,
+                            "description": artifact.description,
+                            "summary": artifact.summary,
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+            except Exception as exc:
+                if not isinstance(exc, CampbellAIError):
+                    logger.exception("Campbell AI named chart failed unexpectedly")
+                return record(
+                    tool_failure(
+                        "render_dashboard_chart",
+                        exc,
+                        hint=(
+                            "Llama a list_dashboard_charts para ver los chart_id y "
+                            "parametros validos, y reintenta una sola vez."
+                        ),
+                        extra={"created": False},
+                    )
+                )
+
         visualization_analyst = Agent(
             name="Data Visualization Analyst",
             model=self.settings.model_data_analyst,
             instructions=load_prompt("data_analyst_visualization.md"),
-            tools=[create_dashboard_chart],
+            tools=[
+                list_dashboard_charts,
+                render_dashboard_chart,
+                create_dashboard_chart,
+            ],
             model_settings=ModelSettings(temperature=0),
         )
 
@@ -372,6 +548,14 @@ class CampbellAgentRuntime:
             model_settings=ModelSettings(temperature=0),
         )
 
+        dashboard_guide = Agent(
+            name="Dashboard Navigation Guide",
+            model=self.settings.model_dashboard_guide,
+            instructions=load_prompt("dashboard_guide.md"),
+            tools=[],
+            model_settings=ModelSettings(temperature=0.1),
+        )
+
         @function_tool
         async def create_analysis_plan(question: str, context: str = "") -> str:
             """Create a short evidence plan for a complex maintenance question."""
@@ -390,7 +574,7 @@ class CampbellAgentRuntime:
             result = await Runner.run(
                 starting_agent=data_analyst,
                 input=f"Pregunta: {question}\nContexto disponible: {context}",
-                max_turns=6,
+                max_turns=self.settings.max_turns_data_analyst,
             )
             return str(result.final_output)
 
@@ -420,6 +604,17 @@ class CampbellAgentRuntime:
             return str(result.final_output)
 
         @function_tool
+        async def dashboard_navigation(question: str) -> str:
+            """Explain where to find something in the dashboard's menu and sections."""
+            executed_tools.append("dashboard_navigation")
+            result = await Runner.run(
+                starting_agent=dashboard_guide,
+                input=f"Pregunta de navegación: {question}",
+                max_turns=2,
+            )
+            return str(result.final_output)
+
+        @function_tool
         async def five_whys_analysis(question: str, evidence: str = "") -> str:
             """Apply the 5 Whys method while labeling evidence, hypotheses and missing data."""
             executed_tools.append("five_whys_analysis")
@@ -443,6 +638,7 @@ class CampbellAgentRuntime:
                 visualization_analysis,
                 technical_analysis,
                 five_whys_analysis,
+                dashboard_navigation,
             ],
             model_settings=ModelSettings(
                 temperature=0,
@@ -458,15 +654,17 @@ class CampbellAgentRuntime:
                 data_analyst=data_analyst,
                 visualization_analyst=visualization_analyst,
                 technical_expert=technical_expert,
+                dashboard_guide=dashboard_guide,
             ),
             Runner,
             generated_visualizations,
             executed_tools,
+            tool_outputs,
         )
 
     async def answer(
         self, principal: DashboardPrincipal, session_id: str, message: str
-    ) -> tuple[str, str, str, list[VisualizationArtifact]]:
+    ) -> tuple[str, str, str, list[VisualizationArtifact], GroundingReport]:
         deterministic = deterministic_guard(
             message,
             active_company=principal.company_id,
@@ -477,7 +675,7 @@ class CampbellAgentRuntime:
             message_id = await self.record_exchange(
                 principal, session_id, message, response
             )
-            return response, "blocked", message_id, []
+            return response, "blocked", message_id, [], GroundingReport()
         if not os.getenv("OPENAI_API_KEY"):
             raise CampbellConfigurationError(
                 "OPENAI_API_KEY no esta configurada en el servicio Campbell AI"
@@ -485,51 +683,233 @@ class CampbellAgentRuntime:
 
         key = self._session_key(principal, session_id)
         await self.initialize(principal, session_id)
-        lock = self._locks[key]
-        async with lock:
-            entry = self._sessions[key]
-            entry.last_access = time.time()
-            bundle, Runner, generated_visualizations, executed_tools = self._build_bundle(
-                principal
-            )
+        async with self.sessions.lock(key):
+            messages = await self.sessions.read(key)
+            (
+                bundle,
+                Runner,
+                generated_visualizations,
+                executed_tools,
+                tool_outputs,
+            ) = self._build_bundle(principal)
 
-            validation_result = await Runner.run(
-                starting_agent=bundle.gatekeeper,
-                input=message,
-                max_turns=1,
-            )
-            decision = validation_result.final_output
-            if isinstance(decision, SecurityDecision):
-                safe = decision.safe
-                reason = decision.reason
-            else:
-                safe = False
-                reason = "No fue posible validar la consulta"
-            if not safe:
-                response = f"Consulta bloqueada por seguridad: {reason}."
-                message_id = self._append_to_entry(entry, message, response)
-                return response, "blocked", message_id, []
+            blocked = await self._gatekeeper_refusal(Runner, bundle, message)
+            if blocked is not None:
+                updated, message_id = self._appended(messages, message, blocked)
+                await self.sessions.write(key, updated)
+                return blocked, "blocked", message_id, [], GroundingReport()
 
-            conversation = [
-                {"role": item.role, "content": item.content} for item in entry.messages
-            ]
-            conversation.append({"role": "user", "content": message})
             result = await Runner.run(
                 starting_agent=bundle.head,
-                input=conversation,
-                max_turns=8,
+                input=self._conversation_input(messages, message),
+                max_turns=self.settings.max_turns_head,
             )
-            response = str(result.final_output or "").strip()
-            if not response:
-                response = "No fue posible generar una respuesta para la consulta."
+            response = self._normalized_response(result.final_output)
+            grounding = self._audit(response, tool_outputs)
+            updated, message_id = self._appended(
+                messages, message, response, generated_visualizations
+            )
+            await self.sessions.write(key, updated)
+            return (
+                response,
+                self._request_type(generated_visualizations, executed_tools),
+                message_id,
+                generated_visualizations,
+                grounding,
+            )
 
-            message_id = self._append_to_entry(
-                entry, message, response, generated_visualizations
+    @staticmethod
+    def _conversation_input(
+        messages: list[ConversationMessage], message: str
+    ) -> list[dict[str, str]]:
+        conversation = [
+            {"role": item.role, "content": item.content} for item in messages
+        ]
+        conversation.append({"role": "user", "content": message})
+        return conversation
+
+    @staticmethod
+    def _normalized_response(final_output: Any) -> str:
+        response = str(final_output or "").strip()
+        return response or "No fue posible generar una respuesta para la consulta."
+
+    @staticmethod
+    def _request_type(
+        visualizations: list[VisualizationArtifact], executed_tools: list[str]
+    ) -> str:
+        if visualizations:
+            return "visualization"
+        if "five_whys_analysis" in executed_tools:
+            return "five_whys"
+        return "agents"
+
+    async def _gatekeeper_refusal(self, Runner, bundle, message: str) -> str | None:
+        """Return the refusal text when the gatekeeper blocks, otherwise None."""
+        validation_result = await Runner.run(
+            starting_agent=bundle.gatekeeper,
+            input=message,
+            max_turns=1,
+        )
+        decision = validation_result.final_output
+        if isinstance(decision, SecurityDecision):
+            if decision.safe:
+                return None
+            reason = decision.reason
+        else:
+            reason = "No fue posible validar la consulta"
+        return f"Consulta bloqueada por seguridad: {reason}."
+
+    async def answer_stream(
+        self, principal: DashboardPrincipal, session_id: str, message: str
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Yield progress events for one exchange, ending with a `done` payload.
+
+        Event shapes:
+        - ``{"type": "status", "stage": ...}``  coarse progress before text exists
+        - ``{"type": "delta", "text": ...}``    incremental answer text
+        - ``{"type": "done", ...}``             final response, id and visualizations
+        """
+        deterministic = deterministic_guard(
+            message,
+            active_company=principal.company_id,
+            known_companies=known_dashboard_clients(),
+        )
+        if not deterministic.safe:
+            response = f"Consulta bloqueada por seguridad: {deterministic.reason}."
+            message_id = await self.record_exchange(
+                principal, session_id, message, response
             )
-            if generated_visualizations:
-                request_type = "visualization"
-            elif "five_whys_analysis" in executed_tools:
-                request_type = "five_whys"
-            else:
-                request_type = "agents"
-            return response, request_type, message_id, generated_visualizations
+            yield self._done_event(
+                response, "blocked", message_id, [], GroundingReport()
+            )
+            return
+        if not os.getenv("OPENAI_API_KEY"):
+            raise CampbellConfigurationError(
+                "OPENAI_API_KEY no esta configurada en el servicio Campbell AI"
+            )
+
+        key = self._session_key(principal, session_id)
+        await self.initialize(principal, session_id)
+        async with self.sessions.lock(key):
+            messages = await self.sessions.read(key)
+            (
+                bundle,
+                Runner,
+                generated_visualizations,
+                executed_tools,
+                tool_outputs,
+            ) = self._build_bundle(principal)
+
+            yield {"type": "status", "stage": "validating"}
+            blocked = await self._gatekeeper_refusal(Runner, bundle, message)
+            if blocked is not None:
+                updated, message_id = self._appended(messages, message, blocked)
+                await self.sessions.write(key, updated)
+                yield self._done_event(
+                    blocked, "blocked", message_id, [], GroundingReport()
+                )
+                return
+
+            yield {"type": "status", "stage": "analyzing"}
+            streamed = Runner.run_streamed(
+                starting_agent=bundle.head,
+                input=self._conversation_input(messages, message),
+                max_turns=self.settings.max_turns_head,
+            )
+            chunks: list[str] = []
+            async for event in streamed.stream_events():
+                # Most of the wall clock is spent calling tools before any text
+                # exists, so surface which step is running or the user stares at a
+                # spinner for most of the answer.
+                step = self._tool_progress(event)
+                if step:
+                    yield {"type": "status", "stage": "tool", "detail": step}
+                    continue
+                text = self._delta_text(event)
+                if text:
+                    chunks.append(text)
+                    yield {"type": "delta", "text": text}
+
+            response = self._normalized_response(
+                getattr(streamed, "final_output", None) or "".join(chunks)
+            )
+            grounding = self._audit(response, tool_outputs)
+            updated, message_id = self._appended(
+                messages, message, response, generated_visualizations
+            )
+            await self.sessions.write(key, updated)
+            yield self._done_event(
+                response,
+                self._request_type(generated_visualizations, executed_tools),
+                message_id,
+                generated_visualizations,
+                grounding,
+            )
+
+    # User-facing labels for the head agent's tools. Internal tool names are never
+    # shown; anything unmapped falls back to a generic label.
+    _TOOL_LABELS: dict[str, str] = {
+        "create_analysis_plan": "Planificando el análisis",
+        "data_analysis": "Consultando datos",
+        "visualization_analysis": "Construyendo el gráfico",
+        "technical_analysis": "Interpretando la evidencia",
+        "five_whys_analysis": "Analizando causa raíz",
+        "dashboard_navigation": "Ubicando la sección del dashboard",
+    }
+
+    @classmethod
+    def _tool_progress(cls, event: Any) -> str | None:
+        """Return a progress label when the stream reports a tool call starting."""
+        if getattr(event, "type", None) != "run_item_stream_event":
+            return None
+        item = getattr(event, "item", None)
+        if item is None or getattr(item, "type", None) != "tool_call_item":
+            return None
+        raw = getattr(item, "raw_item", None)
+        name = str(getattr(raw, "name", "") or "")
+        if not name:
+            return None
+        return cls._TOOL_LABELS.get(name, "Analizando")
+
+    @staticmethod
+    def _delta_text(event: Any) -> str:
+        """Extract incremental answer text from an Agents SDK stream event.
+
+        Only raw text deltas of the top-level agent are surfaced; tool traffic and
+        sub-agent chatter stay internal.
+        """
+        if getattr(event, "type", None) != "raw_response_event":
+            return ""
+        data = getattr(event, "data", None)
+        if data is None or getattr(data, "type", None) != "response.output_text.delta":
+            return ""
+        return str(getattr(data, "delta", "") or "")
+
+    def _audit(self, response: str, tool_outputs: list[str]) -> GroundingReport:
+        """Trace every number in the answer back to a tool result."""
+        report = audit_response(response, tool_outputs)
+        if not report.is_grounded:
+            # Logged without the answer text: the point is the drift, not the content.
+            logger.warning(
+                "Campbell AI grounding gap: %s numeros sin origen, unidades inventadas=%s",
+                len(report.unverified_numbers),
+                report.invented_units,
+            )
+        return report
+
+    @staticmethod
+    def _done_event(
+        response: str,
+        request_type: str,
+        message_id: str,
+        visualizations: list[VisualizationArtifact],
+        grounding: GroundingReport | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "type": "done",
+            "response": response,
+            "request_type": request_type,
+            "message_id": message_id,
+            "visualizations": [item.model_dump(mode="json") for item in visualizations],
+            "grounding": (grounding or GroundingReport()).as_dict(),
+        }

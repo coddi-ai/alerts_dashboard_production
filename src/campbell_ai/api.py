@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import hmac
+import json
 import logging
 from functools import lru_cache
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
+from fastapi.responses import StreamingResponse
 
+from src.campbell_ai.chart_registry import CHART_DEFINITIONS
 from src.campbell_ai.config import get_campbell_settings
 from src.campbell_ai.errors import (
     CampbellAuthenticationError,
@@ -91,6 +94,10 @@ async def health() -> dict[str, object]:
         "explicit_time_windows": True,
         "feedback": True,
         "five_whys": True,
+        "streaming": settings.streaming_enabled,
+        # Surfaced so a deployment can assert it is not running several workers on
+        # the process-local session store.
+        "session_backend": settings.session_backend,
     }
 
 
@@ -100,6 +107,7 @@ async def health() -> dict[str, object]:
     dependencies=[Depends(require_internal_token)],
 )
 async def capabilities() -> CapabilitiesResponse:
+    settings = get_campbell_settings()
     return CapabilitiesResponse(
         agents=[
             "Gatekeeper",
@@ -108,7 +116,11 @@ async def capabilities() -> CapabilitiesResponse:
             "Data Analyst Query",
             "Data Visualization Analyst",
             "Technical Expert",
-        ]
+            "Dashboard Navigation Guide",
+        ],
+        streaming=settings.streaming_enabled,
+        session_backend=settings.session_backend,
+        named_charts=[definition.chart_id for definition in CHART_DEFINITIONS],
     )
 
 
@@ -145,6 +157,52 @@ async def send_message(
         )
     except Exception as exc:
         raise _translate_error(exc) from exc
+
+
+@app.post(
+    "/api/v1/campbell-ai/message/stream",
+    dependencies=[Depends(require_internal_token)],
+)
+async def stream_message(
+    body: MessageRequest,
+    service: CampbellAIService = Depends(resolve_service),
+) -> StreamingResponse:
+    """Server-sent events for one exchange, ending with a `done` event.
+
+    Errors raised before the first event become a normal HTTP status. Once the
+    stream is open the status is already committed, so a later failure is delivered
+    as an `error` event and the consumer must fall back to the blocking endpoint.
+    """
+
+    # Probe the first event eagerly so configuration and authorization problems still
+    # produce a real HTTP error instead of a 200 carrying an error event.
+    iterator = service.stream_message(
+        body.username, body.company_id, body.session_id, body.message
+    )
+    try:
+        first = await iterator.__anext__()
+    except StopAsyncIteration:
+        first = None
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+    async def publish_from_first():
+        try:
+            if first is not None:
+                yield f"event: {first['type']}\ndata: {json.dumps(first, ensure_ascii=False)}\n\n"
+            async for event in iterator:
+                yield f"event: {event['type']}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
+        except Exception as exc:  # noqa: BLE001 - surfaced to the client as an event
+            logger.exception("Campbell AI stream failed mid-flight")
+            detail = _translate_error(exc).detail
+            payload = json.dumps({"type": "error", "detail": detail}, ensure_ascii=False)
+            yield f"event: error\ndata: {payload}\n\n"
+
+    return StreamingResponse(
+        publish_from_first(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.post(

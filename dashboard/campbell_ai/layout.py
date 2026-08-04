@@ -5,15 +5,45 @@ from __future__ import annotations
 from dash import dcc, html
 import dash_bootstrap_components as dbc
 
+from dashboard.auth import IDENTITY_PROOF_FIELD, current_dashboard_user_data
+from src.charts.theme import (
+    BRAND_ACCENT,
+    BRAND_DARK,
+    BRAND_GRID,
+    BRAND_MUTED,
+    BRAND_TITLE,
+)
 
-GREEN = "#10a37f"
+
+# Campbell AI reuses the dashboard palette instead of carrying its own accent.
+ACCENT = BRAND_ACCENT
+ACCENT_SOFT = "rgba(52, 152, 219, 0.08)"
+ACCENT_BORDER = "rgba(52, 152, 219, 0.22)"
+
+CAMPBELL_AI_VERSION = "1.0.1"
+
+ALERT_SUGGESTIONS = {
+    "weekly-summary": (
+        "¿Cuántas alertas se registraron en los últimos 7 días y qué sistemas "
+        "concentran más?"
+    ),
+    "top-equipment": (
+        "¿Cuál es el equipo con más alertas durante el último mes?"
+    ),
+    "equipment-pareto": (
+        "Genera un Pareto de alertas por equipo para los últimos 30 días."
+    ),
+    "equipment-system-heatmap": (
+        "Genera un mapa de calor de alertas por equipo y sistema para los últimos 30 días."
+    ),
+}
 
 
 def _capability_card(icon: str, title: str, description: str) -> dbc.Col:
     return dbc.Col(
         html.Div(
             [
-                html.I(className=f"{icon} mb-3", style={"fontSize": "1.8rem", "color": GREEN}),
+                html.I(className=f"{icon} mb-3", style={"fontSize": "1.8rem", "color": ACCENT}),
                 html.H6(title, className="mb-2", style={"fontWeight": "700"}),
                 html.P(
                     description,
@@ -25,24 +55,84 @@ def _capability_card(icon: str, title: str, description: str) -> dbc.Col:
                 "height": "100%",
                 "padding": "1.15rem",
                 "borderRadius": "12px",
-                "background": "rgba(16, 163, 127, 0.05)",
-                "border": "1px solid rgba(16, 163, 127, 0.18)",
+                "background": ACCENT_SOFT,
+                "border": f"1px solid {ACCENT_BORDER}",
             },
         ),
         width=12,
-        md=4,
+        md=6,
         className="mb-3",
     )
 
 
-def create_campbell_ai_layout() -> html.Div:
+def _suggested_question_button(question_id: str, question: str) -> dbc.Col:
+    return dbc.Col(
+        dbc.Button(
+            [
+                html.I(
+                    className="fas fa-arrow-right me-2",
+                    style={"color": ACCENT},
+                ),
+                question,
+            ],
+            id={
+                "type": "campbell-ai-suggested-question",
+                "question_id": question_id,
+            },
+            n_clicks=0,
+            color="light",
+            className="text-start w-100 h-100",
+            title="Enviar esta pregunta",
+            style={
+                "border": f"1px solid {ACCENT_BORDER}",
+                "borderRadius": "10px",
+                "background": "white",
+                "padding": "0.8rem 0.95rem",
+                "fontSize": "0.86rem",
+            },
+        ),
+        width=12,
+        lg=6,
+    )
+
+
+def _initial_company_state(user_data: dict | None) -> dict:
+    identity = None
+    if not isinstance(user_data, dict) or not user_data.get(IDENTITY_PROOF_FIELD):
+        user_data = current_dashboard_user_data()
+    if isinstance(user_data, dict):
+        username = str(user_data.get("username", "")).strip()
+        proof = str(user_data.get(IDENTITY_PROOF_FIELD, "")).strip()
+        if username and proof:
+            identity = {
+                "username": username,
+                IDENTITY_PROOF_FIELD: proof,
+            }
+    return {"company_id": None, "identity": identity}
+
+
+def create_campbell_ai_layout(user_data: dict | None = None) -> html.Div:
     """Build the Campbell AI agent and visualization view."""
     return html.Div(
         [
             dcc.Store(id="campbell-ai-session-store", storage_type="session"),
             dcc.Store(id="campbell-ai-history-store", storage_type="session", data=[]),
-            dcc.Store(id="campbell-ai-company-store", storage_type="session"),
+            dcc.Store(
+                id="campbell-ai-company-store",
+                storage_type="memory",
+                data=_initial_company_state(user_data),
+            ),
             dcc.Store(id="campbell-ai-feedback-store", storage_type="session", data={}),
+            dcc.Store(id="campbell-ai-pending-message-store", storage_type="memory", data=None),
+            # Streaming plumbing: the browser reads the SSE proxy directly and parks
+            # the final payload, which this interval lifts back into a Dash store.
+            dcc.Store(id="campbell-ai-stream-store", storage_type="memory", data=None),
+            dcc.Interval(
+                id="campbell-ai-stream-poll",
+                interval=350,
+                disabled=True,
+                n_intervals=0,
+            ),
             dbc.Row(
                 dbc.Col(
                     [
@@ -54,12 +144,12 @@ def create_campbell_ai_layout() -> html.Div:
                                             [
                                                 html.I(
                                                     className="fas fa-robot me-3",
-                                                    style={"color": GREEN},
+                                                    style={"color": ACCENT},
                                                 ),
                                                 "Campbell AI",
                                             ],
                                             className="mb-1",
-                                            style={"fontWeight": "700"},
+                                            style={"fontWeight": "700", "color": BRAND_DARK},
                                         ),
                                         html.P(
                                             "Asistente de mantenimiento basado en agentes",
@@ -102,8 +192,8 @@ def create_campbell_ai_layout() -> html.Div:
                             style={
                                 "padding": "1.6rem",
                                 "borderRadius": "16px",
-                                "background": "rgba(16, 163, 127, 0.08)",
-                                "border": "1px solid rgba(16, 163, 127, 0.2)",
+                                "background": ACCENT_SOFT,
+                                "border": f"1px solid {ACCENT_BORDER}",
                             },
                         ),
                         dbc.Row(
@@ -118,13 +208,33 @@ def create_campbell_ai_layout() -> html.Div:
                                     "Gráficos interactivos",
                                     "Crea tendencias, Pareto, mapas de calor y comparaciones interactivas.",
                                 ),
-                                _capability_card(
-                                    "fas fa-search",
-                                    "Diagnóstico y 5 porqués",
-                                    "Relaciona evidencia y propone validaciones y acciones de mantenimiento.",
-                                ),
                             ],
                             className="g-3",
+                        ),
+                        html.Div(
+                            [
+                                html.Div(
+                                    [
+                                        html.I(
+                                            className="fas fa-lightbulb me-2",
+                                            style={"color": ACCENT},
+                                        ),
+                                        html.Span(
+                                            "Preguntas sugeridas sobre alertas",
+                                            style={"fontWeight": "650"},
+                                        ),
+                                    ],
+                                    className="mb-2",
+                                ),
+                                dbc.Row(
+                                    [
+                                        _suggested_question_button(question_id, question)
+                                        for question_id, question in ALERT_SUGGESTIONS.items()
+                                    ],
+                                    className="g-2",
+                                ),
+                            ],
+                            className="mb-4",
                         ),
                         dbc.Card(
                             [
@@ -166,7 +276,7 @@ def create_campbell_ai_layout() -> html.Div:
                                             },
                                         ),
                                         type="circle",
-                                        color=GREEN,
+                                        color=ACCENT,
                                     ),
                                     style={"padding": "1rem"},
                                 ),
@@ -178,6 +288,7 @@ def create_campbell_ai_layout() -> html.Div:
                                                 placeholder="Pregúntame sobre mantenimiento o solicita un gráfico…",
                                                 rows=2,
                                                 maxLength=4000,
+                                                submit_on_enter=True,
                                                 style={
                                                     "resize": "none",
                                                     "borderRadius": "12px 0 0 12px",
@@ -189,11 +300,12 @@ def create_campbell_ai_layout() -> html.Div:
                                                     "Enviar",
                                                 ],
                                                 id="campbell-ai-send",
-                                                color="success",
+                                                color="primary",
                                                 n_clicks=0,
                                                 style={
-                                                    "backgroundColor": GREEN,
-                                                    "borderColor": GREEN,
+                                                    "backgroundColor": ACCENT,
+                                                    "borderColor": ACCENT,
+                                                    "fontWeight": "600",
                                                 },
                                             ),
                                         ]
@@ -205,9 +317,9 @@ def create_campbell_ai_layout() -> html.Div:
                             style={"borderRadius": "14px", "overflow": "hidden"},
                         ),
                         html.P(
-                            "Incluye análisis, gráficos y feedback. Reportes, PDF, descargas y archivos están deshabilitados.",
+                            f"Campbell AI v{CAMPBELL_AI_VERSION}",
                             className="text-muted text-center mt-3 mb-0",
-                            style={"fontSize": "0.78rem"},
+                            style={"fontSize": "0.75rem"},
                         ),
                     ],
                     width=12,
@@ -236,16 +348,20 @@ def _render_visualizations(message: dict) -> list[html.Div]:
                     ),
                     html.P(
                         str(artifact.get("description", "")),
-                        className="text-muted mb-0 px-2",
-                        style={"fontSize": "0.78rem"},
+                        className="mb-0 px-2",
+                        style={
+                            "fontSize": "0.78rem",
+                            "color": BRAND_MUTED,
+                            "lineHeight": "1.45",
+                        },
                     ),
                 ],
                 className="mt-3",
                 style={
                     "background": "white",
-                    "border": "1px solid #dee2e6",
+                    "border": f"1px solid {BRAND_GRID}",
                     "borderRadius": "12px",
-                    "padding": "0.35rem",
+                    "padding": "0.35rem 0.35rem 0.6rem",
                 },
             )
         )
@@ -305,11 +421,11 @@ def render_chat_history(
                 [
                     html.I(
                         className="fas fa-robot mb-3",
-                        style={"fontSize": "2rem", "color": GREEN},
+                        style={"fontSize": "2rem", "color": ACCENT},
                     ),
                     html.P(
-                        "La sesión está lista. Puedes consultar las últimas alertas, solicitar un "
-                        "gráfico o analizar un problema con 5 porqués.",
+                        "La sesión está lista. Puedes consultar las últimas alertas o solicitar "
+                        "un gráfico.",
                         className="text-muted mb-0",
                     ),
                 ],
@@ -329,7 +445,7 @@ def render_chat_history(
                     "fontSize": "0.75rem",
                     "fontWeight": "700",
                     "marginBottom": "0.35rem",
-                    "color": "#5f6368",
+                    "color": "rgba(255,255,255,0.85)" if is_user else BRAND_MUTED,
                 },
             ),
             dcc.Markdown(
@@ -352,10 +468,49 @@ def render_chat_history(
                     "marginBottom": "0.9rem",
                     "padding": "0.85rem 1rem",
                     "borderRadius": "16px",
-                    "backgroundColor": GREEN if is_user else "#f1f3f5",
-                    "color": "white" if is_user else "#212529",
-                    "boxShadow": "0 1px 3px rgba(0,0,0,0.08)",
+                    "backgroundColor": BRAND_DARK if is_user else "#f6f8fa",
+                    "color": "white" if is_user else BRAND_TITLE,
+                    "border": "none" if is_user else f"1px solid {BRAND_GRID}",
+                    "boxShadow": "0 1px 3px rgba(26,37,47,0.08)",
                 },
             )
         )
+    if messages and messages[-1].get("pending"):
+        bubbles.append(_streaming_placeholder())
     return bubbles
+
+
+def _streaming_placeholder() -> html.Div:
+    """Assistant bubble the stream script writes incoming text into.
+
+    Rendered only while a message is pending. It shows plain text rather than
+    Markdown; the canonical Markdown render arrives with the final Dash update.
+    """
+    return html.Div(
+        [
+            html.Div(
+                "Campbell AI",
+                style={
+                    "fontSize": "0.75rem",
+                    "fontWeight": "700",
+                    "marginBottom": "0.35rem",
+                    "color": BRAND_MUTED,
+                },
+            ),
+            html.Div(
+                id="campbell-ai-stream-placeholder",
+                style={"whiteSpace": "pre-wrap", "minHeight": "1.2rem"},
+            ),
+        ],
+        style={
+            "maxWidth": "94%",
+            "marginRight": "auto",
+            "marginBottom": "0.9rem",
+            "padding": "0.85rem 1rem",
+            "borderRadius": "16px",
+            "backgroundColor": "#f6f8fa",
+            "color": BRAND_TITLE,
+            "border": f"1px solid {BRAND_GRID}",
+            "boxShadow": "0 1px 3px rgba(26,37,47,0.08)",
+        },
+    )

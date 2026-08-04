@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from src.campbell_ai.errors import CampbellDataError
@@ -70,9 +73,141 @@ DATASETS: tuple[DatasetSpec, ...] = (
         "Resumen semanal de mantenimiento",
         (("UnitId", "machine_code", "machine_id"), ("Summary", "Tasks_List")),
     ),
+    DatasetSpec(
+        "alerts_detail",
+        "telemetry/golden/{client}/alerts_detail_wide_with_gps.csv",
+        "Detalle de senales por alerta",
+        (("AlertID",), ("Unit", "UnitId", "unit_id"), ("Trigger",)),
+    ),
+    DatasetSpec(
+        "predictive_motor",
+        "predictive/golden/{client}/motor.csv",
+        "Modelo predictivo de motor",
+        (("Unit", "unitId", "unit_id"), ("ranking",)),
+    ),
+    DatasetSpec(
+        "predictive_transmission",
+        "predictive/golden/{client}/transmision.csv",
+        "Modelo predictivo de transmision",
+        (("Unit", "unitId", "unit_id"), ("ranking",)),
+    ),
 )
 
 DATASET_MAP = {spec.key: spec for spec in DATASETS}
+
+# Which agent tool reads each dataset; surfaced by `describe_catalog` so the analyst
+# escalates to the right tool instead of assuming a source is unreachable.
+DATASET_TOOLS: dict[str, str] = {
+    "alerts": "query_alerts",
+    "alerts_detail": "query_alert_detail",
+    "oil_machine_status": "query_oil_status",
+    "oil_classified": "query_oil_components",
+    "oil_limits": "query_oil_components (limites de referencia)",
+    "telemetry_machine_status": "query_telemetry_health",
+    "telemetry_classified": "query_telemetry_components",
+    "maintenance_actions": "query_maintenance",
+    "maintenance_summary": "query_maintenance_summary",
+    "predictive_motor": "query_predictive_risk(domain='motor')",
+    "predictive_transmission": "query_predictive_risk(domain='transmision')",
+}
+
+@dataclass(frozen=True)
+class FilterSpec:
+    """A tool parameter that filters a dataset, and the columns it resolves against."""
+
+    parameter: str
+    columns: tuple[str, ...]
+    # "category" filters expose their vocabulary so a failed guess can be corrected.
+    kind: str = "category"
+
+
+# Declared once so the schema tool and the error hints cannot drift from the
+# filters the query methods actually apply.
+DATASET_FILTERS: dict[str, tuple[FilterSpec, ...]] = {
+    "alerts": (
+        FilterSpec("unit_id", ("UnitId", "Unit", "unit_id"), "unit"),
+        FilterSpec("system", ("sistema", "System", "system")),
+        FilterSpec("subsystem", ("subsistema", "SubSystem", "Subsystem")),
+        FilterSpec("component", ("componente", "Component", "component")),
+        FilterSpec("trigger_type", ("Trigger_type", "Trigger", "trigger_type")),
+        FilterSpec("trigger_var", ("Trigger_Var", "trigger_var")),
+    ),
+    "alerts_detail": (
+        FilterSpec("unit_id", ("Unit", "UnitId", "unit_id"), "unit"),
+        FilterSpec("trigger", ("Trigger", "trigger")),
+        FilterSpec("alert_id", ("AlertID", "alert_id"), "identifier"),
+    ),
+    "maintenance_actions": (
+        FilterSpec("unit_id", ("machine_code", "machine_id", "UnitId"), "unit"),
+        FilterSpec("system", ("action_system_name", "job_system_name")),
+        FilterSpec("component", ("component_names", "componentName")),
+        FilterSpec("action_type", ("action_type_name", "action_type")),
+    ),
+    "maintenance_summary": (
+        FilterSpec("unit_id", ("UnitId", "machine_code", "machine_id"), "unit"),
+    ),
+    "oil_machine_status": (
+        FilterSpec("unit_id", ("unit_id", "unitId", "UnitId"), "unit"),
+    ),
+    "oil_classified": (
+        FilterSpec("unit_id", ("unitId", "unit_id", "UnitId"), "unit"),
+        FilterSpec("component", ("componentNameNormalized", "componentName")),
+        FilterSpec("status", ("report_status", "overall_status")),
+    ),
+    "telemetry_machine_status": (
+        FilterSpec("unit_id", ("unit_id", "unitId", "UnitId"), "unit"),
+    ),
+    "telemetry_classified": (
+        FilterSpec("unit_id", ("unit_id", "unitId", "UnitId"), "unit"),
+        FilterSpec("component", ("component", "componentName")),
+        FilterSpec("status", ("component_status", "overall_status")),
+    ),
+    "predictive_motor": (
+        FilterSpec("unit_id", ("Unit", "unitId", "unit_id"), "unit"),
+    ),
+    "predictive_transmission": (
+        FilterSpec("unit_id", ("Unit", "unitId", "unit_id"), "unit"),
+    ),
+}
+
+# Which dataset each tool reads, so an error can name the source to inspect.
+TOOL_DATASETS: dict[str, str] = {
+    "query_alerts": "alerts",
+    "query_alert_detail": "alerts_detail",
+    "query_maintenance": "maintenance_actions",
+    "query_maintenance_summary": "maintenance_summary",
+    "query_oil_status": "oil_machine_status",
+    "query_oil_components": "oil_classified",
+    "query_telemetry_health": "telemetry_machine_status",
+    "query_telemetry_components": "telemetry_classified",
+    "query_predictive_risk": "predictive_motor",
+}
+
+# Shared bands so predictive ranking is read identically by every consumer.
+PREDICTIVE_BANDS: tuple[tuple[float, str], ...] = (
+    (35.0, "Saludable"),
+    (55.0, "Monitoreo"),
+    (75.0, "Prioridad alta"),
+    (float("inf"), "Critico"),
+)
+
+
+def predictive_band(value: float) -> str:
+    """Map a predictive ranking score to its health band."""
+    for threshold, label in PREDICTIVE_BANDS:
+        if value < threshold:
+            return label
+    return "Critico"
+
+
+def predictive_module_allows(client: str) -> bool:
+    """Honour the dashboard's Predictive module allowlist for the requested client."""
+    from config.settings import get_settings
+
+    allowed = {
+        str(value).strip().lower() for value in get_settings().predictive_allowed_clients
+    }
+    return normalize_client_id(client) in allowed
 
 
 class DashboardDataRepository:
@@ -81,6 +216,7 @@ class DashboardDataRepository:
     def __init__(self, data_root: Path | str):
         self.data_root = Path(data_root).expanduser().resolve()
         self._cache: dict[tuple[str, int], pd.DataFrame] = {}
+        self._probe_cache: dict[tuple[str, int], dict[str, Any]] = {}
         self._cache_lock = threading.RLock()
 
     def dataset_path(self, key: str, client: str) -> Path:
@@ -124,10 +260,49 @@ class DashboardDataRepository:
     def load(self, key: str, client: str) -> pd.DataFrame:
         return self._read_frame(self.dataset_path(key, client))
 
+    def _probe_frame(self, path: Path) -> dict[str, Any]:
+        """Read only columns and row count so validation never materializes a dataset."""
+        mtime_ns = path.stat().st_mtime_ns
+        cache_key = (str(path), mtime_ns)
+        with self._cache_lock:
+            cached = self._probe_cache.get(cache_key)
+            if cached is not None:
+                return cached
+            frame = self._cache.get(cache_key)
+        if frame is not None:
+            probe = {
+                "columns": [str(column) for column in frame.columns],
+                "rows": int(len(frame)),
+            }
+        elif path.suffix.lower() == ".parquet":
+            import pyarrow.parquet as pq
+
+            metadata = pq.ParquetFile(path)
+            probe = {
+                "columns": [str(name) for name in metadata.schema_arrow.names],
+                "rows": int(metadata.metadata.num_rows),
+            }
+        elif path.suffix.lower() == ".csv":
+            header = pd.read_csv(path, nrows=0, low_memory=False)
+            columns = [str(column) for column in header.columns]
+            # Parse a single column so quoted newlines are counted correctly without
+            # materializing every field of a wide dataset.
+            counted = pd.read_csv(path, usecols=[0], low_memory=False) if columns else header
+            probe = {"columns": columns, "rows": int(len(counted))}
+        else:
+            raise CampbellDataError(f"Formato no soportado: {path.suffix}")
+
+        with self._cache_lock:
+            stale = [key for key in self._probe_cache if key[0] == str(path) and key != cache_key]
+            for key in stale:
+                self._probe_cache.pop(key, None)
+            self._probe_cache[cache_key] = probe
+        return probe
+
     @staticmethod
-    def _resolve_column(frame: pd.DataFrame, candidates: tuple[str, ...]) -> str | None:
-        exact = {str(column): str(column) for column in frame.columns}
-        lowered = {str(column).lower(): str(column) for column in frame.columns}
+    def _resolve_name(columns: list[str], candidates: tuple[str, ...]) -> str | None:
+        exact = {str(column): str(column) for column in columns}
+        lowered = {str(column).lower(): str(column) for column in columns}
         for candidate in candidates:
             if candidate in exact:
                 return exact[candidate]
@@ -135,10 +310,14 @@ class DashboardDataRepository:
                 return lowered[candidate.lower()]
         return None
 
-    def _validate_columns(self, frame: pd.DataFrame, spec: DatasetSpec) -> list[str]:
+    @classmethod
+    def _resolve_column(cls, frame: pd.DataFrame, candidates: tuple[str, ...]) -> str | None:
+        return cls._resolve_name([str(column) for column in frame.columns], candidates)
+
+    def _validate_columns(self, columns: list[str], spec: DatasetSpec) -> list[str]:
         missing = []
         for alternatives in spec.required_column_groups:
-            if self._resolve_column(frame, alternatives) is None:
+            if self._resolve_name(columns, alternatives) is None:
                 missing.append(" | ".join(alternatives))
         return missing
 
@@ -173,14 +352,14 @@ class DashboardDataRepository:
             }
             if path.exists():
                 try:
-                    frame = self._read_frame(path)
-                    missing = self._validate_columns(frame, spec)
+                    probe = self._probe_frame(path)
+                    missing = self._validate_columns(probe["columns"], spec)
                     item.update(
                         {
                             "valid": not missing,
                             "missing_columns": missing,
-                            "rows": int(len(frame)),
-                            "columns": [str(column) for column in frame.columns],
+                            "rows": probe["rows"],
+                            "columns": probe["columns"],
                         }
                     )
                     if item["valid"]:
@@ -201,6 +380,125 @@ class DashboardDataRepository:
     @staticmethod
     def _clamp(value: int, minimum: int, maximum: int) -> int:
         return max(minimum, min(int(value), maximum))
+
+    _STRINGIFIED_LIST = re.compile(r"^\[\s*(.*?)\s*\]$", re.DOTALL)
+
+    @classmethod
+    def _flatten_cell(cls, value: Any) -> Any:
+        """Render list-like cells (real or already stringified) as readable text."""
+        if isinstance(value, (list, tuple, set, np.ndarray)):
+            return ", ".join(str(item) for item in value)
+        if isinstance(value, str):
+            match = cls._STRINGIFIED_LIST.match(value.strip())
+            if match:
+                inner = match.group(1)
+                if not inner:
+                    return ""
+                parts = [part.strip().strip("'\"") for part in inner.split(",")]
+                return ", ".join(part for part in parts if part)
+        return value
+
+    @staticmethod
+    def _is_textual(series: pd.Series) -> bool:
+        """True for object/string columns under both pandas 2 (object) and 3 (str)."""
+        dtype = series.dtype
+        return not (
+            pd.api.types.is_numeric_dtype(dtype)
+            or pd.api.types.is_bool_dtype(dtype)
+            or pd.api.types.is_datetime64_any_dtype(dtype)
+        )
+
+    @classmethod
+    def _categorical(cls, series: pd.Series) -> pd.Series:
+        """Make a column safe for value_counts even when cells hold lists or arrays."""
+        if not cls._is_textual(series):
+            return series
+        return series.map(cls._flatten_cell)
+
+    def _distribution(self, frame: pd.DataFrame, column: str | None, top: int = 10) -> dict:
+        if not column or column not in frame.columns or frame.empty:
+            return {}
+        return {
+            str(key): int(value)
+            for key, value in self._categorical(frame[column])
+            .value_counts()
+            .head(top)
+            .items()
+        }
+
+    @staticmethod
+    def _normalize_unit(value: Any) -> str:
+        """Normalize equipment identifiers so T_9, T_09, T-9 and T9 all compare equal."""
+        text = str(value or "").strip().upper()
+        if not text:
+            return ""
+        match = re.match(r"^([A-Z]*)[\s\-_]*0*(\d+)$", text)
+        if match:
+            return f"{match.group(1)}{int(match.group(2))}"
+        return re.sub(r"[\s\-_]+", "", text)
+
+    _FUSION_ID = re.compile(r"^F-(\d+)-\d+$", re.IGNORECASE)
+
+    @classmethod
+    def _normalize_alert_id(cls, alert_id: str) -> str:
+        """Accept a FusionID and return the numeric id used by the detail table."""
+        text = str(alert_id or "").strip()
+        match = cls._FUSION_ID.match(text)
+        return match.group(1) if match else text
+
+    @staticmethod
+    def _fold(value: Any) -> str:
+        """Casefold and strip accents so 'Refrigeración' matches 'Refrigeracion'."""
+        text = unicodedata.normalize("NFKD", str(value or ""))
+        return "".join(char for char in text if not unicodedata.combining(char)).casefold()
+
+    def _filter_contains(
+        self, frame: pd.DataFrame, column: str | None, needle: str
+    ) -> pd.DataFrame:
+        """Substring filter that ignores case and accents, as users type either form."""
+        if not needle or not column or column not in frame.columns:
+            return frame
+        target = self._fold(needle).strip()
+        if not target:
+            return frame
+        folded = self._categorical(frame[column]).map(self._fold)
+        return frame[folded.str.contains(re.escape(target), na=False)]
+
+    def _filter_hints(
+        self,
+        frame: pd.DataFrame,
+        applied: list[tuple[str, str, str]],
+    ) -> dict[str, Any]:
+        """When a filter empties the result, expose the values that do exist.
+
+        Without this, a near-miss such as searching a system name that is really a
+        subsystem is indistinguishable from "this never happened".
+        """
+        hints: dict[str, Any] = {
+            "detail": (
+                "Ningun registro coincide con los filtros aplicados. Revisa los valores "
+                "existentes antes de concluir que el evento no ocurrio; el termino buscado "
+                "puede pertenecer a otra columna."
+            ),
+            "applied": {name: value for name, value, _ in applied},
+            "available_values": {},
+        }
+        for name, _, column in applied:
+            if column and column in frame.columns:
+                hints["available_values"][name] = list(
+                    self._distribution(frame, column, top=12)
+                )
+        return hints
+
+    def _filter_unit(
+        self, frame: pd.DataFrame, unit_col: str | None, unit_id: str
+    ) -> pd.DataFrame:
+        """Filter by equipment id tolerating the id formats used across techniques."""
+        if not unit_id or not unit_col:
+            return frame
+        target = self._normalize_unit(unit_id)
+        normalized = frame[unit_col].map(self._normalize_unit)
+        return frame[normalized == target]
 
     def filter_date_window(
         self,
@@ -267,11 +565,17 @@ class DashboardDataRepository:
             "data_max": (
                 filtered_dates.max().isoformat() if not filtered_dates.dropna().empty else None
             ),
+            # Absolute coverage of the source, so a caller can tell "no records in the
+            # window" apart from "this source simply stops earlier than the others".
+            "source_coverage": {
+                "first": valid_dates.min().isoformat(),
+                "last": valid_dates.max().isoformat(),
+            },
         }
         return filtered, filtered_dates, metadata
 
-    @staticmethod
-    def _records(frame: pd.DataFrame, columns: list[str], limit: int) -> list[dict[str, Any]]:
+    @classmethod
+    def _records(cls, frame: pd.DataFrame, columns: list[str], limit: int) -> list[dict[str, Any]]:
         selected = list(
             dict.fromkeys(
                 column for column in columns if column and column in frame.columns
@@ -280,20 +584,135 @@ class DashboardDataRepository:
         if not selected:
             selected = [str(column) for column in frame.columns[:8]]
         subset = frame[selected].head(limit).copy()
+        for column in subset.columns:
+            subset[column] = cls._categorical(subset[column])
         return json.loads(subset.to_json(orient="records", date_format="iso", force_ascii=False))
 
+    @staticmethod
+    def _compact_breached_essays(raw: Any, top: int = 6) -> list[dict[str, Any]] | None:
+        """Reduce the verbose breached-essay payload to the fields an analyst needs."""
+        if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+            return None
+        items = raw
+        if isinstance(items, str):
+            try:
+                items = json.loads(items)
+            except json.JSONDecodeError:
+                return None
+        if isinstance(items, np.ndarray):
+            items = items.tolist()
+        if not isinstance(items, list):
+            return None
+        compact = [
+            {
+                "essay": item.get("essay"),
+                "value": item.get("value"),
+                "limit": item.get("limit"),
+                "threshold": item.get("threshold"),
+                "group": item.get("group"),
+                "classifies": bool(item.get("use_for_classification")),
+            }
+            for item in items
+            if isinstance(item, dict)
+        ]
+        compact.sort(key=lambda item: (not item["classifies"], -float(item.get("value") or 0)))
+        return compact[:top] or None
+
     def describe_catalog(self, client: str) -> str:
+        """Describe which sources exist, naming the tool that reads each one."""
         validation = self.validate_client(client)
-        compact = {
-            key: {
+        predictive_allowed = predictive_module_allows(client)
+        compact = {}
+        for key, value in validation["datasets"].items():
+            # Do not advertise a source the active client is not allowed to read.
+            if key.startswith("predictive_") and not predictive_allowed:
+                continue
+            columns = value.get("columns", [])
+            compact[key] = {
                 "available": value["exists"],
                 "valid": value["valid"],
                 "rows": value.get("rows", 0),
-                "columns": value.get("columns", []),
+                "read_with": DATASET_TOOLS.get(key, "sin herramienta directa"),
+                "columns": columns[:40],
+                "columns_truncated": len(columns) > 40,
             }
-            for key, value in validation["datasets"].items()
-        }
         return json.dumps(compact, ensure_ascii=False, default=str)
+
+    def describe_dataset(self, client: str, dataset: str = "") -> str:
+        """Schema plus the real filter vocabulary, so a failed guess can be corrected.
+
+        This is the recovery step: when a query returns no rows or rejects an
+        argument, the agent reads the actual values a column holds instead of
+        guessing again. Values come from the data, never from a hardcoded list.
+        """
+        requested = str(dataset or "").strip().lower()
+        if requested and requested not in DATASET_MAP:
+            raise CampbellDataError(
+                f"Dataset no registrado: {requested}. "
+                f"Disponibles: {', '.join(sorted(DATASET_MAP))}"
+            )
+        keys = [requested] if requested else list(DATASET_MAP)
+        predictive_allowed = predictive_module_allows(client)
+
+        described: dict[str, Any] = {}
+        for key in keys:
+            if key.startswith("predictive_") and not predictive_allowed:
+                continue
+            path = self.dataset_path(key, client)
+            entry: dict[str, Any] = {
+                "label": DATASET_MAP[key].label,
+                "available": path.exists(),
+                "read_with": DATASET_TOOLS.get(key, "sin herramienta directa"),
+            }
+            if not path.exists():
+                entry["detail"] = "La fuente no existe para el cliente activo"
+                described[key] = entry
+                continue
+            try:
+                probe = self._probe_frame(path)
+                entry["rows"] = probe["rows"]
+                entry["columns"] = probe["columns"][:60]
+                entry["columns_truncated"] = len(probe["columns"]) > 60
+                # Vocabulary is only read when a single dataset is requested: it needs
+                # the full frame, and the whole catalogue would be needlessly heavy.
+                if requested:
+                    entry["filters"] = self._filter_vocabulary(key, client)
+            except Exception as exc:
+                entry["error"] = type(exc).__name__
+            described[key] = entry
+
+        return json.dumps(
+            {
+                "datasets": described,
+                "note": (
+                    "Usa estos nombres y valores exactos al reintentar. Los filtros de "
+                    "texto ignoran mayusculas y acentos. Si un valor no aparece aqui, "
+                    "no existe en la fuente: dilo en lugar de aproximar."
+                ),
+            },
+            ensure_ascii=False,
+            default=str,
+        )
+
+    def _filter_vocabulary(self, key: str, client: str) -> dict[str, Any]:
+        """Allowed values for each filter parameter of one dataset."""
+        specs = DATASET_FILTERS.get(key, ())
+        if not specs:
+            return {}
+        frame = self.load(key, client)
+        vocabulary: dict[str, Any] = {}
+        for spec in specs:
+            column = self._resolve_column(frame, spec.columns)
+            if not column:
+                vocabulary[spec.parameter] = {"supported": False}
+                continue
+            entry: dict[str, Any] = {"supported": True, "column": column}
+            if spec.kind in {"category", "unit"}:
+                values = list(self._distribution(frame, column, top=25))
+                entry["values"] = values
+                entry["values_truncated"] = len(values) >= 25
+            vocabulary[spec.parameter] = entry
+        return vocabulary
 
     def query_alerts(
         self,
@@ -303,6 +722,8 @@ class DashboardDataRepository:
         system: str = "",
         component: str = "",
         trigger_type: str = "",
+        subsystem: str = "",
+        trigger_var: str = "",
         start_date: str = "",
         end_date: str = "",
         limit: int = 20,
@@ -311,52 +732,82 @@ class DashboardDataRepository:
         date_col = self._resolve_column(frame, ("Timestamp", "Fecha", "event_ts"))
         unit_col = self._resolve_column(frame, ("UnitId", "Unit", "unit_id"))
         system_col = self._resolve_column(frame, ("sistema", "System", "system"))
+        subsystem_col = self._resolve_column(frame, ("subsistema", "SubSystem", "Subsystem"))
         component_col = self._resolve_column(frame, ("componente", "Component", "component"))
         trigger_col = self._resolve_column(frame, ("Trigger_type", "Trigger", "trigger_type"))
-        frame, _, window = self.filter_date_window(
+        trigger_var_col = self._resolve_column(frame, ("Trigger_Var", "Trigger", "trigger_var"))
+        alert_id_col = self._resolve_column(frame, ("FusionID", "AlertID", "alert_id"))
+        frame, dates, window = self.filter_date_window(
             frame,
             date_col,
             days=days,
             start_date=start_date,
             end_date=end_date,
         )
+        windowed = frame
         if unit_id and unit_col:
-            frame = frame[frame[unit_col].astype(str).str.casefold() == unit_id.casefold()]
-        if system and system_col:
-            frame = frame[
-                frame[system_col].astype(str).str.contains(system, case=False, na=False)
-            ]
-        if component and component_col:
-            frame = frame[
-                frame[component_col].astype(str).str.contains(component, case=False, na=False)
-            ]
-        if trigger_type and trigger_col:
-            frame = frame[
-                frame[trigger_col].astype(str).str.contains(trigger_type, case=False, na=False)
-            ]
+            frame = self._filter_unit(frame, unit_col, unit_id)
+        filters = (
+            ("system", system, system_col),
+            ("subsystem", subsystem, subsystem_col),
+            ("component", component, component_col),
+            ("trigger_type", trigger_type, trigger_col),
+            ("trigger_var", trigger_var, trigger_var_col),
+        )
+        for _, value, column in filters:
+            if value and column:
+                frame = self._filter_contains(frame, column, value)
         if date_col:
             frame = frame.sort_values(date_col, ascending=False)
 
         summary: dict[str, Any] = {"total": int(len(frame)), "window": window}
-        if unit_col:
-            summary["by_unit"] = frame[unit_col].value_counts().head(10).to_dict()
-        if system_col:
-            summary["by_system"] = frame[system_col].value_counts().head(10).to_dict()
-        if component_col:
-            summary["by_component"] = frame[component_col].value_counts().head(10).to_dict()
-        if trigger_col:
-            summary["by_trigger"] = frame[trigger_col].value_counts().head(10).to_dict()
+        if frame.empty:
+            summary["filter_hints"] = self._filter_hints(
+                windowed,
+                [(name, value, column) for name, value, column in filters if value and column]
+                + ([("unit_id", unit_id, unit_col)] if unit_id and unit_col else []),
+            )
+        for label, column in (
+            ("by_unit", unit_col),
+            ("by_system", system_col),
+            ("by_subsystem", subsystem_col),
+            ("by_component", component_col),
+            ("by_trigger_type", trigger_col),
+            ("by_trigger_var", trigger_var_col),
+            ("by_source_type", self._resolve_column(frame, ("SourceType", "source_type"))),
+        ):
+            if column:
+                summary[label] = self._distribution(frame, column)
+        if date_col and dates is not None and not frame.empty:
+            aligned = dates.loc[frame.index].dropna()
+            if not aligned.empty:
+                summary["by_month"] = {
+                    str(key): int(value)
+                    for key, value in aligned.dt.to_period("M").astype(str).value_counts().sort_index().items()
+                }
         record_columns = [
+            alert_id_col,
+            self._resolve_column(frame, ("TelemetryID", "telemetry_id")),
             date_col,
             unit_col,
             system_col,
-            self._resolve_column(frame, ("subsistema", "Subsystem")),
+            subsystem_col,
             component_col,
             trigger_col,
+            trigger_var_col,
             self._resolve_column(frame, ("mensaje_ia", "Description", "Descripcion")),
         ]
         summary["records"] = self._records(
             frame, [value for value in record_columns if value], self._clamp(limit, 1, 50)
+        )
+        summary["note"] = (
+            "records es una muestra ordenada de mas reciente a mas antigua; "
+            "usa total y las distribuciones para conteos y rankings. "
+            "Para el valor medido de la senal que disparo una alerta llama a "
+            "query_alert_detail pasando unit_id y, si la conoces, la variable de "
+            "Trigger_Var como trigger. El identificador de union con el detalle es "
+            "TelemetryID y solo es unico dentro de un mismo equipo, por lo que unit_id "
+            "es obligatorio para no mezclar equipos."
         )
         return json.dumps(summary, ensure_ascii=False, default=str)
 
@@ -385,17 +836,17 @@ class DashboardDataRepository:
             start_date=start_date,
             end_date=end_date,
         )
+        windowed = frame
         if unit_id and unit_col:
-            frame = frame[frame[unit_col].astype(str).str.casefold() == unit_id.casefold()]
-        for value, column in (
-            (system, system_col),
-            (component, component_col),
-            (action_type, action_col),
-        ):
+            frame = self._filter_unit(frame, unit_col, unit_id)
+        filters = (
+            ("system", system, system_col),
+            ("component", component, component_col),
+            ("action_type", action_type, action_col),
+        )
+        for _, value, column in filters:
             if value and column:
-                frame = frame[
-                    frame[column].astype(str).str.contains(value, case=False, na=False)
-                ]
+                frame = self._filter_contains(frame, column, value)
         if date_col:
             frame = frame.sort_values(date_col, ascending=False)
         columns = [
@@ -406,77 +857,593 @@ class DashboardDataRepository:
             component_col,
             self._resolve_column(frame, ("action_detail_clean", "record_original_text")),
         ]
-        payload = {
+        payload: dict[str, Any] = {
             "total": int(len(frame)),
             "window": window,
-            "by_unit": frame[unit_col].value_counts().head(10).to_dict() if unit_col else {},
-            "by_system": frame[system_col].value_counts().head(10).to_dict() if system_col else {},
-            "by_component": (
-                frame[component_col].value_counts().head(10).to_dict()
-                if component_col
-                else {}
-            ),
-            "by_action_type": (
-                frame[action_col].value_counts().head(10).to_dict() if action_col else {}
-            ),
+            "by_unit": self._distribution(frame, unit_col),
+            "by_system": self._distribution(frame, system_col),
+            "by_component": self._distribution(frame, component_col),
+            "by_action_type": self._distribution(frame, action_col),
             "records": self._records(
                 frame, [value for value in columns if value], self._clamp(limit, 1, 50)
             ),
         }
+        if frame.empty:
+            payload["filter_hints"] = self._filter_hints(
+                windowed,
+                [(name, value, column) for name, value, column in filters if value and column]
+                + ([("unit_id", unit_id, unit_col)] if unit_id and unit_col else []),
+            )
         return json.dumps(payload, ensure_ascii=False, default=str)
 
     def query_oil_status(self, client: str, unit_id: str = "", limit: int = 20) -> str:
         frame = self.load("oil_machine_status", client).copy()
         unit_col = self._resolve_column(frame, ("unit_id", "unitId", "UnitId"))
         if unit_id and unit_col:
-            frame = frame[frame[unit_col].astype(str).str.casefold() == unit_id.casefold()]
+            frame = self._filter_unit(frame, unit_col, unit_id)
         priority_col = self._resolve_column(frame, ("priority_score", "machine_score"))
+        status_col = self._resolve_column(frame, ("overall_status", "report_status"))
         if priority_col:
             frame = frame.sort_values(priority_col, ascending=False)
         columns = [
             unit_col,
             self._resolve_column(frame, ("latest_sample_date",)),
-            self._resolve_column(frame, ("overall_status",)),
+            status_col,
             self._resolve_column(frame, ("machine_score",)),
             priority_col,
+            self._resolve_column(frame, ("components_alerta",)),
+            self._resolve_column(frame, ("components_anormal",)),
             self._resolve_column(frame, ("machine_ai_recommendation",)),
+        ]
+        payload: dict[str, Any] = {
+            "total_units": int(len(frame)),
+            "by_status": self._distribution(frame, status_col, top=12),
+            "records": self._records(
+                frame, [value for value in columns if value], self._clamp(limit, 1, 50)
+            ),
+            "note": (
+                "Una fila por equipo con su muestra de aceite mas reciente. Para el detalle "
+                "por componente y los ensayos fuera de limite usa query_oil_components."
+            ),
+        }
+        date_col = self._resolve_column(frame, ("latest_sample_date",))
+        if date_col and not frame.empty:
+            sample_dates = pd.to_datetime(frame[date_col], errors="coerce").dropna()
+            if not sample_dates.empty:
+                payload["sample_window"] = {
+                    "oldest": sample_dates.min().isoformat(),
+                    "newest": sample_dates.max().isoformat(),
+                }
+        return json.dumps(payload, ensure_ascii=False, default=str)
+
+    def query_telemetry_health(
+        self,
+        client: str,
+        unit_id: str = "",
+        latest_only: bool = True,
+        limit: int = 20,
+    ) -> str:
+        """Return telemetry machine health, by default only the latest evaluated week."""
+        frame = self.load("telemetry_machine_status", client).copy()
+        unit_col = self._resolve_column(frame, ("unit_id", "unitId", "UnitId"))
+        week_col = self._resolve_column(frame, ("evaluation_week",))
+        year_col = self._resolve_column(frame, ("evaluation_year",))
+        status_col = self._resolve_column(frame, ("overall_status", "component_status"))
+        priority_col = self._resolve_column(frame, ("priority_score", "machine_score"))
+        if unit_id and unit_col:
+            frame = self._filter_unit(frame, unit_col, unit_id)
+
+        evaluated: dict[str, Any] = {}
+        if latest_only and unit_col and week_col:
+            order = [column for column in (year_col, week_col) if column]
+            ranked = frame.copy()
+            for column in order:
+                ranked[column] = pd.to_numeric(ranked[column], errors="coerce")
+            ranked = ranked.sort_values(order, ascending=True)
+            frame = ranked.groupby(unit_col, dropna=False).tail(1).copy()
+            if not frame.empty:
+                evaluated = {
+                    "latest_year": self._scalar(frame[year_col].max()) if year_col else None,
+                    "latest_week": self._scalar(frame[week_col].max()) if week_col else None,
+                    "weeks_present": sorted(
+                        {self._scalar(value) for value in frame[week_col].dropna().unique()}
+                    )[:12],
+                }
+        if priority_col:
+            frame = frame.sort_values(priority_col, ascending=False)
+
+        columns = [
+            unit_col,
+            week_col,
+            year_col,
+            status_col,
+            self._resolve_column(frame, ("machine_score",)),
+            priority_col,
+            self._resolve_column(frame, ("components_alerta",)),
+            self._resolve_column(frame, ("components_anormal",)),
+            self._resolve_column(frame, ("components_insufficient",)),
         ]
         return json.dumps(
             {
-                "total": int(len(frame)),
+                "total_rows": int(len(frame)),
+                "scope": "ultima semana evaluada por equipo" if latest_only else "historico completo",
+                "evaluation": evaluated,
+                "by_status": self._distribution(frame, status_col, top=12),
                 "records": self._records(
                     frame, [value for value in columns if value], self._clamp(limit, 1, 50)
+                ),
+                "note": (
+                    "components_anormal y components_alerta son conteos. Para saber QUE "
+                    "componente y QUE senal lo dispara usa query_telemetry_components."
                 ),
             },
             ensure_ascii=False,
             default=str,
         )
 
-    def query_telemetry_health(
-        self, client: str, unit_id: str = "", limit: int = 20
+    @staticmethod
+    def _scalar(value: Any) -> Any:
+        """Convert a numpy/pandas scalar into a JSON-friendly Python value."""
+        if value is None or (isinstance(value, float) and pd.isna(value)):
+            return None
+        if hasattr(value, "item"):
+            try:
+                return value.item()
+            except (AttributeError, ValueError):
+                return str(value)
+        return value
+
+    def query_telemetry_components(
+        self,
+        client: str,
+        unit_id: str = "",
+        component: str = "",
+        status: str = "",
+        latest_only: bool = True,
+        limit: int = 25,
     ) -> str:
-        frame = self.load("telemetry_machine_status", client).copy()
+        """Component-level telemetry condition including the signals that triggered it."""
+        frame = self.load("telemetry_classified", client).copy()
         unit_col = self._resolve_column(frame, ("unit_id", "unitId", "UnitId"))
+        component_col = self._resolve_column(frame, ("component", "componentName"))
+        status_col = self._resolve_column(frame, ("component_status", "overall_status"))
+        week_col = self._resolve_column(frame, ("evaluation_week",))
+        year_col = self._resolve_column(frame, ("evaluation_year",))
+
+        if latest_only and unit_col and component_col and week_col:
+            ranked = frame.copy()
+            order = [column for column in (year_col, week_col) if column]
+            for column in order:
+                ranked[column] = pd.to_numeric(ranked[column], errors="coerce")
+            frame = (
+                ranked.sort_values(order, ascending=True)
+                .groupby([unit_col, component_col], dropna=False)
+                .tail(1)
+                .copy()
+            )
         if unit_id and unit_col:
-            frame = frame[frame[unit_col].astype(str).str.casefold() == unit_id.casefold()]
-        priority_col = self._resolve_column(frame, ("priority_score", "machine_score"))
-        if priority_col:
-            frame = frame.sort_values(priority_col, ascending=False)
+            frame = self._filter_unit(frame, unit_col, unit_id)
+        for value, column in ((component, component_col), (status, status_col)):
+            if value and column:
+                frame = self._filter_contains(frame, column, value)
+
+        severity = {"Anormal": 0, "Alerta": 1, "Insuficiente": 2, "Normal": 3}
+        if status_col and not frame.empty:
+            frame = frame.assign(
+                __severity=frame[status_col].map(lambda value: severity.get(str(value), 4))
+            ).sort_values("__severity")
         columns = [
             unit_col,
-            self._resolve_column(frame, ("evaluation_week",)),
-            self._resolve_column(frame, ("evaluation_year",)),
-            self._resolve_column(frame, ("overall_status",)),
-            self._resolve_column(frame, ("machine_score",)),
-            priority_col,
-            self._resolve_column(frame, ("components_alerta",)),
-            self._resolve_column(frame, ("components_anormal",)),
+            component_col,
+            status_col,
+            self._resolve_column(frame, ("component_score",)),
+            self._resolve_column(frame, ("criticality",)),
+            self._resolve_column(frame, ("triggering_signals",)),
+            self._resolve_column(frame, ("signal_coverage",)),
+            week_col,
+            year_col,
         ]
+        payload: dict[str, Any] = {
+            "total_rows": int(len(frame)),
+            "scope": "ultima semana evaluada por equipo y componente" if latest_only else "historico",
+            "by_status": self._distribution(frame, status_col, top=12),
+            "by_component": self._distribution(frame, component_col, top=15),
+            "records": self._records(
+                frame, [value for value in columns if value], self._clamp(limit, 1, 60)
+            ),
+            "note": (
+                "triggering_signals nombra las senales que llevaron el componente a ese estado; "
+                "no es una lectura instantanea del sensor."
+            ),
+        }
+        if status_col and component_col and unit_col and not frame.empty:
+            flagged = frame[frame[status_col].astype(str).isin(("Anormal", "Alerta"))]
+            payload["flagged_units"] = (
+                self._distribution(flagged, unit_col, top=15) if not flagged.empty else {}
+            )
+        return json.dumps(payload, ensure_ascii=False, default=str)
+
+    def query_oil_components(
+        self,
+        client: str,
+        unit_id: str = "",
+        component: str = "",
+        status: str = "",
+        latest_only: bool = True,
+        limit: int = 25,
+    ) -> str:
+        """Component-level oil condition with breached essays and severity."""
+        frame = self.load("oil_classified", client).copy()
+        unit_col = self._resolve_column(frame, ("unitId", "unit_id", "UnitId"))
+        component_col = self._resolve_column(frame, ("componentName", "component"))
+        normalized_col = self._resolve_column(frame, ("componentNameNormalized",))
+        status_col = self._resolve_column(frame, ("report_status", "overall_status"))
+        date_col = self._resolve_column(frame, ("sampleDate", "reportDate"))
+
+        if date_col:
+            frame[date_col] = pd.to_datetime(frame[date_col], errors="coerce")
+        if latest_only and unit_col and component_col and date_col:
+            frame = (
+                frame.sort_values(date_col, ascending=True)
+                .groupby([unit_col, component_col], dropna=False)
+                .tail(1)
+                .copy()
+            )
+        if unit_id and unit_col:
+            frame = self._filter_unit(frame, unit_col, unit_id)
+        for value, column in (
+            (component, normalized_col or component_col),
+            (status, status_col),
+        ):
+            if value and column:
+                frame = self._filter_contains(frame, column, value)
+
+        severity = {"Anormal": 0, "Alerta": 1, "Normal": 2}
+        if status_col and not frame.empty:
+            frame = frame.assign(
+                __severity=frame[status_col].map(lambda value: severity.get(str(value), 3))
+            ).sort_values(["__severity", date_col] if date_col else ["__severity"])
+        columns = [
+            unit_col,
+            component_col,
+            normalized_col,
+            status_col,
+            date_col,
+            self._resolve_column(frame, ("severity_score",)),
+            self._resolve_column(frame, ("breached_essays",)),
+            self._resolve_column(frame, ("anomalyType",)),
+            self._resolve_column(frame, ("daysSincePrevious",)),
+            self._resolve_column(frame, ("ai_recommendation",)),
+        ]
+        payload: dict[str, Any] = {
+            "total_rows": int(len(frame)),
+            "scope": "muestra mas reciente por equipo y componente" if latest_only else "historico",
+            "by_status": self._distribution(frame, status_col, top=12),
+            "by_component": self._distribution(frame, normalized_col or component_col, top=15),
+            "records": self._records(
+                frame, [value for value in columns if value], self._clamp(limit, 1, 60)
+            ),
+            "note": (
+                "breached_essays lista los ensayos fuera de limite de esa muestra, con su "
+                "valor y umbral; classifies indica si pesa en la clasificacion del estado. "
+                "ai_recommendation es una recomendacion automatica, no trabajo ejecutado."
+            ),
+        }
+        essays_col = self._resolve_column(frame, ("breached_essays",))
+        if essays_col:
+            source = frame[essays_col].head(self._clamp(limit, 1, 60)).tolist()
+            for record, raw in zip(payload["records"], source):
+                record[essays_col] = self._compact_breached_essays(raw)
+        if date_col and not frame.empty:
+            valid = frame[date_col].dropna()
+            if not valid.empty:
+                payload["sample_window"] = {
+                    "oldest": valid.min().isoformat(),
+                    "newest": valid.max().isoformat(),
+                }
+        return json.dumps(payload, ensure_ascii=False, default=str)
+
+    def query_alert_detail(
+        self,
+        client: str,
+        alert_id: str = "",
+        unit_id: str = "",
+        trigger: str = "",
+        limit: int = 10,
+    ) -> str:
+        """Measured value and applicable limit for the signal that raised an alert."""
+        frame = self.load("alerts_detail", client).copy()
+        alert_col = self._resolve_column(frame, ("AlertID", "alert_id"))
+        unit_col = self._resolve_column(frame, ("Unit", "UnitId", "unit_id"))
+        trigger_col = self._resolve_column(frame, ("Trigger", "trigger"))
+        time_col = self._resolve_column(frame, ("TimeStart", "Alert_TimeStart", "Fecha"))
+        state_col = self._resolve_column(frame, ("State",))
+
+        if not (alert_id or unit_id or trigger):
+            raise CampbellDataError(
+                "query_alert_detail requiere alert_id, unit_id o trigger"
+            )
+        if unit_id and unit_col:
+            frame = self._filter_unit(frame, unit_col, unit_id)
+        if alert_id and alert_col:
+            # The alerts source exposes FusionID ("F-63-1783624380") while the detail table
+            # keys on the numeric telemetry id, and that id repeats across units.
+            resolved = self._normalize_alert_id(alert_id)
+            frame = frame[frame[alert_col].astype(str).str.casefold() == resolved.casefold()]
+        if trigger and trigger_col:
+            frame = self._filter_contains(frame, trigger_col, trigger)
+        if frame.empty:
+            available = self.load("alerts_detail", client)
+            if unit_id and unit_col:
+                available = self._filter_unit(available, unit_col, unit_id)
+            return json.dumps(
+                {
+                    "alerts_matched": 0,
+                    "records": [],
+                    "filter_hints": {
+                        "detail": (
+                            "Sin filas de detalle para ese filtro. El identificador de union "
+                            "es TelemetryID (no FusionID) y solo es unico dentro de un equipo. "
+                            "Reintenta con unit_id mas el nombre exacto de la senal."
+                        ),
+                        "available_triggers": list(
+                            self._distribution(available, trigger_col, top=15)
+                        ),
+                    },
+                },
+                ensure_ascii=False,
+            )
+        if time_col:
+            frame[time_col] = pd.to_datetime(frame[time_col], errors="coerce")
+
+        # The wide detail table is a per-sample time series; summarize one row per alert
+        # so the analyst reports a peak against its limit instead of raw sample noise.
+        # Unit is part of the key because AlertID is only unique within a unit.
+        group_keys = [column for column in (unit_col, alert_col, trigger_col) if column]
+        if not group_keys:
+            raise CampbellDataError("El detalle de alertas no expone AlertID ni Trigger")
+
+        rows: list[dict[str, Any]] = []
+        grouped = frame.groupby(group_keys, dropna=False, sort=False)
+        for keys, chunk in grouped:
+            keys = keys if isinstance(keys, tuple) else (keys,)
+            mapping = dict(zip(group_keys, keys))
+            signal = str(mapping.get(trigger_col, "")) if trigger_col else ""
+            value_col = f"{signal}_Value" if signal else None
+            upper_col = f"{signal}_Upper_Limit" if signal else None
+            lower_col = f"{signal}_Lower_Limit" if signal else None
+
+            record: dict[str, Any] = {
+                "alert_id": self._scalar(mapping.get(alert_col)) if alert_col else None,
+                "unit_id": (
+                    self._scalar(chunk[unit_col].dropna().iloc[0])
+                    if unit_col and not chunk[unit_col].dropna().empty
+                    else None
+                ),
+                "trigger": signal or None,
+                "samples": int(len(chunk)),
+            }
+            if time_col:
+                valid = chunk[time_col].dropna()
+                record["start"] = valid.min().isoformat() if not valid.empty else None
+                record["end"] = valid.max().isoformat() if not valid.empty else None
+            if state_col:
+                record["machine_states"] = self._distribution(chunk, state_col, top=4)
+
+            upper = (
+                pd.to_numeric(chunk[upper_col], errors="coerce").dropna()
+                if upper_col and upper_col in chunk.columns
+                else pd.Series(dtype="float64")
+            )
+            lower = (
+                pd.to_numeric(chunk[lower_col], errors="coerce").dropna()
+                if lower_col and lower_col in chunk.columns
+                else pd.Series(dtype="float64")
+            )
+            if value_col and value_col in chunk.columns:
+                values = pd.to_numeric(chunk[value_col], errors="coerce").dropna()
+                if not values.empty:
+                    record.update(
+                        {
+                            "peak_value": round(float(values.max()), 3),
+                            "min_value": round(float(values.min()), 3),
+                            "mean_value": round(float(values.mean()), 3),
+                        }
+                    )
+                    if not upper.empty:
+                        threshold = float(upper.max())
+                        record["upper_limit"] = round(threshold, 3)
+                        record["samples_above_limit"] = int((values > threshold).sum())
+                        record["peak_exceedance"] = round(float(values.max()) - threshold, 3)
+                    if not lower.empty:
+                        threshold = float(lower.min())
+                        record["lower_limit"] = round(threshold, 3)
+                        record["samples_below_limit"] = int((values < threshold).sum())
+            rows.append(record)
+
+        rows.sort(key=lambda item: str(item.get("end") or ""), reverse=True)
+        payload = {
+            "alerts_matched": len(rows),
+            "detail_rows_scanned": int(len(frame)),
+            "by_trigger": (
+                self._distribution(frame, trigger_col)
+            ),
+            "records": rows[: self._clamp(limit, 1, 30)],
+            "note": (
+                "Una fila por alerta y senal. peak_value es la lectura maxima registrada y "
+                "upper_limit/lower_limit el umbral aplicable cuando la fuente lo publica. "
+                "Si el umbral viene vacio, no lo inventes. No afirmes unidades de medida "
+                "que la fuente no declara."
+            ),
+        }
+        return json.dumps(payload, ensure_ascii=False, default=str)
+
+    def query_maintenance_summary(
+        self, client: str, unit_id: str = "", limit: int = 10
+    ) -> str:
+        """Weekly natural-language maintenance summaries per unit."""
+        frame = self.load("maintenance_summary", client).copy()
+        unit_col = self._resolve_column(frame, ("UnitId", "machine_code", "machine_id"))
+        week_col = self._resolve_column(frame, ("Semana", "Week", "week"))
+        summary_col = self._resolve_column(frame, ("Summary", "Resumen"))
+        tasks_col = self._resolve_column(frame, ("Tasks_List", "Tareas"))
+        if unit_id and unit_col:
+            frame = self._filter_unit(frame, unit_col, unit_id)
+        if week_col:
+            frame = frame.sort_values(week_col, ascending=False)
+        columns = [value for value in (unit_col, week_col, summary_col, tasks_col) if value]
         return json.dumps(
             {
-                "total": int(len(frame)),
-                "records": self._records(
-                    frame, [value for value in columns if value], self._clamp(limit, 1, 50)
+                "total_rows": int(len(frame)),
+                "by_unit": (
+                    self._distribution(frame, unit_col, top=15)
+                ),
+                "records": self._records(frame, columns, self._clamp(limit, 1, 20)),
+                "note": (
+                    "Resumen redactado por semana. Para conteos por tipo de accion, sistema "
+                    "o fecha exacta usa query_maintenance."
+                ),
+            },
+            ensure_ascii=False,
+            default=str,
+        )
+
+    _PREDICTIVE_DATASETS = {
+        "motor": "predictive_motor",
+        "transmision": "predictive_transmission",
+        "transmission": "predictive_transmission",
+    }
+
+    def query_predictive_risk(
+        self,
+        client: str,
+        domain: str = "motor",
+        unit_id: str = "",
+        limit: int = 15,
+    ) -> str:
+        """Latest predictive-model ranking and failure-mode risks per unit."""
+        key = self._PREDICTIVE_DATASETS.get(str(domain or "").strip().lower())
+        if key is None:
+            raise CampbellDataError(
+                "domain de query_predictive_risk debe ser 'motor' o 'transmision'"
+            )
+        # Mirror the dashboard's module access control: the Predictive section is limited to
+        # an allowlist of clients, so the agent must not read it for anyone else.
+        if not predictive_module_allows(client):
+            raise CampbellDataError(
+                "El modulo predictivo no esta habilitado para el cliente activo"
+            )
+        frame = self.load(key, client).copy()
+        unit_col = self._resolve_column(frame, ("Unit", "unitId", "unit_id"))
+        date_col = self._resolve_column(frame, ("Fecha", "sampleDate"))
+        ranking_col = self._resolve_column(frame, ("ranking",))
+        if ranking_col is None:
+            raise CampbellDataError("La fuente predictiva no expone la columna ranking")
+
+        resolved_domain = "transmision" if key.endswith("transmission") else "motor"
+        risk_columns = [
+            str(column) for column in frame.columns if str(column).endswith("_risk")
+        ]
+        frame[ranking_col] = pd.to_numeric(frame[ranking_col], errors="coerce")
+        ranked_rows = int(frame[ranking_col].notna().sum())
+        if ranked_rows == 0:
+            # The source exists but the model has not published a ranking for this domain.
+            # Say so explicitly instead of letting a caller substitute another source.
+            return json.dumps(
+                {
+                    "domain": resolved_domain,
+                    "source_available": True,
+                    "ranking_available": False,
+                    "total_units": 0,
+                    "risk_modes_available": risk_columns,
+                    "records": [],
+                    "note": (
+                        "La fuente predictiva de este dominio existe pero no tiene ranking "
+                        "calculado. Informalo asi al usuario y no lo sustituyas por telemetria, "
+                        "aceite o alertas como si fuera un resultado predictivo."
+                    ),
+                },
+                ensure_ascii=False,
+            )
+        frame = frame[frame[ranking_col].notna()]
+        if date_col:
+            frame[date_col] = pd.to_datetime(frame[date_col], errors="coerce")
+        if unit_col and date_col:
+            frame = (
+                frame.sort_values(date_col, ascending=True)
+                .groupby(unit_col, dropna=False)
+                .tail(1)
+                .copy()
+            )
+        if unit_id and unit_col:
+            frame = self._filter_unit(frame, unit_col, unit_id)
+        if frame.empty:
+            return json.dumps(
+                {
+                    "domain": resolved_domain,
+                    "source_available": True,
+                    "ranking_available": True,
+                    "total_units": 0,
+                    "records": [],
+                    "note": "Sin filas para el filtro solicitado.",
+                },
+                ensure_ascii=False,
+            )
+        frame = frame.sort_values(ranking_col, ascending=False)
+        rows: list[dict[str, Any]] = []
+        for _, row in frame.head(self._clamp(limit, 1, 30)).iterrows():
+            score = float(row[ranking_col])
+            risks = {
+                column.removesuffix("_risk"): self._scalar(row.get(column))
+                for column in risk_columns
+                if pd.notna(row.get(column))
+            }
+            top_risks = {
+                name: round(float(value), 1)
+                for name, value in sorted(
+                    (
+                        (name, value)
+                        for name, value in risks.items()
+                        if isinstance(value, (int, float))
+                    ),
+                    key=lambda item: item[1],
+                    reverse=True,
+                )[:5]
+            }
+            rows.append(
+                {
+                    "unit_id": self._scalar(row.get(unit_col)) if unit_col else None,
+                    "evaluated_at": (
+                        row[date_col].isoformat()
+                        if date_col and pd.notna(row.get(date_col))
+                        else None
+                    ),
+                    "ranking": round(score, 2),
+                    "band": predictive_band(score),
+                    "oil_hour_range": self._scalar(row.get("oilHourRange")),
+                    "top_risks": top_risks,
+                }
+            )
+
+        bands: dict[str, int] = {}
+        for value in frame[ranking_col]:
+            bands[predictive_band(float(value))] = bands.get(predictive_band(float(value)), 0) + 1
+        return json.dumps(
+            {
+                "domain": resolved_domain,
+                "source_available": True,
+                "ranking_available": True,
+                "total_units": int(len(frame)),
+                "ranking_direction": "mayor ranking = mayor prioridad de riesgo",
+                "bands": {
+                    "definicion": "<35 Saludable, 35-54.9 Monitoreo, 55-74.9 Prioridad alta, >=75 Critico",
+                    "distribucion": bands,
+                },
+                "risk_modes_available": risk_columns,
+                "records": rows,
+                "note": (
+                    "Salida de un modelo predictivo, no una alerta confirmada ni una medicion "
+                    "directa. Requiere validacion en terreno antes de intervenir."
                 ),
             },
             ensure_ascii=False,
