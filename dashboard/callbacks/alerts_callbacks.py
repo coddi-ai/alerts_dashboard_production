@@ -45,6 +45,7 @@ from dashboard.components.alerts_report import (
     alert_summary,
     filter_alert_rows,
     prepare_alert_rows,
+    translate_alert_component,
     translate_alert_system,
 )
 from dashboard.tabs.tab_alerts_general import create_summary_stats_display, create_layout as create_general_layout
@@ -301,7 +302,7 @@ def initialize_alert_dropdown(client: str):
         # Create dropdown options
         options = []
         for _, row in alerts_df.sort_values('Timestamp', ascending=False).iterrows():
-            label = f"{row['FusionID']} | {row['Timestamp'].strftime('%Y-%m-%d %H:%M')} | {row['UnitId']} | {row['componente']}"
+            label = f"{row['FusionID']} | {row['Timestamp'].strftime('%Y-%m-%d %H:%M')} | {row['UnitId']} | {translate_alert_component(row['componente'])}"
             options.append({'label': label, 'value': row['FusionID']})
         
         logger.info(f"Dropdown initialized with {len(options)} alerts")
@@ -535,7 +536,7 @@ def filter_alert_dropdown_by_criteria(units, sistemas, has_telemetry, has_tribol
         # Create filtered options
         alert_options = []
         for _, row in filtered_df.sort_values('Timestamp', ascending=False).iterrows():
-            label = f"{row['FusionID']} | {row['Timestamp'].strftime('%Y-%m-%d %H:%M')} | {row['UnitId']} | {row['componente']}"
+            label = f"{row['FusionID']} | {row['Timestamp'].strftime('%Y-%m-%d %H:%M')} | {row['UnitId']} | {translate_alert_component(row['componente'])}"
             alert_options.append({'label': label, 'value': row['FusionID']})
         
         logger.info(f"Filtered alerts: {len(alert_options)} options")
@@ -567,11 +568,11 @@ def _alert_case_header(row: pd.Series) -> html.Div:
         ], className='bg-light'),
         dbc.CardBody([
             dbc.Row([
-                dbc.Col([html.Small('Unidad', className='text-muted d-block'), html.Strong(prepared.get('UnitId', '-'))], md=2),
-                dbc.Col([html.Small('Sistema', className='text-muted d-block'), html.Strong(prepared.get('system_display', '-'))], md=2),
-                dbc.Col([html.Small('Componente', className='text-muted d-block'), html.Strong(prepared.get('componente', '-'))], md=3),
-                dbc.Col([html.Small('Fecha', className='text-muted d-block'), html.Strong(timestamp)], md=3),
-                dbc.Col([html.Small('Fuente', className='text-muted d-block'), html.Strong(prepared.get('source_display', '-'))], md=2),
+                dbc.Col([html.Small('Unidad', className='text-muted d-block text-nowrap'), html.Strong(prepared.get('UnitId', '-'))], xs=6, lg=2),
+                dbc.Col([html.Small('Sistema', className='text-muted d-block text-nowrap'), html.Strong(prepared.get('system_display', '-'))], xs=6, lg=2),
+                dbc.Col([html.Small('Componente', className='text-muted d-block text-nowrap'), html.Strong(prepared.get('component_display', '-'))], xs=6, lg=3),
+                dbc.Col([html.Small('Fecha', className='text-muted d-block text-nowrap'), html.Strong(timestamp)], xs=6, lg=3),
+                dbc.Col([html.Small('Fuente', className='text-muted d-block text-nowrap'), html.Strong(prepared.get('source_display', '-'))], xs=6, lg=2),
             ], className='g-3'),
             html.Div([
                 html.Strong('Señal / variable: ', className='text-muted'),

@@ -11,7 +11,11 @@ from dashboard.components.alerts_charts import (
     create_sensor_trends_chart_golden,
 )
 from dashboard.callbacks.alerts_callbacks import _select_telemetry_alert_data
-from dashboard.components.alerts_report import prepare_alert_rows, translate_alert_system
+from dashboard.components.alerts_report import (
+    prepare_alert_rows,
+    translate_alert_component,
+    translate_alert_system,
+)
 from dashboard.components.alerts_tables import parse_ia_message_sections
 from src.data.loaders import _load_alerts_data_cached, load_alerts_data
 
@@ -49,6 +53,13 @@ def test_capstone_canonical_signals_and_structured_ai_are_client_facing():
     assert "Presión del refrigerante" in sections["acciones"]
     assert rows.loc[0, "component_display"] == "Motor"
     assert rows.loc[0, "signal_display"] == "Velocidad del motor"
+
+
+def test_component_labels_are_consistent_for_mixed_source_casing():
+    assert translate_alert_component("engine") == "Motor"
+    assert translate_alert_component("Engine") == "Motor"
+    assert translate_alert_component("lubrication") == "Lubricación"
+    assert translate_alert_component("Lubrication") == "Lubricación"
 
 
 def test_capstone_loader_uses_configured_data_root(tmp_path, monkeypatch):
