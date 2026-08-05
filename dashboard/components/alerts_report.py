@@ -10,18 +10,9 @@ from typing import Any, Iterable, Optional
 
 import pandas as pd
 
-from dashboard.components.alerts_charts import FEATURE_NAMES_ES
+from dashboard.components.alerts_charts import FEATURE_NAMES_ES, translate_system_label
 from dashboard.components.alerts_tables import parse_ia_message_sections
 
-
-SYSTEM_TRANSLATION = {
-    "Direccion": "Dirección",
-    "Dirección": "Dirección",
-    "Tren de Fuerza": "Tren de fuerza",
-    "Motor": "Motor",
-    "motor": "Motor",
-    "Frenos": "Frenos",
-}
 
 SOURCE_TRANSLATION = {
     "Telemetria": "Telemetría",
@@ -41,7 +32,7 @@ COMPONENT_TRANSLATION = {
 
 
 def translate_alert_system(value: Any) -> str:
-    return SYSTEM_TRANSLATION.get(str(value), str(value or "Sin sistema"))
+    return translate_system_label(value)
 
 
 def translate_alert_source(value: Any) -> str:
