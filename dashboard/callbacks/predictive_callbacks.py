@@ -50,11 +50,11 @@ def register_callbacks(app):
             if not filepath:
                 return html.P(f"No hay datos para {component}.", className="text-muted text-center")
 
-            df, df_latest, prev_ranking = _load_overview_component(filepath, component)
+            df, df_latest, prev_ranking = _load_overview_component(filepath, component, client)
             if df_latest is None or df_latest.empty:
                 return html.P(f"No hay datos disponibles para {component}.", className="text-muted text-center")
 
-            return _render_component_overview(df_latest, prev_ranking, component, client)
+            return _render_component_overview(df_latest, prev_ranking, component, client, df=df)
 
         else:
             # Render evidence shell (interactive parts handled by other callbacks)
@@ -63,9 +63,9 @@ def register_callbacks(app):
             if not filepath:
                 return html.P(f"No hay datos para {component}.", className="text-muted text-center")
 
-            df, df_latest = _load_evidence_component(filepath, component)
+            df, df_latest = _load_evidence_component(filepath, component, client)
             units = sorted(df["Unit"].unique()) if df is not None else []
-            failure_mode_options = get_failure_mode_options(component)
+            failure_mode_options = get_failure_mode_options(component, client)
 
             return html.Div([
                 # Unit selector
@@ -129,11 +129,11 @@ def register_callbacks(app):
         if not filepath:
             return no_update
 
-        df, df_latest, _ = _load_overview_component(filepath, component)
+        df, df_latest, _ = _load_overview_component(filepath, component, client)
         if df_latest is None or df_latest.empty:
             return no_update
 
-        failure_modes = get_failure_modes_dict(component)
+        failure_modes = get_failure_modes_dict(component, client)
 
         # Classify status (same logic as _render_component_overview)
         # Saludable: avg_ranking_30d < 30 AND max_fm_30d < 50
@@ -182,7 +182,7 @@ def register_callbacks(app):
             components = _discover_components(client)
             filepath = components.get(component)
             if filepath:
-                _, df_latest = _load_evidence_component(filepath, component)
+                _, df_latest = _load_evidence_component(filepath, component, client)
                 if df_latest is not None and not df_latest.empty:
                     row = df_latest[df_latest["Unit"] == selected_unit]
                     if not row.empty:
@@ -232,7 +232,7 @@ def register_callbacks(app):
                             filepath = components_map.get(component)
                             last_ev_date = None
                             if filepath:
-                                df_ev, _ = _load_evidence_component(filepath, component)
+                                df_ev, _ = _load_evidence_component(filepath, component, client)
                                 if df_ev is not None:
                                     df_ev_unit = df_ev[df_ev["Unit"] == selected_unit]
                                     if not df_ev_unit.empty:
@@ -348,7 +348,7 @@ def register_callbacks(app):
         if not filepath:
             return html.Div(html.P("No hay datos disponibles.", className="text-muted text-center", style={"padding": "40px"}))
 
-        df, df_latest = _load_evidence_component(filepath, component)
+        df, df_latest = _load_evidence_component(filepath, component, client)
         if df is None:
             return html.Div(html.P("No hay datos disponibles.", className="text-muted text-center", style={"padding": "40px"}))
 
@@ -373,11 +373,11 @@ def register_callbacks(app):
         if not filepath:
             return no_update
 
-        df, df_latest = _load_evidence_component(filepath, component)
+        df, df_latest = _load_evidence_component(filepath, component, client)
         if df is None or df_latest is None:
             return no_update
 
-        failure_modes = get_failure_modes_dict(component)
+        failure_modes = get_failure_modes_dict(component, client)
         row = df_latest[df_latest["Unit"] == selected_unit]
         if row.empty:
             return list(failure_modes.keys())[0] if failure_modes else None
@@ -408,11 +408,11 @@ def register_callbacks(app):
         if not filepath:
             return html.Div(html.P("No hay datos disponibles.", className="text-muted text-center", style={"padding": "40px"}))
 
-        df, df_latest = _load_evidence_component(filepath, component)
+        df, df_latest = _load_evidence_component(filepath, component, client)
         if df is None:
             return html.Div(html.P("No hay datos disponibles.", className="text-muted text-center", style={"padding": "40px"}))
 
-        return render_detailed_evidence(selected_unit, df, df_latest, selected_failure_mode, component)
+        return render_detailed_evidence(selected_unit, df, df_latest, selected_failure_mode, component, client)
 
     # ══════════════════════════════════════════════════════════════════════════
     # EVIDENCE: Oil chart update (when user changes variable selection)
@@ -436,12 +436,17 @@ def register_callbacks(app):
             return html.P("Seleccione al menos una variable de aceite.",
                          className="text-muted", style={"fontSize": "13px", "padding": "20px", "textAlign": "center"})
 
+        # Resolve per-client label/threshold dicts (fallback to cda if missing)
+        _ckey = (client or "cda").lower()
+        oil_labels = OIL_LABELS.get(_ckey, OIL_LABELS["cda"])
+        oil_thresholds = OIL_THRESHOLDS.get(_ckey, OIL_THRESHOLDS["cda"])
+
         components = _discover_components(client)
         filepath = components.get(component)
         if not filepath:
             return html.P("No hay datos disponibles.", className="text-muted")
 
-        df, _ = _load_evidence_component(filepath, component)
+        df, _ = _load_evidence_component(filepath, component, client)
         if df is None:
             return html.P("No hay datos disponibles.", className="text-muted")
 
@@ -451,8 +456,8 @@ def register_callbacks(app):
 
         # Always pass thresholds — the chart function shows limit lines when len(vars)==1
         fig = create_oil_timeseries_90d(
-            df_unit, selected_vars, OIL_LABELS,
-            oil_thresholds=OIL_THRESHOLDS,
+            df_unit, selected_vars, oil_labels,
+            oil_thresholds=oil_thresholds,
             oil_range=oil_range,
         )
 

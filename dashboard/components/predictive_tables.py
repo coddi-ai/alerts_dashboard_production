@@ -5,6 +5,16 @@ from dash import html
 import pandas as pd
 
 
+def _oil_date_col(df) -> str:
+    """
+    Nombre de la columna de fecha de las muestras de aceite.
+    CDA usa 'sampleDate'; Capstone no la tiene y usa 'Fecha' para todo.
+    """
+    if "sampleDate" in df.columns:
+        return "sampleDate"
+    return "Fecha"
+
+
 def create_oil_variables_table(df_unit, variables, oil_labels, oil_thresholds=None):
     """
     Crear tabla de variables de aceite con valores actuales, anteriores,
@@ -20,7 +30,8 @@ def create_oil_variables_table(df_unit, variables, oil_labels, oil_thresholds=No
         )
 
     # Obtener serie ordenada por fecha de muestra
-    df_sorted = df_unit.sort_values("sampleDate")
+    date_col = _oil_date_col(df_unit)
+    df_sorted = df_unit.sort_values(date_col)
     
     if len(df_sorted) < 1:
         return html.P(
@@ -29,7 +40,7 @@ def create_oil_variables_table(df_unit, variables, oil_labels, oil_thresholds=No
         )
 
     last_sample = df_sorted.iloc[-1]
-    last_date = last_sample.get("sampleDate")
+    last_date = last_sample.get(date_col)
 
     rows = []
 
@@ -57,7 +68,7 @@ def create_oil_variables_table(df_unit, variables, oil_labels, oil_thresholds=No
                 # Comparar con tolerancia para evitar diferencias mínimas por redondeo
                 if abs(val - current_val) > 0.001:
                     prev_val = val
-                    prev_date = sample.get("sampleDate")
+                    prev_date = sample.get(date_col)
                     break
 
         # Variación
