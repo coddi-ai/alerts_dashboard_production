@@ -153,6 +153,12 @@ def test_empty_frames_are_safe():
 
 
 def test_signal_chart_highlights_events_and_starts_at_longest_episode():
+    """Episodes fall inside the plotted samples, as the pipeline produces them.
+
+    Markers annotate real samples, so an episode outside the series can have a
+    background band but no marker; keeping the fixture coherent is what makes the
+    'opens at the longest episode' contract meaningful.
+    """
     raw = pd.DataFrame({
         "Fecha": pd.date_range("2026-06-01", periods=8, freq="h"),
         "EngCoolTemp": [10, 11, 12, 13, 14, 15, 16, 17],
@@ -160,12 +166,12 @@ def test_signal_chart_highlights_events_and_starts_at_longest_episode():
     events = pd.DataFrame([
         {
             "unit": "T_01", "feature": "EngCoolTemp",
-            "start_time": "2026-05-30 01:00:00", "end_time": "2026-05-30 03:00:00",
+            "start_time": "2026-06-01 01:00:00", "end_time": "2026-06-01 03:00:00",
             "duration_minutes": 120, "event_type_binary": "anomaly", "event_type_weighted": "warning",
         },
         {
             "unit": "T_01", "feature": "EngCoolTemp",
-            "start_time": "2026-05-31 01:00:00", "end_time": "2026-05-31 01:30:00",
+            "start_time": "2026-06-01 05:00:00", "end_time": "2026-06-01 05:30:00",
             "duration_minutes": 30, "event_type_binary": "spike", "event_type_weighted": "warning",
         },
     ])
@@ -173,5 +179,21 @@ def test_signal_chart_highlights_events_and_starts_at_longest_episode():
     names = [trace.name for trace in figure.data]
     assert any("Anomalía" in str(name) for name in names)
     assert any("Evento" in str(name) for name in names)
-    assert figure.layout.xaxis.range[0] == pd.Timestamp("2026-05-30 01:00:00")
+    # The view opens on the longest episode, not on the most recent samples.
+    assert figure.layout.xaxis.range[0] == pd.Timestamp("2026-06-01 01:00:00")
     assert len(figure.layout.shapes) == 2
+
+
+def test_signal_chart_falls_back_to_recent_window_without_episodes():
+    """With no events there is no episode to centre on."""
+    raw = pd.DataFrame({
+        "Fecha": pd.date_range("2026-06-01", periods=8, freq="h"),
+        "EngCoolTemp": range(8),
+    })
+
+    figure = build_signal_timeseries_card(
+        "EngCoolTemp", raw, pd.DataFrame(), pd.DataFrame(), "T_01", pd.DataFrame()
+    )
+
+    assert figure.layout.xaxis.range[0] == pd.Timestamp("2026-06-01 00:00:00")
+    assert not figure.layout.shapes

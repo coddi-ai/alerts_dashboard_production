@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -9,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any, AsyncIterator
 
 from src.campbell_ai.chart_registry import DashboardChartRegistry
+from src.campbell_ai.concurrency import execute_with_retry
 from src.campbell_ai.config import CampbellSettings
 from src.campbell_ai.data import DashboardDataRepository
 from src.campbell_ai.errors import (
@@ -18,7 +20,13 @@ from src.campbell_ai.errors import (
 )
 from src.campbell_ai.feedback import FeedbackStore
 from src.campbell_ai.identity import known_dashboard_clients
+from src.campbell_ai.persistence import (
+    ConversationArchive,
+    ConversationSummary,
+    build_conversation_archive,
+)
 from src.campbell_ai.sessions import SessionStore, build_session_store
+from src.campbell_ai.summary import generate_conversation_summary
 from src.campbell_ai.models import (
     ConversationMessage,
     DashboardPrincipal,
@@ -55,12 +63,14 @@ class CampbellAgentRuntime:
         repository: DashboardDataRepository,
         settings: CampbellSettings,
         session_store: SessionStore | None = None,
+        archive: ConversationArchive | None = None,
     ):
         self.repository = repository
         self.settings = settings
         self.visualizations = DashboardVisualizationService(repository)
         self.charts = DashboardChartRegistry(repository)
-        self.feedback = FeedbackStore(settings.feedback_path)
+        self.archive = archive if archive is not None else build_conversation_archive(settings)
+        self.feedback = FeedbackStore(settings.feedback_path, archive=self.archive)
         self.sessions = session_store or build_session_store(settings)
 
     @staticmethod
@@ -78,7 +88,96 @@ class CampbellAgentRuntime:
         return await self.sessions.read(self._session_key(principal, session_id))
 
     async def clear(self, principal: DashboardPrincipal, session_id: str) -> None:
+        """Empty the visible thread. The archived copy is kept, not deleted."""
         await self.sessions.write(self._session_key(principal, session_id), [])
+        self.archive.forget(principal, session_id)
+
+    # -- durable backup -----------------------------------------------------
+
+    async def _archive_exchange(
+        self,
+        principal: DashboardPrincipal,
+        session_id: str,
+        messages: list[ConversationMessage],
+    ) -> None:
+        """Back up the conversation after an interaction, without ever failing it.
+
+        Runs on every exchange, as the durable copy has to be current: a session that
+        expires or a worker that restarts must not take the conversation with it. The
+        blocking storage calls go to a thread so the event loop keeps serving.
+        """
+        if not self.archive.enabled or not messages:
+            return
+        try:
+            result = await asyncio.to_thread(
+                self.archive.save_exchange, principal, session_id, messages
+            )
+            if result.failed and not result.written:
+                logger.warning(
+                    "Campbell AI no pudo respaldar la conversación en %s",
+                    ", ".join(result.failed),
+                )
+            await self._maybe_summarize(principal, session_id, messages)
+        except Exception:
+            # Archiving is a side effect of answering; a failure here cannot be allowed
+            # to turn a good answer into an error for the user.
+            logger.warning("Campbell AI falló al respaldar la conversación", exc_info=True)
+
+    async def _maybe_summarize(
+        self,
+        principal: DashboardPrincipal,
+        session_id: str,
+        messages: list[ConversationMessage],
+    ) -> None:
+        """Title a thread with an AI summary once it is long enough to need one.
+
+        Skipped for the first exchange: the first message is a perfectly good label for
+        a one-question conversation, and a model call per conversation start would be
+        paid on every session that never becomes one.
+        """
+        if not self.settings.conversation_summary_enabled:
+            return
+        if len(messages) < 4 or self.archive.has_summary(principal, session_id):
+            return
+        summary = await generate_conversation_summary(
+            messages, self.settings.model_summary
+        )
+        if summary:
+            await asyncio.to_thread(
+                self.archive.set_summary, principal, session_id, summary
+            )
+
+    async def restore(
+        self,
+        principal: DashboardPrincipal,
+        session_id: str,
+        messages: list[ConversationMessage],
+    ) -> None:
+        """Load an archived conversation into the live session store."""
+        key = self._session_key(principal, session_id)
+        async with self.sessions.lock(key):
+            current = await self.sessions.read(key)
+            if current:
+                # A live thread is newer than the archive; never overwrite it.
+                return
+            max_items = max(2, self.settings.max_history_messages)
+            await self.sessions.write(key, list(messages)[-max_items:])
+
+    async def archived_conversations(
+        self, principal: DashboardPrincipal
+    ) -> list[ConversationSummary]:
+        if not self.archive.enabled:
+            return []
+        return await asyncio.to_thread(self.archive.list_conversations, principal)
+
+    async def archived_conversation(
+        self, principal: DashboardPrincipal, session_id: str
+    ) -> list[ConversationMessage]:
+        if not self.archive.enabled:
+            return []
+        return await asyncio.to_thread(
+            self.archive.load_conversation, principal, session_id
+        )
 
     def _appended(
         self,
@@ -115,7 +214,8 @@ class CampbellAgentRuntime:
                 messages, user_message, assistant_message
             )
             await self.sessions.write(key, updated)
-            return message_id
+        await self._archive_exchange(principal, session_id, updated)
+        return message_id
 
     async def record_feedback(
         self,
@@ -141,9 +241,11 @@ class CampbellAgentRuntime:
             )
             if target is None:
                 raise CampbellSessionError("La respuesta evaluada no pertenece a esta sesión")
-            return self.feedback.record(
-                principal, session_id, message_id, rating, comment
-            )
+        # Outside the session lock and off the event loop: the local log and the S3
+        # backup are both blocking, and neither should hold up the conversation.
+        return await asyncio.to_thread(
+            self.feedback.record, principal, session_id, message_id, rating, comment
+        )
 
     @staticmethod
     def _load_sdk():
@@ -190,6 +292,13 @@ class CampbellAgentRuntime:
         def inspect_available_data() -> str:
             """List datasets and columns available for the active dashboard client."""
             return record(repository.describe_catalog(client))
+
+        @function_tool
+        def client_capabilities() -> str:
+            """Which analyses are possible for the active client, and why others are not."""
+            return safe_data_call(
+                "client_capabilities", repository.describe_capabilities, client
+            )
 
         @function_tool
         def inspect_dataset(dataset: str = "") -> str:
@@ -350,6 +459,17 @@ class CampbellAgentRuntime:
             )
 
         @function_tool
+        def query_alert_signals(alert_id: str = "", unit_id: str = "") -> str:
+            """Signals of an alert that have captured values, and which carry limits."""
+            return safe_data_call(
+                "query_alert_signals",
+                repository.query_alert_signals,
+                client,
+                alert_id=alert_id,
+                unit_id=unit_id,
+            )
+
+        @function_tool
         def query_maintenance_summary(unit_id: str = "", limit: int = 10) -> str:
             """Weekly written maintenance summary per equipment."""
             return safe_data_call(
@@ -444,11 +564,13 @@ class CampbellAgentRuntime:
         )
 
         data_tools = [
+            client_capabilities,
             inspect_available_data,
             inspect_dataset,
             describe_signals,
             query_alerts,
             query_alert_detail,
+            query_alert_signals,
             query_maintenance,
             query_maintenance_summary,
             query_oil_status,
@@ -697,26 +819,41 @@ class CampbellAgentRuntime:
             if blocked is not None:
                 updated, message_id = self._appended(messages, message, blocked)
                 await self.sessions.write(key, updated)
-                return blocked, "blocked", message_id, [], GroundingReport()
+                blocked_result = blocked, "blocked", message_id, [], GroundingReport()
+            else:
+                # A model-side throttle or a transient upstream error would otherwise
+                # surface as a failed question the user has to retype.
+                result = await execute_with_retry(
+                    lambda: Runner.run(
+                        starting_agent=bundle.head,
+                        input=self._conversation_input(messages, message),
+                        max_turns=self.settings.max_turns_head,
+                    ),
+                    attempts=self.settings.retry_attempts,
+                    initial_delay=self.settings.retry_initial_delay,
+                    max_delay=self.settings.retry_max_delay,
+                    label="la consulta a los agentes",
+                )
+                response = self._normalized_response(result.final_output)
+                grounding = self._audit(response, tool_outputs, question=message)
+                updated, message_id = self._appended(
+                    messages, message, response, generated_visualizations
+                )
+                await self.sessions.write(key, updated)
+                blocked_result = None
 
-            result = await Runner.run(
-                starting_agent=bundle.head,
-                input=self._conversation_input(messages, message),
-                max_turns=self.settings.max_turns_head,
-            )
-            response = self._normalized_response(result.final_output)
-            grounding = self._audit(response, tool_outputs)
-            updated, message_id = self._appended(
-                messages, message, response, generated_visualizations
-            )
-            await self.sessions.write(key, updated)
-            return (
-                response,
-                self._request_type(generated_visualizations, executed_tools),
-                message_id,
-                generated_visualizations,
-                grounding,
-            )
+        # Archiving happens after the session lock is released so a slow backup cannot
+        # delay the next question in the same conversation.
+        await self._archive_exchange(principal, session_id, updated)
+        if blocked_result is not None:
+            return blocked_result
+        return (
+            response,
+            self._request_type(generated_visualizations, executed_tools),
+            message_id,
+            generated_visualizations,
+            grounding,
+        )
 
     @staticmethod
     def _conversation_input(
@@ -805,6 +942,7 @@ class CampbellAgentRuntime:
             if blocked is not None:
                 updated, message_id = self._appended(messages, message, blocked)
                 await self.sessions.write(key, updated)
+                await self._archive_exchange(principal, session_id, updated)
                 yield self._done_event(
                     blocked, "blocked", message_id, [], GroundingReport()
                 )
@@ -833,11 +971,12 @@ class CampbellAgentRuntime:
             response = self._normalized_response(
                 getattr(streamed, "final_output", None) or "".join(chunks)
             )
-            grounding = self._audit(response, tool_outputs)
+            grounding = self._audit(response, tool_outputs, question=message)
             updated, message_id = self._appended(
                 messages, message, response, generated_visualizations
             )
             await self.sessions.write(key, updated)
+            await self._archive_exchange(principal, session_id, updated)
             yield self._done_event(
                 response,
                 self._request_type(generated_visualizations, executed_tools),
@@ -885,9 +1024,11 @@ class CampbellAgentRuntime:
             return ""
         return str(getattr(data, "delta", "") or "")
 
-    def _audit(self, response: str, tool_outputs: list[str]) -> GroundingReport:
+    def _audit(
+        self, response: str, tool_outputs: list[str], question: str = ""
+    ) -> GroundingReport:
         """Trace every number in the answer back to a tool result."""
-        report = audit_response(response, tool_outputs)
+        report = audit_response(response, tool_outputs, question=question)
         if not report.is_grounded:
             # Logged without the answer text: the point is the drift, not the content.
             logger.warning(

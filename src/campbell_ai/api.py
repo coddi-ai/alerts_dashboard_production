@@ -11,16 +11,20 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 
 from src.campbell_ai.chart_registry import CHART_DEFINITIONS
+from src.charts import CHART_KINDS
 from src.campbell_ai.config import get_campbell_settings
 from src.campbell_ai.errors import (
     CampbellAuthenticationError,
     CampbellAuthorizationError,
+    CampbellBusyError,
     CampbellConfigurationError,
     CampbellDataError,
     CampbellSessionError,
 )
 from src.campbell_ai.models import (
     CapabilitiesResponse,
+    ConversationListResponse,
+    ConversationsRequest,
     FeedbackRequest,
     FeedbackResponse,
     HistoryResponse,
@@ -38,7 +42,7 @@ logger = logging.getLogger("campbell_ai.api")
 app = FastAPI(
     title="Campbell AI Internal API",
     description="Multi-agent API backed by dashboard identity and data contracts.",
-    version="1.0.0",
+    version="1.1.0",
 )
 
 
@@ -68,6 +72,14 @@ def require_internal_token(
 
 
 def _translate_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, CampbellBusyError):
+        # 429 with Retry-After, so the caller knows this is load and not a fault, and
+        # how long to wait before trying the same question again.
+        return HTTPException(
+            status_code=429,
+            detail=str(exc),
+            headers={"Retry-After": str(exc.retry_after)},
+        )
     if isinstance(exc, CampbellAuthenticationError):
         return HTTPException(status_code=401, detail=str(exc))
     if isinstance(exc, CampbellAuthorizationError):
@@ -90,7 +102,7 @@ async def health() -> dict[str, object]:
         "profile": "campbell_agents",
         "reports": False,
         "visualizations": True,
-        "chart_types": ["bar", "line", "pie", "pareto", "heatmap", "stacked_bar"],
+        "chart_types": list(CHART_KINDS),
         "explicit_time_windows": True,
         "feedback": True,
         "five_whys": True,
@@ -98,6 +110,8 @@ async def health() -> dict[str, object]:
         # Surfaced so a deployment can assert it is not running several workers on
         # the process-local session store.
         "session_backend": settings.session_backend,
+        "persistence": settings.persistence_enabled,
+        "conversation_history": settings.persistence_enabled,
     }
 
 
@@ -106,7 +120,9 @@ async def health() -> dict[str, object]:
     response_model=CapabilitiesResponse,
     dependencies=[Depends(require_internal_token)],
 )
-async def capabilities() -> CapabilitiesResponse:
+async def capabilities(
+    service: CampbellAIService = Depends(resolve_service),
+) -> CapabilitiesResponse:
     settings = get_campbell_settings()
     return CapabilitiesResponse(
         agents=[
@@ -121,7 +137,26 @@ async def capabilities() -> CapabilitiesResponse:
         streaming=settings.streaming_enabled,
         session_backend=settings.session_backend,
         named_charts=[definition.chart_id for definition in CHART_DEFINITIONS],
+        persistence=settings.persistence_enabled,
+        conversation_history=settings.persistence_enabled,
+        concurrency=_concurrency_stats(service),
     )
+
+
+def _concurrency_stats(service: object) -> dict[str, object]:
+    """Load snapshot when the service exposes one; an empty dict otherwise.
+
+    Read defensively because a test double or an alternative consumer is not required to
+    implement admission control just to answer a capabilities call.
+    """
+    guard = getattr(service, "concurrency", None)
+    stats = getattr(guard, "stats", None)
+    if not callable(stats):
+        return {}
+    try:
+        return dict(stats())
+    except Exception:  # pragma: no cover - diagnostics must not break the endpoint
+        return {}
 
 
 @app.post(
@@ -216,6 +251,40 @@ async def get_history(
 ) -> HistoryResponse:
     try:
         return await service.history(body.username, body.company_id, body.session_id)
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
+@app.post(
+    "/api/v1/campbell-ai/conversations",
+    response_model=ConversationListResponse,
+    dependencies=[Depends(require_internal_token)],
+)
+async def list_conversations(
+    body: ConversationsRequest,
+    service: CampbellAIService = Depends(resolve_service),
+) -> ConversationListResponse:
+    """Archived conversations for the caller's user and active company."""
+    try:
+        return await service.conversations(body.username, body.company_id)
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
+@app.post(
+    "/api/v1/campbell-ai/conversations/open",
+    response_model=HistoryResponse,
+    dependencies=[Depends(require_internal_token)],
+)
+async def open_conversation(
+    body: SessionRequest,
+    service: CampbellAIService = Depends(resolve_service),
+) -> HistoryResponse:
+    """Reopen an archived conversation so the user can keep talking in it."""
+    try:
+        return await service.open_conversation(
+            body.username, body.company_id, body.session_id
+        )
     except Exception as exc:
         raise _translate_error(exc) from exc
 

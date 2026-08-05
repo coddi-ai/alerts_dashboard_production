@@ -21,8 +21,11 @@ from dashboard.campbell_ai.callbacks import (
 )
 from dashboard.campbell_ai.layout import (
     ALERT_SUGGESTIONS,
+    CAMPBELL_AI_VERSION,
+    _feedback_controls,
     _initial_company_state,
     create_campbell_ai_layout,
+    render_conversation_list,
 )
 
 
@@ -151,6 +154,150 @@ def test_campbell_layout_can_issue_identity_from_flask_session(monkeypatch):
         assert user_data["username"] == "session-user"
         assert company_state["identity"]["username"] == "session-user"
         assert company_state["identity"][IDENTITY_PROOF_FIELD]
+
+
+def test_the_view_reports_the_current_version():
+    components = list(_walk(create_campbell_ai_layout()))
+    visible_text = " ".join(item for item in components if isinstance(item, str))
+
+    assert CAMPBELL_AI_VERSION == "1.1.0"
+    assert f"Campbell AI v{CAMPBELL_AI_VERSION}" in visible_text
+
+
+def test_the_session_company_survives_navigation_in_session_storage():
+    """The in-memory company store empties on remount; this one must not."""
+    stores = {
+        item.id: item
+        for item in _walk(create_campbell_ai_layout())
+        if isinstance(getattr(item, "id", None), str) and item.id.endswith("-store")
+        or getattr(item, "id", None) == "campbell-ai-session-company"
+    }
+
+    assert stores["campbell-ai-session-company"].storage_type == "session"
+    assert stores["campbell-ai-session-store"].storage_type == "session"
+    assert stores["campbell-ai-history-store"].storage_type == "session"
+
+
+def test_every_declared_state_is_bound_to_a_parameter():
+    """A callback taking more parameters than it declares raises on every trigger.
+
+    This is not hypothetical: the retry path was broken because `synchronize_chat`
+    declared eleven parameters and only ten inputs and states.
+    """
+    app = dash.Dash(__name__, suppress_callback_exceptions=True)
+    register_campbell_ai_callbacks(app)
+
+    for callback_id, metadata in app.callback_map.items():
+        # Dash wraps the callback; the declared signature is on the original function.
+        # Clientside callbacks carry no Python function at all.
+        function = getattr(metadata.get("callback"), "__wrapped__", None)
+        if function is None:
+            continue
+        declared = len(metadata["inputs"]) + len(metadata.get("state", []))
+        assert function.__code__.co_argcount == declared, callback_id
+
+
+def test_the_history_panel_offers_listing_opening_and_starting_over():
+    components = list(_walk(create_campbell_ai_layout()))
+    ids = {
+        item.id
+        for item in components
+        if isinstance(getattr(item, "id", None), str)
+    }
+
+    assert {
+        "campbell-ai-history-toggle",
+        "campbell-ai-history-collapse",
+        "campbell-ai-conversation-list",
+        "campbell-ai-new-conversation",
+        "campbell-ai-refresh-conversations",
+    } <= ids
+
+
+def test_conversation_rows_are_labelled_and_the_active_one_is_marked():
+    rows = render_conversation_list(
+        [
+            {
+                "session_id": "s1",
+                "label": "Alertas de refrigerante en T_18",
+                "message_count": 4,
+                "updated_at": "2026-08-01T09:30:00+00:00",
+            },
+            {
+                "session_id": "s2",
+                "title": "Pareto por equipo",
+                "message_count": 2,
+                "updated_at": "2026-07-30T18:05:00+00:00",
+            },
+        ],
+        active_session_id="s1",
+    )
+    text = " ".join(item for item in _walk(rows) if isinstance(item, str))
+
+    assert "Alertas de refrigerante en T_18" in text
+    # Falls back to the first-message title when there is no AI summary.
+    assert "Pareto por equipo" in text
+    # Date and time without inventing a timezone label.
+    assert "2026-08-01 09:30" in text
+    assert "en curso" in text
+    buttons = [
+        item
+        for item in _walk(rows)
+        if isinstance(getattr(item, "id", None), dict)
+        and item.id.get("type") == "campbell-ai-open-conversation"
+    ]
+    assert [button.id["session_id"] for button in buttons] == ["s1", "s2"]
+    # The open conversation cannot be reopened onto itself.
+    assert buttons[0].disabled is True
+
+
+def test_an_empty_history_says_so_instead_of_rendering_nothing():
+    text = " ".join(
+        item for item in _walk(render_conversation_list([])) if isinstance(item, str)
+    )
+
+    assert "Aún no hay conversaciones respaldadas" in text
+
+
+def test_the_comment_box_appears_only_after_a_vote():
+    def controls_for(entry):
+        return [
+            item
+            for item in _walk(_feedback_controls("msg_1", entry))
+            if isinstance(getattr(item, "id", None), dict)
+        ]
+
+    unvoted = {
+        item.id["type"] for item in controls_for(None)
+    }
+    voted = {item.id["type"] for item in controls_for({"rating": "negative"})}
+    answered = " ".join(
+        item
+        for item in _walk(_feedback_controls("msg_1", {"rating": "negative", "comment": True}))
+        if isinstance(item, str)
+    )
+
+    assert unvoted == {"campbell-ai-feedback-button"}
+    # Asking why before knowing whether the answer helped is a question with no context.
+    assert "campbell-ai-feedback-comment" in voted
+    assert "campbell-ai-feedback-comment-send" in voted
+    assert "registramos tu comentario" in answered
+
+
+def test_the_older_rating_only_feedback_shape_still_renders():
+    """Sessions stored before 1.1.0 hold a bare rating string, not a record."""
+    rendered = " ".join(
+        item for item in _walk(_feedback_controls("msg_1", "positive")) if isinstance(item, str)
+    )
+
+    assert "¿Qué te resultó útil?" not in rendered  # placeholder, not text
+    buttons = [
+        item
+        for item in _walk(_feedback_controls("msg_1", "positive"))
+        if isinstance(getattr(item, "id", None), dict)
+        and item.id.get("type") == "campbell-ai-feedback-button"
+    ]
+    assert all(button.disabled for button in buttons)
 
 
 def test_pending_message_helpers_render_user_message_before_agent_response():

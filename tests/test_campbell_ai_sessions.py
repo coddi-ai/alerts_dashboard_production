@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from src.campbell_ai.errors import CampbellConfigurationError
+from src.campbell_ai.errors import CampbellBusyError, CampbellConfigurationError
 from src.campbell_ai.models import ConversationMessage
 from src.campbell_ai.sessions import (
     InMemorySessionStore,
@@ -284,7 +284,8 @@ def test_redis_lock_refuses_rather_than_interleaving_two_runs():
         async with store.lock(KEY):
             pass
 
-    with pytest.raises(CampbellConfigurationError, match="ocupada"):
+    # Busy, not misconfigured: the caller should retry, which is what a 429 tells it.
+    with pytest.raises(CampbellBusyError, match="ocupada"):
         asyncio.run(scenario())
 
 

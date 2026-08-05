@@ -15,31 +15,41 @@ If units become available upstream, add them here and the agents can cite them.
 from __future__ import annotations
 
 
-# Signal code -> Spanish description. Mirrors the labels the alerts tab renders.
+# Signal code -> Spanish description. Kept in sync with
+# dashboard/components/telemetry_charts.py's SIGNAL_TRANSLATION, which re-exports
+# this dict as its single source of truth (translate_signal() there just wraps
+# signal_label() here) — do not let the two drift apart again.
 SIGNAL_LABELS: dict[str, str] = {
     "EngCoolTemp": "Temperatura del refrigerante del motor",
-    "RAftrclrTemp": "Temperatura del post-enfriador del motor",
-    "EngOilPres": "Presión del aceite del motor",
-    "EngOilFltr": "Estado del filtro de aceite del motor",
-    "CnkcasePres": "Presión del cárter del motor",
-    "RtLtExhTemp": "Diferencia de temperatura del escape derecho e izquierdo",
-    "RtExhTemp": "Temperatura del escape derecho del motor",
-    "LtExhTemp": "Temperatura del escape izquierdo del motor",
-    "AirFltr": "Estado del filtro de aire del motor",
-    "DiffLubePres": "Presión del lubricante del diferencial",
-    "DiffTemp": "Temperatura del diferencial",
-    "TrnLubeTemp": "Temperatura del lubricante de la transmisión",
-    "TCOutTemp": "Temperatura de salida del convertidor de par",
-    "RtRBrkTemp": "Temperatura del freno trasero derecho",
-    "RtFBrkTemp": "Temperatura del freno delantero derecho",
-    "LtRBrkTemp": "Temperatura del freno trasero izquierdo",
-    "LtFBrkTemp": "Temperatura del freno delantero izquierdo",
-    "StrgOilTemp": "Temperatura del aceite de dirección",
+    "EngOilPres": "Presión de aceite del motor",
+    "EngOilFltr": "Filtro de aceite del motor",
     "EngSpd": "Velocidad del motor",
+    "TCOutTemp": "Temperatura de salida del turbocompresor",
+    "RAftrclrTemp": "Temperatura del posenfriador derecho",
+    "LtExhTemp": "Temperatura de escape izquierda",
+    "RtExhTemp": "Temperatura de escape derecha",
+    "RtLtExhTemp": "Diferencia de temperatura de escape (derecha-izquierda)",
+    "AirFltr": "Restricción del filtro de aire",
+    "CnkcasePres": "Presión del cárter",
+    "CompInPres1": "Presión de entrada del compresor 1",
+    "CompInPres2": "Presión de entrada del compresor 2",
+    "TrboInPres": "Presión de entrada del turbocompresor",
+    "TrboOutPres": "Presión de salida del turbocompresor",
+    "TrnLubeTemp": "Temperatura del aceite de transmisión",
     "LckupSlip": "Deslizamiento del embrague de bloqueo",
     "TrnSlip": "Deslizamiento de la transmisión",
+    "TrnGear": "Marcha de la transmisión",
+    "GearSelect": "Selección de marcha",
+    "DiffTemp": "Temperatura del diferencial",
+    "DiffLubePres": "Presión de lubricación del diferencial",
+    "LtFBrkTemp": "Temperatura del freno delantero izquierdo",
+    "RtFBrkTemp": "Temperatura del freno delantero derecho",
+    "LtRBrkTemp": "Temperatura del freno trasero izquierdo",
+    "RtRBrkTemp": "Temperatura del freno trasero derecho",
+    "StrgOilTemp": "Temperatura del aceite de dirección",
     # Tribology variables that can appear alongside a telemetry signal in a
-    # mixed-trigger alert.
+    # mixed-trigger alert. Mapped to themselves: already Spanish, listed here so
+    # describe_signals()/signal_label() recognize them as catalogued.
     "Hierro": "Hierro",
     "Aluminio": "Aluminio",
     "Zinc": "Zinc",

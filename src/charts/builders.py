@@ -13,10 +13,15 @@ from __future__ import annotations
 
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 from src.charts.theme import (
+    BRAND_AXIS,
+    BRAND_GRID,
     BRAND_MUTED,
     BRAND_TITLE,
+    FONT_FAMILY,
+    STATUS_COLORS,
     CUMULATIVE_LINE,
     SEQUENTIAL_SCALE,
     apply_dashboard_theme,
@@ -25,6 +30,11 @@ from src.charts.theme import (
     series_color,
     status_palette,
 )
+
+
+# Aliases keep the polar/gauge layouts readable next to the axis_style helper.
+BRAND_GRID_COLOR = BRAND_GRID
+BRAND_AXIS_COLOR = BRAND_AXIS
 
 
 # Order used whenever statuses are stacked or listed, worst first.
@@ -313,6 +323,364 @@ def build_pie(
     return apply_dashboard_theme(
         figure, title=title, subtitle=subtitle, show_legend=True
     )
+
+
+def build_histogram(
+    values: list[float],
+    *,
+    title: str,
+    value_label: str,
+    bins: int = 20,
+    subtitle: str = "",
+) -> go.Figure:
+    """Distribution of one numeric metric, for spread rather than ranking."""
+    figure = go.Figure(
+        go.Histogram(
+            x=values,
+            nbinsx=max(3, min(int(bins), 60)),
+            marker={"color": series_color(0), "line": {"width": 1, "color": "#ffffff"}},
+            hovertemplate=f"{value_label}: %{{x}}<br>Frecuencia: %{{y}}<extra></extra>",
+        )
+    )
+    apply_dashboard_theme(figure, title=title, subtitle=subtitle)
+    figure.update_layout(
+        bargap=0.05,
+        xaxis=axis_style(value_label),
+        yaxis={**axis_style("Frecuencia"), "rangemode": "tozero"},
+    )
+    return figure
+
+
+def build_box(
+    groups: dict[str, list[float]],
+    *,
+    title: str,
+    dimension_label: str,
+    value_label: str,
+    subtitle: str = "",
+) -> go.Figure:
+    """Spread of a metric per category: median, quartiles and outliers."""
+    labels = list(groups)
+    colors = (
+        status_palette(labels)
+        if is_semantic_dimension(labels)
+        else [series_color(index) for index in range(len(labels))]
+    )
+    figure = go.Figure()
+    for index, label in enumerate(labels):
+        figure.add_trace(
+            go.Box(
+                y=groups[label],
+                name=str(label),
+                marker={"color": colors[index]},
+                boxmean=True,
+                hovertemplate=f"{dimension_label}: {label}<br>{value_label}: %{{y}}<extra></extra>",
+            )
+        )
+    apply_dashboard_theme(
+        figure, title=title, subtitle=subtitle, show_legend=len(labels) > 1
+    )
+    figure.update_layout(
+        xaxis=axis_style(dimension_label),
+        yaxis=axis_style(value_label),
+    )
+    return figure
+
+
+def build_treemap(
+    labels: list[str],
+    values: list[float],
+    *,
+    title: str,
+    dimension_label: str,
+    value_label: str,
+    subtitle: str = "",
+) -> go.Figure:
+    """Share of a whole, where relative area reads faster than bar length."""
+    colors = (
+        status_palette(labels)
+        if is_semantic_dimension(labels)
+        else [series_color(index) for index in range(len(labels))]
+    )
+    figure = go.Figure(
+        go.Treemap(
+            labels=labels,
+            parents=[""] * len(labels),
+            values=values,
+            marker={"colors": colors},
+            texttemplate="<b>%{label}</b><br>%{value}<br>%{percentRoot}",
+            hovertemplate=(
+                f"{dimension_label}: %{{label}}<br>{value_label}: %{{value}}"
+                "<br>%{percentRoot}<extra></extra>"
+            ),
+            branchvalues="total",
+        )
+    )
+    return apply_dashboard_theme(figure, title=title, subtitle=subtitle, height=440)
+
+
+def build_scatter(
+    points: list[dict],
+    *,
+    title: str,
+    x_label: str,
+    y_label: str,
+    subtitle: str = "",
+) -> go.Figure:
+    """Two metrics per entity, to separate level from trend or size.
+
+    Each point is ``{"label": str, "x": float, "y": float, "status": str | None}``.
+    """
+    labels = [str(point.get("label", "")) for point in points]
+    statuses = [str(point.get("status") or "") for point in points]
+    colors = (
+        status_palette(statuses)
+        if any(statuses) and is_semantic_dimension([s for s in statuses if s])
+        else series_color(0)
+    )
+    figure = go.Figure(
+        go.Scatter(
+            x=[float(point["x"]) for point in points],
+            y=[float(point["y"]) for point in points],
+            mode="markers+text",
+            text=labels,
+            textposition="top center",
+            textfont={"size": 10},
+            marker={"size": 13, "color": colors, "line": {"width": 1, "color": "#ffffff"}},
+            hovertemplate=(
+                f"%{{text}}<br>{x_label}: %{{x}}<br>{y_label}: %{{y}}<extra></extra>"
+            ),
+        )
+    )
+    apply_dashboard_theme(figure, title=title, subtitle=subtitle, height=460)
+    figure.update_layout(
+        xaxis={**axis_style(x_label), "rangemode": "tozero"},
+        yaxis={**axis_style(y_label), "rangemode": "tozero"},
+    )
+    return figure
+
+
+def build_radar(
+    series: list[dict],
+    axes: list[str],
+    *,
+    title: str,
+    value_label: str,
+    subtitle: str = "",
+) -> go.Figure:
+    """Multi-axis comparison, for a profile across several metrics at once.
+
+    Each series is ``{"label": str, "values": list[float], "status": str | None}``.
+    Radar only reads well with 3+ axes and a handful of series.
+    """
+    figure = go.Figure()
+    closed_axes = axes + axes[:1]
+    for index, item in enumerate(series):
+        values = [float(value) for value in item["values"]]
+        status = str(item.get("status") or "")
+        color = (
+            status_palette([status])[0] if status else series_color(index)
+        )
+        figure.add_trace(
+            go.Scatterpolar(
+                r=values + values[:1],
+                theta=closed_axes,
+                name=str(item.get("label", "")),
+                fill="toself" if item.get("fill", index == 0) else None,
+                line={"color": color, "width": 2},
+                hovertemplate=(
+                    f"%{{theta}}<br>{value_label}: %{{r}}<extra>"
+                    f"{item.get('label', '')}</extra>"
+                ),
+            )
+        )
+    apply_dashboard_theme(
+        figure, title=title, subtitle=subtitle, height=470, show_legend=len(series) > 1
+    )
+    figure.update_layout(
+        polar={
+            "radialaxis": {
+                "visible": True,
+                "gridcolor": BRAND_GRID_COLOR,
+                "linecolor": BRAND_AXIS_COLOR,
+            },
+            "angularaxis": {"gridcolor": BRAND_GRID_COLOR},
+            "bgcolor": "#ffffff",
+        }
+    )
+    return figure
+
+
+def build_gauge(
+    value: float,
+    *,
+    title: str,
+    value_label: str,
+    minimum: float = 0.0,
+    maximum: float = 100.0,
+    bands: list[tuple[float, float, str]] | None = None,
+    subtitle: str = "",
+) -> go.Figure:
+    """Single indicator against its bands, for one headline number."""
+    steps = [
+        {"range": [start, end], "color": color} for start, end, color in (bands or [])
+    ]
+    figure = go.Figure(
+        go.Indicator(
+            mode="gauge+number",
+            value=float(value),
+            number={"font": {"size": 34, "color": BRAND_TITLE}},
+            gauge={
+                "axis": {"range": [minimum, maximum], "tickcolor": BRAND_AXIS_COLOR},
+                "bar": {"color": BRAND_TITLE, "thickness": 0.28},
+                "steps": steps,
+                "borderwidth": 0,
+            },
+            title={"text": value_label, "font": {"size": 12, "color": BRAND_MUTED}},
+        )
+    )
+    return apply_dashboard_theme(figure, title=title, subtitle=subtitle, height=340)
+
+
+def build_area(
+    labels: list[str],
+    values: list[float],
+    *,
+    title: str,
+    dimension_label: str,
+    value_label: str,
+    subtitle: str = "",
+) -> go.Figure:
+    """Filled trend, when the accumulated volume matters as much as the shape."""
+    figure = go.Figure(
+        go.Scatter(
+            x=labels,
+            y=values,
+            mode="lines",
+            fill="tozeroy",
+            line={"color": series_color(0), "width": 2},
+            fillcolor="rgba(52, 152, 219, 0.22)",
+            hovertemplate=(
+                f"{dimension_label}: %{{x}}<br>{value_label}: %{{y}}<extra></extra>"
+            ),
+        )
+    )
+    apply_dashboard_theme(figure, title=title, subtitle=subtitle)
+    figure.update_layout(
+        xaxis=axis_style(dimension_label),
+        yaxis={**axis_style(value_label), "rangemode": "tozero"},
+    )
+    return figure
+
+
+def build_signal_panels(
+    panels: list[dict],
+    *,
+    title: str,
+    time_label: str = "Fecha y hora",
+    subtitle: str = "",
+) -> go.Figure:
+    """Stacked time series, one panel per signal, each against its own limits.
+
+    Replaces the previous dashboard's per-alert sensor chart. One shared x axis keeps
+    the episodes aligned across signals, and each panel carries its own y scale
+    because the signals are not comparable (temperature, pressure, filter state).
+
+    Each panel is ``{"signal": str, "label": str, "times": list, "values": list,
+    "upper": list | None, "lower": list | None}``.
+    """
+    if not panels:
+        return empty_figure("Sin señales con valores capturados para esta alerta")
+
+    figure = make_subplots(
+        rows=len(panels),
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=min(0.12, 0.35 / len(panels)),
+        subplot_titles=[panel.get("label") or panel["signal"] for panel in panels],
+    )
+
+    for index, panel in enumerate(panels, start=1):
+        times = panel["times"]
+        upper, lower = panel.get("upper"), panel.get("lower")
+        # Band first so the measured line stays legible on top of it.
+        if upper and lower:
+            figure.add_trace(
+                go.Scatter(
+                    x=times,
+                    y=lower,
+                    mode="lines",
+                    line={"width": 0},
+                    hoverinfo="skip",
+                    showlegend=False,
+                ),
+                row=index,
+                col=1,
+            )
+            figure.add_trace(
+                go.Scatter(
+                    x=times,
+                    y=upper,
+                    mode="lines",
+                    line={"width": 0},
+                    fill="tonexty",
+                    fillcolor="rgba(52, 152, 219, 0.10)",
+                    hoverinfo="skip",
+                    name="Rango permitido",
+                    showlegend=index == 1,
+                ),
+                row=index,
+                col=1,
+            )
+        for values, name, color in (
+            (upper, "Límite superior", STATUS_COLORS["Anormal"]),
+            (lower, "Límite inferior", STATUS_COLORS["Alerta"]),
+        ):
+            if values:
+                figure.add_trace(
+                    go.Scatter(
+                        x=times,
+                        y=values,
+                        mode="lines",
+                        line={"color": color, "width": 1.5, "dash": "dash"},
+                        name=name,
+                        showlegend=index == 1,
+                        hovertemplate=f"{name}: %{{y}}<extra></extra>",
+                    ),
+                    row=index,
+                    col=1,
+                )
+        figure.add_trace(
+            go.Scatter(
+                x=times,
+                y=panel["values"],
+                mode="lines",
+                line={"color": series_color(0), "width": 2},
+                name="Valor medido",
+                showlegend=index == 1,
+                hovertemplate=(
+                    f"{panel['signal']}<br>%{{x}}<br>Valor: %{{y}}<extra></extra>"
+                ),
+            ),
+            row=index,
+            col=1,
+        )
+        figure.update_yaxes(axis_style(""), row=index, col=1)
+
+    apply_dashboard_theme(
+        figure,
+        title=title,
+        subtitle=subtitle,
+        height=max(320, 230 * len(panels)),
+        show_legend=True,
+    )
+    figure.update_xaxes(axis_style(time_label), row=len(panels), col=1)
+    for index in range(1, len(panels)):
+        figure.update_xaxes({**axis_style(""), "showticklabels": False}, row=index, col=1)
+    # Subplot titles are annotations; keep them in the brand type scale.
+    for annotation in figure.layout.annotations:
+        annotation.font = {"size": 12, "color": BRAND_TITLE, "family": FONT_FAMILY}
+    return figure
 
 
 def empty_figure(message: str) -> go.Figure:

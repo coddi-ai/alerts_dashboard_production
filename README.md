@@ -31,6 +31,7 @@ Dashboard multi-técnica que consolida **análisis de aceite**, **alertas operac
 | 🚨 **Alerts** | Alertas enriquecidas | Telemetría + aceite + GPS + diagnóstico |
 | 🧪 **Oil** | Análisis tribológico | Muestras, límites Stewart, clasificación AI |
 | 🔮 **Predictive** | Modelos predictivos por componente | Ranking 0-100 por modo de falla (motor, transmisión) |
+| 🤖 **Campbell AI** v1.1.0 | Asistente de mantenimiento basado en agentes | Consulta las mismas fuentes y permisos; gráficos interactivos, historial por usuario respaldado en S3 |
 
 ### Integraciones Futuras
 
@@ -159,6 +160,11 @@ python -m dotenv run -- python -m uvicorn src.campbell_ai.api:app `
   --reload
 ```
 
+Campbell AI respalda cada interacción en la carpeta `campbellAI/` del bucket ya configurado
+(`BUCKET_NAME`, `ACCESS_KEY`, `SECRET_KEY`) y mantiene un espejo en `logs/campbell_ai_backup`. Sin
+bucket configurado sigue funcionando solo con el espejo local. Detalle en
+[src/campbell_ai/README.md](src/campbell_ai/README.md).
+
 ### Credenciales
 
 Editar `config/users.py`:
@@ -205,6 +211,7 @@ USERS = {
 
 ## 📋 Documentación
 
+- [Campbell AI](src/campbell_ai/README.md) — agentes, API interna, persistencia y concurrencia
 - [Oil Data Contracts](documentation/oil/DATA_CONTRACTS.md)
 - [Telemetry Data Contracts](documentation/telemetry/data_contracts.md)
 - [Alerts Data Contracts](documentation/alerts/data_contracts.md)

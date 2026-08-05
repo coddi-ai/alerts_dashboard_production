@@ -226,13 +226,20 @@ def test_detail_queries_expose_components_signals_and_measured_values(tmp_path):
 
     # Only the newest evaluated week is reported, so a resolved status is not double counted.
     assert components["total_rows"] == 1
-    assert components["records"][0]["triggering_signals"] == "StrgOilTemp"
+    # triggering_signals arrives translated to Spanish so the agent never has to
+    # guess at a raw code; it is informational only, never a tool argument.
+    assert components["records"][0]["triggering_signals"] == "Temperatura del aceite de dirección"
     assert components["records"][0]["evaluation_week"] == 15
     # One row per alert with the peak against its published limit.
     assert detail["alerts_matched"] == 1
-    assert detail["records"][0]["peak_value"] == 100.9
-    assert detail["records"][0]["upper_limit"] == 95.0
-    assert detail["records"][0]["samples_above_limit"] == 1
+    record = detail["records"][0]
+    assert record["trigger_label"] == "Temperatura del refrigerante del motor"
+    assert record["peak_value"] == 100.9
+    # The threshold is state-dependent, so it is reported per peak and as a set of
+    # applied values rather than collapsed into one number.
+    assert record["upper_limit_at_peak"] == 95.0
+    assert record["upper_limit_values"] == [95.0]
+    assert record["samples_above_limit"] == 1
 
 
 def test_alert_detail_resolves_fusion_ids_and_never_merges_units(tmp_path):

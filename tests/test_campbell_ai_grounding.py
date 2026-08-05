@@ -246,6 +246,7 @@ def test_report_serializes_for_the_api_response():
         "unverified_numbers",
         "invented_units",
         "derived_without_basis",
+        "echoed_from_question",
         "tool_outputs_seen",
         "is_grounded",
     }
@@ -269,3 +270,27 @@ def test_dashboard_and_agents_share_the_signal_catalogue():
     from src.charts.signals import SIGNAL_LABELS
 
     assert FEATURE_NAMES_ES is SIGNAL_LABELS
+
+
+def test_a_number_from_the_question_is_not_a_fabrication():
+    """Restating the asked window is not inventing; flagging it made the audit noisy."""
+    report = audit_response(
+        "No hay alertas en los últimos 60 días para esta empresa.",
+        ['{"ok": false}'],
+        question="¿Cuántas alertas hubo en los últimos 60 días?",
+    )
+
+    assert report.echoed_from_question == ["60"]
+    assert report.unverified_numbers == []
+    assert report.is_grounded is True
+
+
+def test_echoing_the_question_does_not_excuse_an_invented_figure():
+    report = audit_response(
+        "En los últimos 60 días hubo 4820 alertas.",
+        ['{"total": 21}'],
+        question="¿Cuántas alertas hubo en los últimos 60 días?",
+    )
+
+    assert "4820" in report.unverified_numbers
+    assert report.is_grounded is False

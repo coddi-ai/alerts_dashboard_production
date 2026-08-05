@@ -20,9 +20,10 @@ import json
 import os
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from src.campbell_ai.concurrency import ConcurrencyGuard
 from src.campbell_ai.config import get_campbell_settings
 from src.campbell_ai.service import CampbellAIService
 from tests.quality.expectations import (
@@ -219,9 +220,29 @@ class QualityRunner:
             grounding=result.grounding,
         )
 
+    def _admit_batch(self, concurrency: int) -> None:
+        """Let the batch through the per-user admission cap.
+
+        The service admits two simultaneous answers per user, which is right for a person
+        with two tabs and wrong for this runner: every case runs as the same dashboard
+        user, so a suite with `--concurrency 4` would see cases rejected as "busy" and
+        scored as failures. The guard stays in place, resized to the requested batch, so a
+        real bug in admission control still surfaces instead of being bypassed.
+        """
+        limits = self.service.concurrency.limits
+        width = max(1, concurrency)
+        self.service.concurrency = ConcurrencyGuard(
+            replace(
+                limits,
+                max_concurrent=max(limits.max_concurrent, width),
+                max_concurrent_per_user=max(limits.max_concurrent_per_user, width),
+            )
+        )
+
     async def run(
         self, cases: list[QualityCase], concurrency: int = 3
     ) -> list[CaseResult]:
+        self._admit_batch(concurrency)
         semaphore = asyncio.Semaphore(max(1, concurrency))
 
         async def guarded(case: QualityCase) -> CaseResult:

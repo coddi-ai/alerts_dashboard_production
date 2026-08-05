@@ -277,6 +277,10 @@ class GroundingReport:
     # Reachable from grounded values only through arithmetic the answer did not show.
     # A quality issue (the basis should be stated), not fabrication.
     derived_without_basis: list[str] = field(default_factory=list)
+    # Present in the user's own question. Restating the asked window ("los últimos 60
+    # días") is not fabrication, but it is not data-backed either, so it is reported
+    # apart from verified figures instead of failing the gate.
+    echoed_from_question: list[str] = field(default_factory=list)
     tool_outputs_seen: int = 0
 
     @property
@@ -290,13 +294,21 @@ class GroundingReport:
             "unverified_numbers": self.unverified_numbers,
             "invented_units": self.invented_units,
             "derived_without_basis": self.derived_without_basis,
+            "echoed_from_question": self.echoed_from_question,
             "tool_outputs_seen": self.tool_outputs_seen,
             "is_grounded": self.is_grounded,
         }
 
 
-def audit_response(response: str, tool_outputs: list[str]) -> GroundingReport:
-    """Check that every number in the answer traces back to a tool result."""
+def audit_response(
+    response: str, tool_outputs: list[str], question: str = ""
+) -> GroundingReport:
+    """Check that every number in the answer traces back to a tool result.
+
+    `question` is the user's own message. A number it already contains is not a
+    fabrication when the answer restates it, so those are reported separately rather
+    than counted as verified or flagged.
+    """
     report = GroundingReport(tool_outputs_seen=len(tool_outputs))
     text = str(response or "")
 
@@ -309,8 +321,10 @@ def audit_response(response: str, tool_outputs: list[str]) -> GroundingReport:
         return report
 
     grounded = collect_grounded_numbers(tool_outputs)
+    asked = collect_grounded_numbers([question]) if question else set()
     unverified: list[str] = []
     undeclared: list[str] = []
+    echoed: list[str] = []
     for claim, variants in claims:
         if variants & grounded:
             report.verified += 1
@@ -324,6 +338,8 @@ def audit_response(response: str, tool_outputs: list[str]) -> GroundingReport:
             continue
         elif any(_multistep_derived_matches(variant, grounded) for variant in variants):
             undeclared.append(claim)
+        elif variants & asked:
+            echoed.append(claim)
         else:
             unverified.append(claim)
 
@@ -332,4 +348,5 @@ def audit_response(response: str, tool_outputs: list[str]) -> GroundingReport:
 
     report.unverified_numbers = ordered(unverified)
     report.derived_without_basis = ordered(undeclared)
+    report.echoed_from_question = ordered(echoed)
     return report

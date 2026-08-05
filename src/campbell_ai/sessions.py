@@ -23,11 +23,17 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import AsyncIterator
 
-from src.campbell_ai.errors import CampbellConfigurationError
+from src.campbell_ai.errors import CampbellBusyError, CampbellConfigurationError
 from src.campbell_ai.models import ConversationMessage
 
 
 SessionKey = tuple[str, str, str]
+
+# How long a second request for the *same* conversation waits for the first to finish
+# before giving up. Unbounded waiting is worse than a clear rejection: the user has
+# already been told their message is being processed, so the second request only has to
+# say "not yet" rather than silently hold a worker for the whole answer.
+DEFAULT_LOCK_WAIT_SECONDS = 45
 
 
 def serialize_messages(messages: list[ConversationMessage]) -> str:
@@ -60,8 +66,11 @@ def deserialize_messages(payload: str | bytes | None) -> list[ConversationMessag
 class SessionStore(ABC):
     """Storage for per-session conversation history."""
 
-    def __init__(self, ttl_seconds: int):
+    def __init__(
+        self, ttl_seconds: int, lock_wait_seconds: int = DEFAULT_LOCK_WAIT_SECONDS
+    ):
         self.ttl_seconds = max(60, int(ttl_seconds))
+        self.lock_wait_seconds = max(1, int(lock_wait_seconds))
 
     @property
     @abstractmethod
@@ -101,8 +110,10 @@ class _Entry:
 class InMemorySessionStore(SessionStore):
     """Process-local store. Correct for one worker; the default for development."""
 
-    def __init__(self, ttl_seconds: int):
-        super().__init__(ttl_seconds)
+    def __init__(
+        self, ttl_seconds: int, lock_wait_seconds: int = DEFAULT_LOCK_WAIT_SECONDS
+    ):
+        super().__init__(ttl_seconds, lock_wait_seconds)
         self._entries: dict[SessionKey, _Entry] = {}
         self._locks: dict[SessionKey, asyncio.Lock] = {}
         self._pool_lock = asyncio.Lock()
@@ -141,12 +152,24 @@ class InMemorySessionStore(SessionStore):
             self._entries.setdefault(key, _Entry())
 
     def lock(self, key: SessionKey):
+        wait_seconds = self.lock_wait_seconds
+
         @asynccontextmanager
         async def _guard() -> AsyncIterator[None]:
             async with self._pool_lock:
                 lock = self._locks.setdefault(key, asyncio.Lock())
-            async with lock:
+            try:
+                await asyncio.wait_for(lock.acquire(), timeout=wait_seconds)
+            except asyncio.TimeoutError as exc:
+                raise CampbellBusyError(
+                    "La sesión de Campbell AI está ocupada procesando otra consulta",
+                    retry_after=10,
+                    scope="session",
+                ) from exc
+            try:
                 yield
+            finally:
+                lock.release()
 
         return _guard()
 
@@ -154,8 +177,15 @@ class InMemorySessionStore(SessionStore):
 class RedisSessionStore(SessionStore):
     """Shared store so any worker or replica can serve the same conversation."""
 
-    def __init__(self, url: str, ttl_seconds: int, lock_timeout_seconds: int, namespace: str):
-        super().__init__(ttl_seconds)
+    def __init__(
+        self,
+        url: str,
+        ttl_seconds: int,
+        lock_timeout_seconds: int,
+        namespace: str,
+        lock_wait_seconds: int = DEFAULT_LOCK_WAIT_SECONDS,
+    ):
+        super().__init__(ttl_seconds, lock_wait_seconds)
         try:
             from redis.asyncio import Redis
         except ImportError as exc:  # pragma: no cover - depends on deployment extras
@@ -205,10 +235,14 @@ class RedisSessionStore(SessionStore):
         name = self._lock_key(key)
         redis = self._redis
         timeout = self.lock_timeout_seconds
+        # Two different budgets: the key expiry must outlive the slowest answer so no
+        # second request can interleave, while the *wait* is short so a queued request
+        # gives the user an answer instead of holding a worker for minutes.
+        wait_budget = min(self.lock_wait_seconds, timeout)
 
         @asynccontextmanager
         async def _guard() -> AsyncIterator[None]:
-            deadline = time.monotonic() + timeout
+            deadline = time.monotonic() + wait_budget
             acquired = False
             while time.monotonic() < deadline:
                 if await redis.set(name, "1", ex=timeout, nx=True):
@@ -216,8 +250,10 @@ class RedisSessionStore(SessionStore):
                     break
                 await asyncio.sleep(0.2)
             if not acquired:
-                raise CampbellConfigurationError(
-                    "La sesión de Campbell AI está ocupada procesando otra consulta"
+                raise CampbellBusyError(
+                    "La sesión de Campbell AI está ocupada procesando otra consulta",
+                    retry_after=10,
+                    scope="session",
                 )
             try:
                 yield
@@ -233,8 +269,12 @@ class RedisSessionStore(SessionStore):
 def build_session_store(settings) -> SessionStore:
     """Pick the session backend declared by configuration."""
     backend = str(getattr(settings, "session_backend", "memory") or "memory").strip().lower()
+    lock_wait = int(
+        getattr(settings, "queue_timeout_seconds", DEFAULT_LOCK_WAIT_SECONDS)
+        or DEFAULT_LOCK_WAIT_SECONDS
+    )
     if backend in {"memory", "inmemory", "local"}:
-        return InMemorySessionStore(settings.session_ttl_seconds)
+        return InMemorySessionStore(settings.session_ttl_seconds, lock_wait)
     if backend == "redis":
         url = str(getattr(settings, "redis_url", "") or "").strip()
         if not url:
@@ -246,6 +286,7 @@ def build_session_store(settings) -> SessionStore:
             ttl_seconds=settings.session_ttl_seconds,
             lock_timeout_seconds=getattr(settings, "session_lock_timeout_seconds", 300),
             namespace=getattr(settings, "redis_namespace", "campbell:sessions"),
+            lock_wait_seconds=lock_wait,
         )
     raise CampbellConfigurationError(
         f"CAMPBELL_AI_SESSION_BACKEND no soportado: {backend}"

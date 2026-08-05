@@ -9,13 +9,19 @@ from typing import Any
 import pandas as pd
 
 from src.campbell_ai.data import DashboardDataRepository
+from src.charts import CHART_KINDS
 from src.charts.builders import (
+    build_area,
+    build_box,
     build_category_bar,
     build_heatmap,
+    build_histogram,
     build_pareto,
     build_pie,
+    build_scatter,
     build_stacked_bar,
     build_time_series,
+    build_treemap,
 )
 from src.campbell_ai.errors import CampbellDataError
 from src.campbell_ai.models import VisualizationArtifact
@@ -145,9 +151,19 @@ CHART_SOURCES: dict[str, _ChartSource] = {
     ),
 }
 
-CHART_TYPES = {"bar", "line", "pie", "pareto", "heatmap", "stacked_bar"}
+CHART_TYPES = set(CHART_KINDS)
 AGGREGATIONS = {"count", "sum", "mean", "max", "min"}
 TIME_DIMENSIONS = {"day", "week", "month"}
+
+# Charts that read one value per row rather than an aggregate per category.
+ROW_LEVEL_TYPES = {"histogram", "box", "scatter"}
+# Charts that need a second dimension to have any meaning.
+PAIRED_TYPES = {"heatmap", "stacked_bar"}
+
+
+def secondary_metric_requested(secondary: str) -> bool:
+    """A scatter reuses `secondary_dimension` to name its second metric."""
+    return bool(str(secondary or "").strip())
 
 # Spanish axis and legend labels; the raw dimension keys are English internals.
 DIMENSION_LABELS: dict[str, str] = {
@@ -282,6 +298,118 @@ class DashboardVisualizationService:
         )
 
     @staticmethod
+    def _metric_label(metric: str) -> str:
+        key = str(metric or "").strip().lower()
+        return METRIC_LABELS.get(key, key.replace("_", " ")).capitalize()
+
+    def _build_row_level(
+        self,
+        *,
+        frame: pd.DataFrame,
+        source: _ChartSource,
+        kind: str,
+        primary: str,
+        primary_label: str,
+        secondary_label: str,
+        value_label: str,
+        resolved_title: str,
+        subtitle: str,
+        unit_id: str,
+        limit: int,
+    ):
+        """Build a chart that plots raw rows: histogram, box or scatter.
+
+        These read one value per record instead of an aggregate per category, so they
+        answer "how is this spread" rather than "which category is largest".
+        """
+        values = pd.to_numeric(frame["__metric"], errors="coerce").dropna()
+        if values.empty:
+            raise CampbellDataError("La métrica solicitada no contiene valores numéricos")
+
+        if not resolved_title:
+            resolved_title = self._default_title(
+                source, kind, primary, primary_label, secondary_label, value_label
+            )
+        if unit_id:
+            resolved_title += f" · {unit_id}"
+
+        if kind == "histogram":
+            figure = build_histogram(
+                [float(value) for value in values],
+                title=resolved_title,
+                value_label=value_label,
+                bins=max(5, min(limit * 2, 40)),
+                subtitle=subtitle,
+            )
+            summary = {
+                "min": round(float(values.min()), 3),
+                "max": round(float(values.max()), 3),
+                "mean": round(float(values.mean()), 3),
+                "median": round(float(values.median()), 3),
+            }
+            return figure, summary, int(values.nunique()), float(values.sum()), resolved_title
+
+        if kind == "box":
+            grouped: dict[str, list[float]] = {}
+            for label, chunk in frame.groupby("__primary", dropna=False):
+                numeric = pd.to_numeric(chunk["__metric"], errors="coerce").dropna()
+                if not numeric.empty:
+                    grouped[str(label)] = [float(value) for value in numeric]
+            # Keep the categories with the most observations so the plot stays readable.
+            ordered = dict(
+                sorted(grouped.items(), key=lambda item: len(item[1]), reverse=True)[:limit]
+            )
+            if not ordered:
+                raise CampbellDataError("No hay valores para comparar distribuciones")
+            figure = build_box(
+                ordered,
+                title=resolved_title,
+                dimension_label=primary_label,
+                value_label=value_label,
+                subtitle=subtitle,
+            )
+            summary = {
+                label: round(float(pd.Series(items).median()), 3)
+                for label, items in list(ordered.items())[:5]
+            }
+            return figure, summary, len(ordered), float(values.sum()), resolved_title
+
+        # scatter: one point per row, labelled by the primary dimension
+        secondary_values = pd.to_numeric(
+            frame["__secondary_metric"], errors="coerce"
+        )
+        valid = frame.assign(
+            __x=pd.to_numeric(frame["__metric"], errors="coerce"),
+            __y=secondary_values,
+        ).dropna(subset=["__x", "__y"])
+        if valid.empty:
+            raise CampbellDataError(
+                "No hay filas con ambas métricas presentes para el scatter"
+            )
+        status_column = self._column(frame, source.dimensions.get("status", ()))
+        points = [
+            {
+                "label": str(row["__primary"]),
+                "x": float(row["__x"]),
+                "y": float(row["__y"]),
+                "status": str(row[status_column]) if status_column else "",
+            }
+            for _, row in valid.head(max(limit, 30)).iterrows()
+        ]
+        figure = build_scatter(
+            points,
+            title=resolved_title,
+            x_label=value_label,
+            y_label=secondary_label,
+            subtitle=subtitle,
+        )
+        summary = {
+            str(point["label"]): [round(point["x"], 3), round(point["y"], 3)]
+            for point in points[:5]
+        }
+        return figure, summary, len(points), float(valid["__x"].sum()), resolved_title
+
+    @staticmethod
     def _aggregate(
         frame: pd.DataFrame,
         group_columns: list[str],
@@ -312,27 +440,61 @@ class DashboardVisualizationService:
     ) -> VisualizationArtifact:
         source = CHART_SOURCES.get(str(dataset).strip().lower())
         if source is None:
-            raise CampbellDataError("Fuente no permitida para visualización")
+            raise CampbellDataError(
+                f"Fuente no permitida para visualización: {dataset!r}. "
+                f"Disponibles: {', '.join(sorted(CHART_SOURCES))}"
+            )
 
         kind = str(chart_type).strip().lower()
         if kind not in CHART_TYPES:
-            raise CampbellDataError("Tipo de gráfico no permitido")
+            raise CampbellDataError(
+                f"Tipo de gráfico no permitido: {chart_type!r}. "
+                f"Disponibles: {', '.join(sorted(CHART_TYPES))}"
+            )
         primary = str(dimension).strip().lower()
         secondary = str(secondary_dimension).strip().lower()
         resolved_metric = str(metric or "count").strip().lower()
         resolved_aggregation = str(aggregation or "count").strip().lower()
         if resolved_aggregation not in AGGREGATIONS:
-            raise CampbellDataError("Agregación no permitida")
-        if resolved_metric == "count":
+            raise CampbellDataError(
+                f"Agregación no permitida: {aggregation!r}. "
+                f"Disponibles: {', '.join(sorted(AGGREGATIONS))}"
+            )
+        # Row-level charts plot the raw values, so an aggregation would flatten them.
+        if kind in ROW_LEVEL_TYPES:
+            if resolved_metric == "count":
+                raise CampbellDataError(
+                    f"El gráfico {kind} requiere una métrica numérica en 'metric', "
+                    f"no 'count'. Disponibles para esta fuente: "
+                    f"{', '.join(sorted(source.metrics)) or 'ninguna'}"
+                )
+            resolved_aggregation = "none"
+        elif resolved_metric == "count":
             resolved_aggregation = "count"
         elif resolved_aggregation == "count":
             raise CampbellDataError("Una métrica numérica requiere sum, mean, max o min")
-        if kind == "line" and primary not in TIME_DIMENSIONS:
-            raise CampbellDataError("El gráfico lineal requiere day, week o month")
-        if kind in {"heatmap", "stacked_bar"} and not secondary:
+
+        if kind in {"line", "area"} and primary not in TIME_DIMENSIONS:
+            raise CampbellDataError(
+                f"El gráfico {kind} requiere una dimensión temporal: day, week o month"
+            )
+        if kind in PAIRED_TYPES and not secondary:
             raise CampbellDataError("Este gráfico requiere secondary_dimension")
-        if kind not in {"heatmap", "stacked_bar"} and secondary:
-            raise CampbellDataError("secondary_dimension solo aplica a heatmap o stacked_bar")
+        if kind == "scatter" and not secondary_metric_requested(secondary):
+            raise CampbellDataError(
+                "El gráfico scatter requiere una segunda métrica numérica en "
+                "'secondary_dimension' (por ejemplo secondary_dimension=\"machine_score\")"
+            )
+        if kind not in PAIRED_TYPES | {"scatter"} and secondary:
+            raise CampbellDataError(
+                "secondary_dimension solo aplica a heatmap, stacked_bar o scatter"
+            )
+        if kind == "histogram" and primary not in {"", "unit"}:
+            # The histogram bins the metric itself; a category would be ignored.
+            raise CampbellDataError(
+                "El histograma no usa 'dimension' para agrupar: bina la métrica. "
+                "Usa box si quieres comparar la distribución entre categorías."
+            )
 
         frame = self.repository.load(source.dataset, client).copy()
         frame = self._keep_latest(frame, source)
@@ -374,10 +536,24 @@ class DashboardVisualizationService:
         if frame.empty:
             raise CampbellDataError("No hay datos para construir el gráfico solicitado")
 
-        frame["__primary"], primary_label = self._dimension_series(
-            frame, dates, source, primary
-        )
-        if secondary:
+        if kind == "histogram":
+            # No grouping dimension: the metric itself is the axis.
+            frame["__primary"] = ""
+            primary_label = ""
+        else:
+            frame["__primary"], primary_label = self._dimension_series(
+                frame, dates, source, primary
+            )
+        if kind == "scatter":
+            # `secondary_dimension` names the second metric, not a category.
+            secondary_values = self._metric_series(frame, source, secondary)
+            if secondary_values is None:
+                raise CampbellDataError(
+                    "La segunda métrica del scatter no puede ser 'count'"
+                )
+            frame["__secondary_metric"] = secondary_values
+            secondary_label = self._metric_label(secondary)
+        elif secondary:
             frame["__secondary"], secondary_label = self._dimension_series(
                 frame, dates, source, secondary
             )
@@ -395,6 +571,9 @@ class DashboardVisualizationService:
         limit = max(1, min(int(top_n), 30))
         if resolved_metric == "count":
             value_label = METRIC_LABELS["count"]
+        elif kind in ROW_LEVEL_TYPES:
+            # No aggregation happened, so the label must not claim one.
+            value_label = self._metric_label(resolved_metric)
         else:
             metric_name = METRIC_LABELS.get(
                 resolved_metric, resolved_metric.replace("_", " ")
@@ -407,7 +586,23 @@ class DashboardVisualizationService:
         resolved_title = str(title or "").strip()[:140]
         subtitle = self._window_subtitle(window)
 
-        if kind in {"heatmap", "stacked_bar"}:
+        if kind in ROW_LEVEL_TYPES:
+            figure, top_summary, categories, aggregated_total, resolved_title = (
+                self._build_row_level(
+                    frame=frame,
+                    source=source,
+                    kind=kind,
+                    primary=primary,
+                    primary_label=primary_label,
+                    secondary_label=secondary_label,
+                    value_label=value_label,
+                    resolved_title=resolved_title,
+                    subtitle=subtitle,
+                    unit_id=unit_id,
+                    limit=limit,
+                )
+            )
+        elif kind in {"heatmap", "stacked_bar"}:
             top_primary = frame["__primary"].value_counts().head(limit).index
             top_secondary = frame["__secondary"].value_counts().head(limit).index
             matrix_frame = frame[
@@ -496,6 +691,15 @@ class DashboardVisualizationService:
                     value_label=value_label,
                     subtitle=subtitle,
                 )
+            elif kind == "area":
+                figure = build_area(
+                    labels,
+                    values,
+                    title=resolved_title,
+                    dimension_label=primary_label,
+                    value_label=value_label,
+                    subtitle=subtitle,
+                )
             elif kind == "pie":
                 figure = build_pie(
                     labels,
@@ -513,6 +717,15 @@ class DashboardVisualizationService:
                     value_label=value_label,
                     subtitle=subtitle,
                 )
+            elif kind == "treemap":
+                figure = build_treemap(
+                    labels,
+                    values,
+                    title=resolved_title,
+                    dimension_label=primary_label,
+                    value_label=value_label,
+                    subtitle=subtitle,
+                )
             else:
                 figure = build_category_bar(
                     labels,
@@ -521,6 +734,7 @@ class DashboardVisualizationService:
                     dimension_label=primary_label,
                     value_label=value_label,
                     subtitle=subtitle,
+                    horizontal=kind == "horizontal_bar",
                 )
 
         summary: dict[str, Any] = {
@@ -574,8 +788,16 @@ class DashboardVisualizationService:
             return f"{subject} por {dimension} y {secondary_label.lower()}"
         if kind == "pie":
             return f"Distribución de {subject.lower()}{by_dimension}"
-        if kind == "line":
+        if kind in {"line", "area"}:
             return f"Evolución de {subject.lower()} por {dimension}"
+        if kind == "treemap":
+            return f"Composición de {subject.lower()}{by_dimension}"
+        if kind == "histogram":
+            return f"{value_label} de {subject.lower()}: distribución"
+        if kind == "box":
+            return f"{value_label} de {subject.lower()}{by_dimension}: dispersión"
+        if kind == "scatter":
+            return f"{value_label} vs {secondary_label.lower()} de {subject.lower()}"
         if value_label != METRIC_LABELS["count"]:
             return f"{value_label} de {subject.lower()}{by_dimension}"
         return f"{subject}{by_dimension}"

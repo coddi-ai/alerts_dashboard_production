@@ -43,6 +43,27 @@ class CampbellSettings:
     redis_namespace: str
     session_lock_timeout_seconds: int
     streaming_enabled: bool
+    # Durable conversation and feedback backup. The bucket and its credentials are read
+    # from the environment by the storage backend, never carried in settings.
+    #
+    # These carry defaults so a caller constructing settings directly — a test, an
+    # embedded consumer — gets a runtime that writes nothing and admits everything, and
+    # has to opt in to storage. `from_env` sets the deployment defaults instead, where
+    # persistence is on.
+    persistence_enabled: bool = False
+    persistence_prefix: str = "campbellAI"
+    persistence_local_dir: Path | None = None
+    history_list_limit: int = 50
+    conversation_summary_enabled: bool = False
+    model_summary: str = "gpt-4.1-mini"
+    # Admission control for parallel users.
+    max_concurrent_requests: int = 10
+    max_concurrent_per_user: int = 2
+    max_requests_per_minute: int = 200
+    queue_timeout_seconds: float = 20.0
+    retry_attempts: int = 3
+    retry_initial_delay: float = 1.0
+    retry_max_delay: float = 30.0
 
     @classmethod
     def from_env(cls) -> "CampbellSettings":
@@ -88,6 +109,38 @@ class CampbellSettings:
                 os.getenv("CAMPBELL_AI_SESSION_LOCK_TIMEOUT_SECONDS", "300")
             ),
             streaming_enabled=_env_bool("CAMPBELL_AI_STREAMING", False),
+            persistence_enabled=_env_bool("CAMPBELL_AI_PERSISTENCE", True),
+            # One owned folder inside the bucket the dashboard already uses, so backups
+            # and logs never mix with the analytics data.
+            persistence_prefix=os.getenv("CAMPBELL_AI_S3_PREFIX", "campbellAI"),
+            persistence_local_dir=Path(
+                os.getenv(
+                    "CAMPBELL_AI_BACKUP_DIR",
+                    str(_project_root() / "logs" / "campbell_ai_backup"),
+                )
+            ).expanduser().resolve(),
+            history_list_limit=int(os.getenv("CAMPBELL_AI_HISTORY_LIMIT", "50")),
+            conversation_summary_enabled=_env_bool("CAMPBELL_AI_SUMMARY", True),
+            model_summary=os.getenv("CAMPBELL_AI_MODEL_SUMMARY", "gpt-4.1-mini"),
+            # A single answer holds a worker for tens of seconds, so the useful bound is
+            # low; ten in flight already saturates one small instance.
+            max_concurrent_requests=int(
+                os.getenv("CAMPBELL_AI_MAX_CONCURRENT_REQUESTS", "10")
+            ),
+            # Two, not one: a user may legitimately have the dashboard open twice. More
+            # than that is a person hammering the send button.
+            max_concurrent_per_user=int(
+                os.getenv("CAMPBELL_AI_MAX_CONCURRENT_PER_USER", "2")
+            ),
+            max_requests_per_minute=int(
+                os.getenv("CAMPBELL_AI_MAX_REQUESTS_PER_MINUTE", "200")
+            ),
+            queue_timeout_seconds=float(
+                os.getenv("CAMPBELL_AI_QUEUE_TIMEOUT_SECONDS", "20")
+            ),
+            retry_attempts=int(os.getenv("CAMPBELL_AI_RETRY_ATTEMPTS", "3")),
+            retry_initial_delay=float(os.getenv("CAMPBELL_AI_RETRY_INITIAL_DELAY", "1")),
+            retry_max_delay=float(os.getenv("CAMPBELL_AI_RETRY_MAX_DELAY", "30")),
         )
 
 

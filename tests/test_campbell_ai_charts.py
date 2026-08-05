@@ -214,7 +214,10 @@ def test_registry_honours_the_predictive_module_allowlist(tmp_path, monkeypatch)
 
 
 def test_every_definition_declares_a_supported_chart_type():
-    supported = {"bar", "line", "pie", "pareto", "heatmap", "stacked_bar"}
+    # The registry also builds curated shapes (radar, gauge) the free grammar cannot.
+    from src.charts import ALL_CHART_KINDS
+
+    supported = set(ALL_CHART_KINDS)
     identifiers = [definition.chart_id for definition in CHART_DEFINITIONS]
 
     assert len(identifiers) == len(set(identifiers))

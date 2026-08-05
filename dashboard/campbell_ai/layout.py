@@ -20,7 +20,11 @@ ACCENT = BRAND_ACCENT
 ACCENT_SOFT = "rgba(52, 152, 219, 0.08)"
 ACCENT_BORDER = "rgba(52, 152, 219, 0.22)"
 
-CAMPBELL_AI_VERSION = "1.0.1"
+# Background of the user's own chat bubble. Change this one value to test other
+# colors — it defaults to the sidebar's blue-gray (dashboard/layout.py's left_menu).
+USER_BUBBLE_COLOR = "#2c3e50"
+
+CAMPBELL_AI_VERSION = "1.1.0"
 
 ALERT_SUGGESTIONS = {
     "weekly-summary": (
@@ -39,29 +43,93 @@ ALERT_SUGGESTIONS = {
 }
 
 
-def _capability_card(icon: str, title: str, description: str) -> dbc.Col:
-    return dbc.Col(
+def service_error_content(
+    title: str,
+    guidance: str = "",
+    pending_question: str = "",
+) -> list:
+    """Alert body for a service failure: what happened, what to do, and a way out.
+
+    A bare error line leaves the user stuck repeating the same failing action. This
+    states the cause and whether waiting helps. The retry action itself is a
+    permanent, always-mounted button elsewhere in the layout (see
+    `_retry_button` and `render_failure`'s style/label outputs) — Dash disables
+    an entire callback when one of its plain (non-pattern-matching) Inputs never
+    exists in the current layout, and this button is one of synchronize_chat's
+    Inputs, so it cannot come and go with the failure state.
+    """
+    body: list = [
         html.Div(
             [
-                html.I(className=f"{icon} mb-3", style={"fontSize": "1.8rem", "color": ACCENT}),
-                html.H6(title, className="mb-2", style={"fontWeight": "700"}),
-                html.P(
-                    description,
-                    className="text-muted mb-0",
-                    style={"fontSize": "0.86rem", "lineHeight": "1.5"},
-                ),
+                html.I(className="fas fa-triangle-exclamation me-2"),
+                html.Span(title, style={"fontWeight": "600"}),
             ],
-            style={
-                "height": "100%",
-                "padding": "1.15rem",
-                "borderRadius": "12px",
-                "background": ACCENT_SOFT,
-                "border": f"1px solid {ACCENT_BORDER}",
-            },
-        ),
-        width=12,
-        md=6,
-        className="mb-3",
+            className="d-flex align-items-center",
+        )
+    ]
+    if guidance:
+        body.append(
+            html.P(
+                guidance,
+                className="mb-0 mt-2",
+                style={"fontSize": "0.86rem", "lineHeight": "1.5"},
+            )
+        )
+    if pending_question:
+        body.append(
+            html.P(
+                [
+                    html.Span("Tu consulta se conservó: ", className="text-muted"),
+                    html.Em(f"“{pending_question[:160]}”"),
+                ],
+                className="mb-0 mt-2",
+                style={"fontSize": "0.82rem"},
+            )
+        )
+    return body
+
+
+def _retry_button() -> dbc.Button:
+    """Permanent retry control, hidden until a retryable failure shows it.
+
+    Must always be mounted: it is a plain-id Input of synchronize_chat, and Dash
+    disables that whole callback if the id never appears anywhere in the layout.
+    """
+    return dbc.Button(
+        [
+            html.I(className="fas fa-rotate-right me-2"),
+            html.Span("Reintentar", id="campbell-ai-retry-label"),
+        ],
+        id="campbell-ai-retry",
+        color="danger",
+        outline=True,
+        size="sm",
+        n_clicks=0,
+        className="mt-3",
+        style={"display": "none"},
+    )
+
+
+def unavailable_placeholder(title: str) -> html.Div:
+    """Conversation-area state for a dead service, instead of a blank panel."""
+    return html.Div(
+        [
+            html.I(
+                className="fas fa-plug-circle-xmark mb-3",
+                style={"fontSize": "2rem", "color": BRAND_MUTED},
+            ),
+            html.P(
+                title or "Campbell AI no está disponible",
+                className="mb-1",
+                style={"fontWeight": "600", "color": BRAND_TITLE},
+            ),
+            html.P(
+                "El resto del dashboard sigue funcionando con normalidad.",
+                className="text-muted mb-0",
+                style={"fontSize": "0.86rem"},
+            ),
+        ],
+        className="text-center py-5",
     )
 
 
@@ -96,6 +164,160 @@ def _suggested_question_button(question_id: str, question: str) -> dbc.Col:
     )
 
 
+def _conversation_history_panel() -> dbc.Card:
+    """Collapsible list of the user's previous conversations.
+
+    Collapsed by default: the point of the panel is to be there when someone needs to go
+    back, not to compete with the conversation for vertical space.
+    """
+    return dbc.Card(
+        [
+            dbc.CardHeader(
+                html.Div(
+                    [
+                        dbc.Button(
+                            [
+                                html.I(className="fas fa-clock-rotate-left me-2"),
+                                "Conversaciones anteriores",
+                                html.I(
+                                    className="fas fa-chevron-down ms-2",
+                                    style={"fontSize": "0.7rem"},
+                                ),
+                            ],
+                            id="campbell-ai-history-toggle",
+                            color="link",
+                            size="sm",
+                            n_clicks=0,
+                            className="text-decoration-none p-0",
+                            style={"fontWeight": "600", "color": BRAND_TITLE},
+                        ),
+                        html.Div(
+                            [
+                                dbc.Button(
+                                    [
+                                        html.I(className="fas fa-plus me-2"),
+                                        "Nueva",
+                                    ],
+                                    id="campbell-ai-new-conversation",
+                                    color="link",
+                                    size="sm",
+                                    n_clicks=0,
+                                    className="text-decoration-none",
+                                    title="Iniciar una conversación nueva",
+                                ),
+                                dbc.Button(
+                                    html.I(className="fas fa-rotate-right"),
+                                    id="campbell-ai-refresh-conversations",
+                                    color="link",
+                                    size="sm",
+                                    n_clicks=0,
+                                    className="text-muted text-decoration-none",
+                                    title="Actualizar la lista",
+                                ),
+                            ],
+                            className="d-flex align-items-center gap-1",
+                        ),
+                    ],
+                    className="d-flex justify-content-between align-items-center",
+                ),
+                style={"backgroundColor": "white"},
+            ),
+            dbc.Collapse(
+                dbc.CardBody(
+                    html.Div(id="campbell-ai-conversation-list"),
+                    style={"padding": "0.6rem 0.75rem", "maxHeight": "34vh", "overflowY": "auto"},
+                ),
+                id="campbell-ai-history-collapse",
+                is_open=False,
+            ),
+        ],
+        className="shadow-sm mb-3",
+        style={"borderRadius": "14px", "overflow": "hidden"},
+    )
+
+
+def render_conversation_list(
+    conversations: list[dict] | None, active_session_id: str | None = None
+) -> list:
+    """One row per archived conversation, labelled and dated.
+
+    The label is the AI summary when the backup has one and the first user message
+    otherwise, which is what makes a list of sessions recognizable at all — a session id
+    tells the user nothing about what they asked.
+    """
+    items = [item for item in (conversations or []) if isinstance(item, dict)]
+    if not items:
+        return [
+            html.P(
+                "Aún no hay conversaciones respaldadas para esta empresa.",
+                className="text-muted mb-0",
+                style={"fontSize": "0.82rem"},
+            )
+        ]
+
+    rows = []
+    for item in items:
+        session_id = str(item.get("session_id", ""))
+        if not session_id:
+            continue
+        is_active = bool(active_session_id) and session_id == str(active_session_id)
+        rows.append(
+            dbc.Button(
+                [
+                    html.Div(
+                        str(item.get("label") or item.get("title") or session_id),
+                        style={
+                            "fontWeight": "600" if is_active else "500",
+                            "fontSize": "0.85rem",
+                            "whiteSpace": "normal",
+                        },
+                    ),
+                    html.Div(
+                        [
+                            html.I(
+                                className="fas fa-clock me-1",
+                                style={"fontSize": "0.68rem"},
+                            ),
+                            _short_timestamp(str(item.get("updated_at", ""))),
+                            html.Span(" · ", className="mx-1"),
+                            f"{int(item.get('message_count', 0) or 0)} mensajes",
+                            html.Span(
+                                " · en curso" if is_active else "",
+                                style={"color": ACCENT, "fontWeight": "600"},
+                            ),
+                        ],
+                        className="text-muted mt-1",
+                        style={"fontSize": "0.72rem"},
+                    ),
+                ],
+                id={
+                    "type": "campbell-ai-open-conversation",
+                    "session_id": session_id,
+                },
+                n_clicks=0,
+                color="light",
+                className="text-start w-100 mb-2",
+                disabled=is_active,
+                style={
+                    "border": f"1px solid {ACCENT_BORDER if is_active else BRAND_GRID}",
+                    "background": ACCENT_SOFT if is_active else "white",
+                    "borderRadius": "10px",
+                    "padding": "0.6rem 0.75rem",
+                },
+            )
+        )
+    return rows
+
+
+def _short_timestamp(value: str) -> str:
+    """Render an ISO timestamp as date and time, without inventing a timezone."""
+    text = str(value or "").strip()
+    if len(text) < 16 or "T" not in text:
+        return text or "sin fecha"
+    date_part, time_part = text.split("T", 1)
+    return f"{date_part} {time_part[:5]}"
+
+
 def _initial_company_state(user_data: dict | None) -> dict:
     identity = None
     if not isinstance(user_data, dict) or not user_data.get(IDENTITY_PROOF_FIELD):
@@ -117,6 +339,12 @@ def create_campbell_ai_layout(user_data: dict | None = None) -> html.Div:
         [
             dcc.Store(id="campbell-ai-session-store", storage_type="session"),
             dcc.Store(id="campbell-ai-history-store", storage_type="session", data=[]),
+            # Which company the stored session belongs to. Kept next to the session id in
+            # session storage so returning to this tab can tell a reusable conversation
+            # from one that belongs to a company the user is no longer viewing.
+            dcc.Store(id="campbell-ai-session-company", storage_type="session"),
+            # Archived conversations for the current user and company.
+            dcc.Store(id="campbell-ai-conversations-store", storage_type="memory", data=[]),
             dcc.Store(
                 id="campbell-ai-company-store",
                 storage_type="memory",
@@ -124,6 +352,8 @@ def create_campbell_ai_layout(user_data: dict | None = None) -> html.Div:
             ),
             dcc.Store(id="campbell-ai-feedback-store", storage_type="session", data={}),
             dcc.Store(id="campbell-ai-pending-message-store", storage_type="memory", data=None),
+            # Single source for every failure the view has to explain.
+            dcc.Store(id="campbell-ai-failure-store", storage_type="memory", data=None),
             # Streaming plumbing: the browser reads the SSE proxy directly and parks
             # the final payload, which this interval lifts back into a Dash store.
             dcc.Store(id="campbell-ai-stream-store", storage_type="memory", data=None),
@@ -168,74 +398,14 @@ def create_campbell_ai_layout(user_data: dict | None = None) -> html.Div:
                             className="d-flex justify-content-between align-items-center flex-wrap gap-3",
                         ),
                         dbc.Alert(
+                            [html.Div(id="campbell-ai-error-body"), _retry_button()],
                             id="campbell-ai-error",
                             color="danger",
                             is_open=False,
                             dismissable=True,
-                            className="mt-3 mb-0",
+                            className="mt-3 mb-0 campbell-ai-alert",
                         ),
-                        html.Div(
-                            [
-                                html.H4(
-                                    "Bienvenido al Asistente de Mantenimiento",
-                                    className="mb-2",
-                                    style={"fontWeight": "650"},
-                                ),
-                                html.P(
-                                    "Consulta alertas, mantenimiento, aceite y telemetría de la empresa activa. "
-                                    "Campbell AI utiliza los mismos datos y permisos del dashboard.",
-                                    className="text-muted mb-0",
-                                    style={"maxWidth": "720px", "margin": "0 auto"},
-                                ),
-                            ],
-                            className="text-center my-4",
-                            style={
-                                "padding": "1.6rem",
-                                "borderRadius": "16px",
-                                "background": ACCENT_SOFT,
-                                "border": f"1px solid {ACCENT_BORDER}",
-                            },
-                        ),
-                        dbc.Row(
-                            [
-                                _capability_card(
-                                    "fas fa-database",
-                                    "Análisis de datos",
-                                    "Consulta fuentes de la empresa activa con trazabilidad y periodo.",
-                                ),
-                                _capability_card(
-                                    "fas fa-chart-bar",
-                                    "Gráficos interactivos",
-                                    "Crea tendencias, Pareto, mapas de calor y comparaciones interactivas.",
-                                ),
-                            ],
-                            className="g-3",
-                        ),
-                        html.Div(
-                            [
-                                html.Div(
-                                    [
-                                        html.I(
-                                            className="fas fa-lightbulb me-2",
-                                            style={"color": ACCENT},
-                                        ),
-                                        html.Span(
-                                            "Preguntas sugeridas sobre alertas",
-                                            style={"fontWeight": "650"},
-                                        ),
-                                    ],
-                                    className="mb-2",
-                                ),
-                                dbc.Row(
-                                    [
-                                        _suggested_question_button(question_id, question)
-                                        for question_id, question in ALERT_SUGGESTIONS.items()
-                                    ],
-                                    className="g-2",
-                                ),
-                            ],
-                            className="mb-4",
-                        ),
+                        _conversation_history_panel(),
                         dbc.Card(
                             [
                                 dbc.CardHeader(
@@ -267,7 +437,38 @@ def create_campbell_ai_layout(user_data: dict | None = None) -> html.Div:
                                 dbc.CardBody(
                                     dcc.Loading(
                                         html.Div(
-                                            id="campbell-ai-messages",
+                                            [
+                                                html.Div(
+                                                    [
+                                                        html.Div(
+                                                            [
+                                                                html.I(
+                                                                    className="fas fa-lightbulb me-2",
+                                                                    style={"color": ACCENT},
+                                                                ),
+                                                                html.Span(
+                                                                    "Preguntas sugeridas sobre alertas",
+                                                                    style={"fontWeight": "650"},
+                                                                ),
+                                                            ],
+                                                            className="mb-2",
+                                                        ),
+                                                        dbc.Row(
+                                                            [
+                                                                _suggested_question_button(question_id, question)
+                                                                for question_id, question in ALERT_SUGGESTIONS.items()
+                                                            ],
+                                                            className="g-2",
+                                                        ),
+                                                    ],
+                                                    # Lives inside the same scrolling area as the
+                                                    # messages below, so it scrolls out of view as
+                                                    # the conversation grows instead of pinning a
+                                                    # fixed block above the chat.
+                                                    className="mb-3",
+                                                ),
+                                                html.Div(id="campbell-ai-messages"),
+                                            ],
                                             style={
                                                 "minHeight": "250px",
                                                 "maxHeight": "58vh",
@@ -368,9 +569,71 @@ def _render_visualizations(message: dict) -> list[html.Div]:
     return charts
 
 
-def _feedback_controls(message_id: str, selected: str | None) -> html.Div:
-    disabled = selected in {"positive", "negative"}
+def _feedback_entry(entry) -> tuple[str | None, bool]:
+    """Read a stored feedback entry, tolerating the older rating-only shape."""
+    if isinstance(entry, dict):
+        rating = str(entry.get("rating") or "").strip() or None
+        return rating, bool(entry.get("comment"))
+    rating = str(entry or "").strip() or None
+    return rating, False
+
+
+def _feedback_comment_box(message_id: str, rating: str, submitted: bool) -> html.Div:
+    """Ask for the reason behind a vote, once a vote exists.
+
+    Shown only after voting: asking why before knowing whether the answer helped is a
+    question with no context, and an always-visible text box on every response reads as
+    an obligation rather than an invitation.
+    """
+    if submitted:
+        return html.Div(
+            [
+                html.I(className="fas fa-check me-2", style={"color": ACCENT}),
+                "Gracias, registramos tu comentario.",
+            ],
+            className="text-muted mt-2",
+            style={"fontSize": "0.75rem"},
+        )
+    prompt = (
+        "¿Qué faltó o qué estuvo mal? (opcional)"
+        if rating == "negative"
+        else "¿Qué te resultó útil? (opcional)"
+    )
     return html.Div(
+        [
+            dbc.Textarea(
+                id={"type": "campbell-ai-feedback-comment", "message_id": message_id},
+                placeholder=prompt,
+                rows=2,
+                maxLength=1000,
+                style={"fontSize": "0.8rem", "resize": "none", "borderRadius": "10px"},
+            ),
+            dbc.Button(
+                [html.I(className="fas fa-paper-plane me-2"), "Enviar comentario"],
+                id={
+                    "type": "campbell-ai-feedback-comment-send",
+                    "message_id": message_id,
+                },
+                n_clicks=0,
+                size="sm",
+                color="light",
+                className="mt-2",
+                style={
+                    "border": f"1px solid {ACCENT_BORDER}",
+                    "fontSize": "0.78rem",
+                    "fontWeight": "600",
+                },
+            ),
+        ],
+        className="mt-2",
+        style={"maxWidth": "420px"},
+    )
+
+
+def _feedback_controls(message_id: str, entry=None) -> html.Div:
+    selected, comment_submitted = _feedback_entry(entry)
+    disabled = selected in {"positive", "negative"}
+    controls = html.Div(
         [
             html.Span(
                 "¿Te sirvió esta respuesta?",
@@ -409,10 +672,15 @@ def _feedback_controls(message_id: str, selected: str | None) -> html.Div:
         ],
         className="d-flex align-items-center mt-3",
     )
+    if not disabled:
+        return controls
+    return html.Div(
+        [controls, _feedback_comment_box(message_id, selected or "", comment_submitted)]
+    )
 
 
 def render_chat_history(
-    messages: list[dict] | None, feedback: dict[str, str] | None = None
+    messages: list[dict] | None, feedback: dict | None = None
 ) -> list[html.Div]:
     """Render safe Markdown, Plotly charts and response feedback controls."""
     if not messages:
@@ -468,7 +736,7 @@ def render_chat_history(
                     "marginBottom": "0.9rem",
                     "padding": "0.85rem 1rem",
                     "borderRadius": "16px",
-                    "backgroundColor": BRAND_DARK if is_user else "#f6f8fa",
+                    "backgroundColor": USER_BUBBLE_COLOR if is_user else "#f6f8fa",
                     "color": "white" if is_user else BRAND_TITLE,
                     "border": "none" if is_user else f"1px solid {BRAND_GRID}",
                     "boxShadow": "0 1px 3px rgba(26,37,47,0.08)",

@@ -5,7 +5,9 @@ from __future__ import annotations
 import uuid
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from src.charts import ALL_CHART_KINDS, CHART_KINDS
 
 
 class DashboardPrincipal(BaseModel):
@@ -20,7 +22,19 @@ class VisualizationArtifact(BaseModel):
     title: str
     description: str
     dataset: str
-    chart_type: Literal["bar", "line", "pie", "pareto", "heatmap", "stacked_bar"]
+    # Validated against the shared vocabulary rather than a duplicated Literal, so
+    # adding a chart kind does not require editing three files.
+    chart_type: str
+
+    @field_validator("chart_type")
+    @classmethod
+    def _known_chart_type(cls, value: str) -> str:
+        if value not in ALL_CHART_KINDS:
+            raise ValueError(
+                f"chart_type no soportado: {value!r}. "
+                f"Disponibles: {', '.join(ALL_CHART_KINDS)}"
+            )
+        return value
     figure: dict[str, Any]
     summary: dict[str, Any] = Field(default_factory=dict)
 
@@ -57,12 +71,23 @@ class FeedbackRequest(SessionRequest):
     comment: str | None = Field(default=None, max_length=1000)
 
 
+class ConversationsRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=100)
+    company_id: str = Field(min_length=1, max_length=80)
+
+
 class InitializeResponse(BaseModel):
     session_id: str
     company_id: str
     username: str
     data_ready: bool
     datasets: dict[str, Any]
+    # Which analyses this client's data supports. Surfaced at initialization so a
+    # consumer knows the limits before the first question, not after a failure.
+    capabilities: dict[str, Any] = Field(default_factory=dict)
+    # How many messages were recovered from the durable backup into this session, so a
+    # consumer knows to render a thread it did not have in memory.
+    restored_messages: int = 0
 
 
 class MessageResponse(BaseModel):
@@ -86,6 +111,11 @@ class HistoryResponse(BaseModel):
     messages: list[ConversationMessage]
 
 
+class ConversationListResponse(BaseModel):
+    company_id: str
+    conversations: list[dict[str, Any]] = Field(default_factory=list)
+
+
 class FeedbackResponse(BaseModel):
     accepted: bool
     message_id: str
@@ -103,16 +133,7 @@ class CapabilitiesResponse(BaseModel):
     agents: list[str]
     reports: bool = False
     visualizations: bool = True
-    chart_types: list[str] = Field(
-        default_factory=lambda: [
-            "bar",
-            "line",
-            "pie",
-            "pareto",
-            "heatmap",
-            "stacked_bar",
-        ]
-    )
+    chart_types: list[str] = Field(default_factory=lambda: list(CHART_KINDS))
     explicit_time_windows: bool = True
     feedback: bool = True
     five_whys: bool = True
@@ -121,3 +142,8 @@ class CapabilitiesResponse(BaseModel):
     named_charts: list[str] = Field(default_factory=list)
     tables: bool = False
     files: bool = False
+    # Durable backup and browsable per-user history.
+    persistence: bool = False
+    conversation_history: bool = False
+    # Current admission-control load. Counts only, no identities.
+    concurrency: dict[str, Any] = Field(default_factory=dict)

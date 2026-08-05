@@ -6,6 +6,7 @@ import uuid
 from typing import AsyncIterator
 
 from src.campbell_ai.agents_runtime import CampbellAgentRuntime
+from src.campbell_ai.concurrency import ConcurrencyGuard, ConcurrencyLimits
 from src.campbell_ai.config import CampbellSettings, get_campbell_settings
 from src.campbell_ai.data import DashboardDataRepository
 from src.campbell_ai.errors import CampbellConfigurationError, CampbellDataError
@@ -15,6 +16,7 @@ from src.campbell_ai.identity import (
     resolve_dashboard_principal,
 )
 from src.campbell_ai.models import (
+    ConversationListResponse,
     FeedbackResponse,
     HistoryResponse,
     InitializeResponse,
@@ -31,10 +33,19 @@ class CampbellAIService:
         self.settings = settings or get_campbell_settings()
         self.repository = DashboardDataRepository(self.settings.data_root)
         self.runtime = CampbellAgentRuntime(self.repository, self.settings)
+        # Admission control lives at the service boundary, so both the blocking and the
+        # streaming endpoint are bounded by the same counters.
+        self.concurrency = ConcurrencyGuard(
+            ConcurrencyLimits.from_settings(self.settings)
+        )
 
     def _ensure_enabled(self) -> None:
         if not self.settings.enabled:
             raise CampbellConfigurationError("Campbell AI esta deshabilitado")
+
+    @staticmethod
+    def _user_key(principal) -> str:
+        return f"{principal.username}|{principal.company_id}"
 
     @staticmethod
     def _public_data_status(validation: dict) -> dict:
@@ -72,13 +83,29 @@ class CampbellAIService:
                 f"No hay fuentes de datos disponibles para {principal.company_id.upper()}"
             )
         await self.runtime.initialize(principal, resolved_session)
+        # A session that expired, or a worker that restarted, must not take the
+        # conversation with it: if the live thread is empty and the archive holds one for
+        # this exact session, restore it before answering anything.
+        restored = await self._rehydrate(principal, resolved_session)
         return InitializeResponse(
             session_id=resolved_session,
             company_id=principal.company_id,
             username=principal.username,
             data_ready=True,
             datasets=self._public_data_status(validation),
+            capabilities=self.repository.client_capabilities(principal.company_id),
+            restored_messages=restored,
         )
+
+    async def _rehydrate(self, principal, session_id: str) -> int:
+        """Restore an archived conversation into an empty session. Returns its length."""
+        if await self.runtime.history(principal, session_id):
+            return 0
+        archived = await self.runtime.archived_conversation(principal, session_id)
+        if not archived:
+            return 0
+        await self.runtime.restore(principal, session_id, archived)
+        return len(archived)
 
     async def send_message(
         self,
@@ -102,15 +129,18 @@ class CampbellAIService:
             visualizations = []
             grounding = GroundingReport()
         else:
-            (
-                response,
-                request_type,
-                message_id,
-                visualizations,
-                grounding,
-            ) = await self.runtime.answer(
-                principal, resolved_session, normalized_message
-            )
+            # Only real agent runs are metered. A deterministic refusal costs nothing and
+            # should not consume a slot another user is waiting for.
+            async with self.concurrency.slot(self._user_key(principal)):
+                (
+                    response,
+                    request_type,
+                    message_id,
+                    visualizations,
+                    grounding,
+                ) = await self.runtime.answer(
+                    principal, resolved_session, normalized_message
+                )
         return MessageResponse(
             response=response,
             message_id=message_id,
@@ -161,15 +191,18 @@ class CampbellAIService:
             )
             return
 
-        async for event in self.runtime.answer_stream(
-            principal, resolved_session, normalized_message
-        ):
-            if event.get("type") == "done":
-                yield await self._finalize_stream_event(
-                    event, principal, resolved_session
-                )
-            else:
-                yield event
+        # The slot is held for as long as the stream is consumed, so a streamed answer
+        # counts against the same limits as a blocking one.
+        async with self.concurrency.slot(self._user_key(principal)):
+            async for event in self.runtime.answer_stream(
+                principal, resolved_session, normalized_message
+            ):
+                if event.get("type") == "done":
+                    yield await self._finalize_stream_event(
+                        event, principal, resolved_session
+                    )
+                else:
+                    yield event
 
     async def _finalize_stream_event(
         self, event: dict, principal, resolved_session: str
@@ -189,6 +222,43 @@ class CampbellAIService:
         principal = resolve_dashboard_principal(username, company_id)
         resolved_session = normalize_session_id(session_id)
         messages = await self.runtime.history(principal, resolved_session)
+        return HistoryResponse(
+            session_id=resolved_session,
+            company_id=principal.company_id,
+            messages=messages,
+        )
+
+    async def conversations(
+        self, username: str, company_id: str
+    ) -> ConversationListResponse:
+        """List the user's archived conversations for the active company.
+
+        Scoped by the resolved principal, so a caller cannot list another user's
+        conversations by asking for a different username than the one it authenticated
+        with.
+        """
+        self._ensure_enabled()
+        principal = resolve_dashboard_principal(username, company_id)
+        rows = await self.runtime.archived_conversations(principal)
+        return ConversationListResponse(
+            company_id=principal.company_id,
+            conversations=[row.as_dict() for row in rows],
+        )
+
+    async def open_conversation(
+        self, username: str, company_id: str, session_id: str
+    ) -> HistoryResponse:
+        """Reopen an archived conversation as the live session and return it."""
+        self._ensure_enabled()
+        principal = resolve_dashboard_principal(username, company_id)
+        resolved_session = normalize_session_id(session_id)
+        await self.runtime.initialize(principal, resolved_session)
+        await self._rehydrate(principal, resolved_session)
+        messages = await self.runtime.history(principal, resolved_session)
+        if not messages:
+            raise CampbellDataError(
+                "La conversación solicitada no está disponible en el respaldo"
+            )
         return HistoryResponse(
             session_id=resolved_session,
             company_id=principal.company_id,

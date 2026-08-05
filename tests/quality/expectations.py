@@ -153,9 +153,11 @@ class DataFacts:
         return str(value)
 
     def coolant_upper_limit(self) -> str:
-        value = self._coolant_alert_detail().get("upper_limit")
+        # The threshold is state-dependent, so the detail reports the one in force at
+        # the peak rather than a single collapsed value.
+        value = self._coolant_alert_detail().get("upper_limit_at_peak")
         if value is None:
-            raise RuntimeError("El detalle no expone upper_limit")
+            raise RuntimeError("El detalle no expone upper_limit_at_peak")
         return str(value)
 
     def predictive_top_unit(self) -> str:
@@ -363,6 +365,82 @@ CASES: tuple[QualityCase, ...] = (
         expect_request_type="visualization",
         expect_chart=True,
         tags=("graficos",),
+    ),
+    # --- chart types recovered from the previous dashboard --------------------
+    QualityCase(
+        case_id="radar_chart",
+        expect_grounded=True,
+        question="Muéstrame un radar de los ensayos de aceite del motor del T_15 contra sus límites",
+        why="El radar se perdió en la migración; debe usar el catálogo y el componente pedido",
+        expect_request_type="visualization",
+        expect_chart=True,
+        expect_chart_ids=("oil_essay_radar",),
+        must_include=(("motor",), ("límite", "limite")),
+        expect_bold=True,
+        tags=("graficos", "radar"),
+    ),
+    QualityCase(
+        case_id="histogram_chart",
+        expect_grounded=True,
+        question="Genera un histograma de la severidad de los componentes por aceite",
+        why="El histograma se perdió en la migración",
+        expect_request_type="visualization",
+        expect_chart=True,
+        must_include_regex=(r"(distribu|severidad)",),
+        tags=("graficos", "distribucion"),
+    ),
+    QualityCase(
+        case_id="alert_timeseries_chart",
+        expect_grounded=True,
+        question="Muestra la evolución mensual de las alertas del último año",
+        why="La serie temporal de alertas se perdió en la migración",
+        expect_request_type="visualization",
+        expect_chart=True,
+        expect_bold=True,
+        tags=("graficos", "tendencia"),
+    ),
+    QualityCase(
+        case_id="gauge_chart",
+        expect_grounded=True,
+        question="Dame un indicador de la prioridad de telemetría del T_18",
+        why="'Indicador' debe rutear a visualización, no responderse solo con texto",
+        expect_request_type="visualization",
+        expect_chart=True,
+        expect_chart_ids=("unit_health_gauge",),
+        expect_bold=True,
+        tags=("graficos", "indicador"),
+    ),
+    QualityCase(
+        case_id="sensor_trend_chart",
+        expect_grounded=True,
+        question="Grafica las señales de la última alerta del T_18 contra sus límites",
+        why="El gráfico de sensores por alerta se perdió en la migración",
+        expect_request_type="visualization",
+        expect_chart=True,
+        expect_chart_ids=("alert_sensor_trend",),
+        must_include_facts=("latest_alert_unit",),
+        tags=("graficos", "senales"),
+    ),
+    QualityCase(
+        case_id="state_dependent_limit",
+        expect_grounded=True,
+        question="¿La última alerta del T_18 superó su umbral? Dame el detalle",
+        why=(
+            "El umbral depende del estado de máquina; comparar el pico contra el umbral "
+            "máximo reportaba cero excedencias cuando sí las hubo"
+        ),
+        must_include_regex=(r"(umbral|l[ií]mite)",),
+        expect_bold=True,
+        tags=("alertas", "detalle"),
+    ),
+    QualityCase(
+        case_id="treemap_chart",
+        expect_grounded=True,
+        question="Genera un treemap de alertas por tipo de disparador",
+        why="El treemap del tab de alertas no estaba disponible",
+        expect_request_type="visualization",
+        expect_chart=True,
+        tags=("graficos", "composicion"),
     ),
     QualityCase(
         case_id="chart_no_file_language",

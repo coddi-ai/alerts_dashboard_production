@@ -43,8 +43,17 @@ services:
       - CAMPBELL_AI_DATA_ROOT=/app/data
       - CAMPBELL_AI_INTERNAL_TOKEN=${CAMPBELL_AI_INTERNAL_TOKEN:?CAMPBELL_AI_INTERNAL_TOKEN is required}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      # Durable conversation and feedback backup. Declared explicitly so a deployment
+      # without these values fails visibly here instead of silently degrading to the
+      # local mirror inside the container.
+      - BUCKET_NAME=${BUCKET_NAME:-}
+      - ACCESS_KEY=${ACCESS_KEY:-}
+      - SECRET_KEY=${SECRET_KEY:-}
+      - CAMPBELL_AI_S3_PREFIX=${CAMPBELL_AI_S3_PREFIX:-campbellAI}
+      - CAMPBELL_AI_BACKUP_DIR=/app/logs/campbell_ai_backup
     volumes:
       - ./data:/app/data:ro
+      # Read-write: holds the feedback log and the local backup mirror.
       - ./logs:/app/logs
       - ./config:/app/config:ro
       - ./src:/app/src:ro

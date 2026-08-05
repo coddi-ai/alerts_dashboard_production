@@ -1,5 +1,9 @@
 # Campbell AI
 
+**Versión 1.1.0** — agrega persistencia de conversaciones en S3, historial por usuario,
+respaldo de feedback y control de concurrencia. El detalle está en
+[Novedades de la versión 1.1.0](#novedades-de-la-versión-110).
+
 Campbell AI está integrado en `tds_alerts_dashboard` mediante dos componentes:
 
 - `src/campbell_ai/`: API FastAPI, agentes, prompts, seguridad, sesiones y adaptación de datos.
@@ -41,6 +45,23 @@ Variables esenciales:
 | `CAMPBELL_AI_ENABLED` | Habilita u oculta Campbell AI. |
 | `SECRET_KEY` | Firma la sesión autenticada de Dash. |
 | `DASHBOARD_IDENTITY_MAX_AGE_SECONDS` | Vigencia de la prueba firmada de identidad; 12 horas por defecto. |
+| `BUCKET_NAME`, `ACCESS_KEY` | Bucket y credencial del respaldo en S3; ya configurados para el dashboard. En este repositorio `SECRET_KEY` cumple además el rol de secret access key de AWS. |
+
+Variables de persistencia y concurrencia (todas con valor por defecto utilizable):
+
+| Variable | Defecto | Uso |
+|---|---|---|
+| `CAMPBELL_AI_PERSISTENCE` | `true` | Habilita el respaldo de conversaciones y feedback. |
+| `CAMPBELL_AI_S3_PREFIX` | `campbellAI` | Carpeta propia dentro del bucket ya configurado. |
+| `CAMPBELL_AI_BACKUP_DIR` | `logs/campbell_ai_backup` | Espejo local del respaldo. |
+| `CAMPBELL_AI_HISTORY_LIMIT` | `50` | Conversaciones que devuelve el listado por usuario. |
+| `CAMPBELL_AI_SUMMARY` | `true` | Genera un título con IA para las conversaciones largas. |
+| `CAMPBELL_AI_MODEL_SUMMARY` | `gpt-4.1-mini` | Modelo del titulador. |
+| `CAMPBELL_AI_MAX_CONCURRENT_REQUESTS` | `10` | Respuestas simultáneas admitidas en total. |
+| `CAMPBELL_AI_MAX_CONCURRENT_PER_USER` | `2` | Respuestas simultáneas por usuario. |
+| `CAMPBELL_AI_MAX_REQUESTS_PER_MINUTE` | `200` | Cuota por minuto. |
+| `CAMPBELL_AI_QUEUE_TIMEOUT_SECONDS` | `20` | Espera máxima antes de responder "ocupado". |
+| `CAMPBELL_AI_RETRY_ATTEMPTS` | `3` | Reintentos ante fallos transitorios del modelo. |
 
 ## Lanzar solo la API en local
 
@@ -172,11 +193,17 @@ docker compose down
 | `POST` | `/api/v1/campbell-ai/initialize` | Inicializa o recupera una sesión. |
 | `POST` | `/api/v1/campbell-ai/message` | Procesa una pregunta y devuelve texto, figuras y el historial actualizado. |
 | `POST` | `/api/v1/campbell-ai/history` | Recupera el historial vigente. |
-| `POST` | `/api/v1/campbell-ai/feedback` | Registra valoración positiva o negativa. |
+| `POST` | `/api/v1/campbell-ai/conversations` | Lista las conversaciones respaldadas del usuario para la empresa activa. |
+| `POST` | `/api/v1/campbell-ai/conversations/open` | Reabre una conversación respaldada y la deja activa. |
+| `POST` | `/api/v1/campbell-ai/feedback` | Registra valoración positiva o negativa y, opcionalmente, un comentario escrito. |
 | `DELETE` | `/api/v1/campbell-ai/clear` | Limpia la conversación. |
 
 Todos salvo `health` requieren `X-Campbell-Token`. Cada operación de sesión vuelve a validar el
 usuario y `company_id` contra los permisos del dashboard.
+
+Códigos de estado que el consumidor debe distinguir: `401` credencial interna o usuario inexistente,
+`403` empresa no autorizada, `422` sesión inválida, `429` **servicio ocupado** (trae `Retry-After`; no
+es una falla, la misma consulta funciona al reintentar) y `503` falta configuración o datos.
 
 `message` devuelve el historial completo en `messages`, por lo que un consumidor no necesita
 encadenar `history` tras cada envío. Dash solo llama a `initialize` cuando aún no tiene sesión, de
@@ -225,6 +252,35 @@ componente", "qué señal" y "cuánto valió".
 | `query_telemetry_health` | `telemetry/machine_status.parquet` | Condición por equipo, solo la última semana evaluada salvo que se pida historial. |
 | `query_telemetry_components` | `telemetry/classified.parquet` | Condición por componente y las señales que la disparan. |
 | `query_predictive_risk` | `predictive/motor.csv`, `transmision.csv` | Ranking, banda de salud y modos de riesgo dominantes. |
+
+### Cuando el servicio no está disponible
+
+Un fallo de la API mostraba una sola línea sin salida ("No fue posible conectar con la API de
+Campbell AI") con el compositor habilitado, así que la única opción del usuario era repetir la acción
+que falla y perder la consulta que había escrito.
+
+Ahora el cliente clasifica la causa y la vista actúa según ella:
+
+| Causa | Badge | Reintento | Compositor |
+|---|---|---|---|
+| `unreachable` — servicio caído | Servicio caído | Sí | Bloqueado |
+| `timeout` — tardó demasiado | Tiempo excedido | Sí | Habilitado |
+| `busy` — servicio saturado (429) | Servicio ocupado | Sí | Habilitado |
+| `unavailable` — datos faltantes (503) | Datos no disponibles | Sí | Habilitado |
+| `server_error` — error interno (5xx) | Error del servicio | Sí | Bloqueado |
+| `credentials` / `not_configured` — token | Mal configurado / Sin configurar | No | Bloqueado |
+| `forbidden` — sin permisos (403) | Sin acceso | No | Habilitado |
+| `invalid_request` — 422 | Solicitud inválida | No | Habilitado |
+
+Cada caso trae una guía distinta, porque el usuario no puede arreglar un problema de despliegue pero
+sí necesita saber si esperar sirve o hay que avisar a alguien. Las causas que no pueden responderse
+bloquean el compositor en lugar de invitar a repetir la acción, y el área de conversación explica la
+situación aclarando que **el resto del dashboard sigue funcionando**, en vez de quedar en blanco como
+si la página estuviera rota.
+
+La consulta que falló se conserva y el botón de reintento la reenvía, así que no hay que reescribirla.
+Todo esto pasa por un único `campbell-ai-failure-store`: antes el texto de error se construía en seis
+lugares distintos.
 
 ### Errores accionables y autocorrección
 
@@ -277,6 +333,35 @@ Comportamiento observado en vivo:
 | "alertas del equipo T_99" | Informó que el identificador no existe y listó los equipos con alertas. |
 | "gráfico de alertas por marca de neumático" | Rechazó la dimensión y ofreció las válidas. |
 
+### Cobertura de datos por empresa
+
+Las empresas no tienen las mismas técnicas. En los datos actuales:
+
+| Cliente | Alertas | Detalle de señal | Mantenimiento | Aceite | Telemetría | Predictivo |
+|---|---|---|---|---|---|---|
+| CDA | sí | sí | sí | sí | sí | motor y transmisión |
+| EMIN | sí | — | sí | sí | — | — |
+| ENEX | — | — | — | sí | — | — |
+| CAPSTONE | sí | sí | — | sí | — | solo motor |
+
+Asumir el catálogo de CDA lleva a prometer análisis que no pueden ejecutarse, así que
+`ANALYSIS_CAPABILITIES` declara qué fuentes necesita cada tipo de análisis y
+`client_capabilities()` resuelve, por cliente, qué es posible y **por qué** el resto no:
+falta una fuente, o el módulo no está habilitado — son motivos distintos y se informan distinto.
+
+Se expone por tres vías: el campo `capabilities` de `initialize`, la herramienta
+`client_capabilities` del agente, y el filtro que ya aplicaba `list_charts`. Los prompts instruyen
+consultarla antes de un análisis multi-fuente y, ante una técnica ausente, informar la limitación
+con su motivo y ofrecer la alternativa más cercana, sin sustituirla por otra fuente.
+
+Comportamiento observado en vivo:
+
+| Cliente | Pregunta | Respuesta |
+|---|---|---|
+| EMIN | "¿qué componentes están anormales en telemetría?" | Informa que la empresa no tiene telemetría por componentes y ofrece alertas, mantenimiento y aceite. |
+| EMIN | "ranking de riesgo predictivo" | Informa que el módulo predictivo no está habilitado para el cliente. |
+| ENEX | "panorama con todo lo que tengas" | Declara que solo hay aceite y entrega los **208 equipos** evaluados por esa técnica. |
+
 ### Trazabilidad de cifras (requisito duro)
 
 Toda cifra que el agente escribe debe provenir de una consulta a los datos, nunca del modelo. Los
@@ -314,8 +399,8 @@ Para el **nombre** de una señal existe `describe_signals`, que lee el catálogo
 `src/charts/signals.py` (el mismo que rotula los gráficos del dashboard) y declara explícitamente
 `unit: null`. El agente no traduce códigos por su cuenta.
 
-Medición sobre la suite completa: **257 cifras verificadas contra los datos, 0 sin origen, 0
-unidades inventadas**. Un control negativo con preguntas que invitan a inventar confirmó el
+Medición sobre la suite completa (29 casos, versión 1.1.0): **485 cifras verificadas contra los
+datos, 0 sin origen, 0 unidades inventadas**. Un control negativo con preguntas que invitan a inventar confirmó el
 comportamiento: preguntado "¿a cuántos grados centígrados llegó…?" el agente respondió el valor sin
 unidad; una pregunta por costos fue bloqueada por estar fuera de dominio; y al interpretar la
 categoría `oil_hour_range: LT_1000` como "1000 horas" el auditor marcó la cifra, porque el código
@@ -336,25 +421,70 @@ Notas de contrato que evitan conclusiones incorrectas:
 ### Visualizaciones
 
 Las figuras Plotly se construyen desde una gramática segura de datasets, dimensiones y operaciones;
-el modelo no ejecuta Python arbitrario. Se admiten barras, líneas, pie, Pareto, mapas de calor y
-barras apiladas sobre `alerts`, `maintenance_actions`, `maintenance_summary`, `oil_machine_status`,
-`oil_components`, `telemetry_machine_status` y `telemetry_components`, junto con ventanas relativas
-o fechas ISO explícitas. Los ejemplos para los agentes están en `prompts/data_analyst_query.md` y
-`prompts/data_analyst_visualization.md`.
+el modelo no ejecuta Python arbitrario. Las fuentes son `alerts`, `maintenance_actions`,
+`maintenance_summary`, `oil_machine_status`, `oil_components`, `telemetry_machine_status` y
+`telemetry_components`, con ventanas relativas o fechas ISO explícitas. Los ejemplos para los
+agentes están en `prompts/data_analyst_query.md` y `prompts/data_analyst_visualization.md`.
+
+El vocabulario de tipos se declara una sola vez en `src/charts/__init__.py`, para que la gramática,
+el modelo de respuesta y el endpoint de capacidades no puedan discrepar:
+
+| Familia | Tipos | Cómo se usan |
+|---|---|---|
+| Agregados por categoría | `bar`, `horizontal_bar`, `line`, `area`, `pie`, `pareto`, `treemap`, `heatmap`, `stacked_bar` | `dimension` agrupa; `metric` + `aggregation` opcionales |
+| A nivel de registro | `histogram`, `box`, `scatter` | Grafican valores individuales; exigen una `metric` numérica, no `count` |
+| Solo catálogo | `radar`, `gauge` | Requieren una forma de datos curada |
+
+Los de nivel de registro no agregan, así que su etiqueta de eje **no** dice "Promedio de…": decirlo
+sería describir una operación que no ocurrió. El histograma no acepta `dimension` (bina la métrica) y
+el scatter reutiliza `secondary_dimension` para nombrar su segunda métrica; ambos rechazan la llamada
+con el motivo exacto en lugar de ignorar el argumento en silencio.
 
 Además de esa gramática existe un **catálogo de gráficos con nombre** en `chart_registry.py`, que
 reproduce vistas concretas del dashboard. El agente lo consulta con `list_dashboard_charts()` y lo
 renderiza con `render_dashboard_chart(chart_id, ...)`, de modo que "muéstrame el estado de la flota"
 entrega la misma figura que el usuario ve en su pestaña en lugar de una aproximación.
 
-| `chart_id` | Dominio | Fuente |
-|---|---|---|
-| `oil_fleet_status` | aceite | `oil/machine_status` |
-| `oil_component_status` | aceite | `oil/classified` |
-| `telemetry_fleet_status` | telemetría | `telemetry/machine_status` |
-| `telemetry_component_status` | telemetría | `telemetry/classified` |
-| `alert_ranking` | alertas | `consolidated_alerts` |
-| `predictive_motor_ranking` | predictivo | `predictive/motor` |
+| `chart_id` | Tipo | Dominio | Parámetros |
+|---|---|---|---|
+| `oil_fleet_status` | donut | aceite | — |
+| `oil_component_status` | barras apiladas | aceite | — |
+| `oil_essay_radar` | radar | aceite | `unit_id`, `component` |
+| `oil_severity_histogram` | histograma | aceite | — |
+| `telemetry_fleet_status` | donut | telemetría | — |
+| `telemetry_component_status` | barras apiladas | telemetría | — |
+| `telemetry_component_heatmap` | mapa de calor | telemetría | — |
+| `unit_health_gauge` | indicador | telemetría | `unit_id` |
+| `alert_ranking` | barras | alertas | `days`, `top_n` |
+| `alert_trend` | serie temporal | alertas | `days` |
+| `alert_trigger_treemap` | treemap | alertas | `days` |
+| `alert_sensor_trend` | series por señal | alertas | `unit_id`, `alert_id`, `signal` |
+| `predictive_motor_ranking` | barras | predictivo | `top_n` |
+| `predictive_risk_radar` | radar | predictivo | `unit_id`, `domain` |
+
+**Radar e indicador solo existen en el catálogo.** Requieren una forma de datos curada —ensayos
+contra sus umbrales, modos de falla contra la mediana de la flota— que la gramática libre no puede
+armar a partir de dataset × dimensión.
+
+El radar de aceite normaliza cada eje como valor ÷ umbral de alerta, porque los ensayos viven en
+escalas incomparables (hierro en decenas, zinc en miles) y un radar con ejes crudos es ilegible. El
+resumen conserva los valores absolutos y sus umbrales, así que el agente cita mediciones, no
+proporciones. Si no se indica `component`, elige el **de peor condición** y lo declara en
+`component_selected_by`, en lugar de tomar una muestra arbitraria y describirla como otra.
+
+`alert_sensor_trend` reemplaza el gráfico de sensores por alerta del dashboard anterior: un panel por
+señal, con su banda de límites y el eje temporal compartido. La pregunta abierta era cómo elige el
+agente qué señales graficar; la respuesta es que **por defecto usa la señal disparadora** —la que
+originó la alerta— y `query_alert_signals` reporta qué otras tienen valores capturados para que la
+elección sea informada. Una columna con límites pero sin lecturas no genera panel, y pedir una señal
+inexistente falla indicando las disponibles en vez de graficar otra. Los códigos se resuelven sin
+distinguir mayúsculas, porque un desliz de transcripción abortaba el gráfico completo.
+
+**El umbral depende del estado de máquina.** Un equipo en ralentí tiene un techo menor que uno en
+operación, así que `query_alert_detail` compara **cada muestra contra su propio umbral** y reporta
+`upper_limit_values`, `upper_limit_at_peak` y `state_at_peak`. Colapsar la columna a su máximo
+reportaba cero excedencias en alertas que sí superaron su límite de ralentí: la diferencia entre
+"no pasó nada" y "excedió el umbral 10 veces".
 
 `chart_id` y parámetros se validan contra listas explícitas: un id desconocido, un parámetro no
 declarado o un módulo no habilitado para el cliente se rechazan, y los valores numéricos se acotan a
@@ -405,6 +535,123 @@ plazo, la solicitud recibe un error explícito en vez de intercalarse.
 `health` y `capabilities` publican `session_backend`, de modo que un despliegue puede verificar que
 no está corriendo varios workers sobre el store local.
 
+### Persistencia e historial por usuario
+
+El store de sesiones expira las conversaciones y, con el backend `memory`, vive en un solo proceso.
+Eso es correcto para la memoria conversacional y **no sirve como respaldo**: un reinicio, un TTL
+vencido o un cambio de pestaña se llevaban la conversación. `persistence.py` mantiene la copia
+durable en el bucket que el dashboard ya usa, bajo una carpeta propia:
+
+```
+campbellAI/
+  conversations/<empresa>/<usuario>/index.json
+  conversations/<empresa>/<usuario>/<sesion>/conversation.json
+  conversations/<empresa>/<usuario>/<sesion>/batches/<n_mensajes>.json
+  logs/feedback/<empresa>/<usuario>/<fecha>/<sesion>__<mensaje>__<tipo>.json
+```
+
+Tres decisiones que no son las obvias:
+
+- **Los mensajes se escriben por lote, no un objeto por mensaje.** Cada interacción escribe un
+  objeto pequeño con lo nuevo desde el último respaldo, más el snapshot completo. Si falla el
+  snapshot, el intercambio sobrevive en su lote; y como la clave del lote se deriva del número de
+  mensajes —que solo crece— un reintento **sobrescribe** en vez de duplicar la conversación.
+- **El índice por usuario es un objeto real.** Listar leyendo cada `conversation.json` cuesta un GET
+  por sesión y la barra lateral se degradaría con cada conversación nueva. Un índice responde el
+  listado con un solo GET, y si se pierde se reconstruye recorriendo el prefijo.
+- **Nada de esto puede romper una conversación.** El respaldo es un efecto secundario de responder:
+  cada llamada al almacenamiento está contenida, los fallos se registran y cuentan, el espejo local
+  sigue escribiendo y el usuario recibe su respuesta igual. Las escrituras van a un hilo para no
+  bloquear el event loop y, en el camino bloqueante, ocurren **fuera del candado de sesión**, así que
+  un respaldo lento no retrasa la siguiente pregunta de esa conversación.
+
+Las claves se derivan siempre del principal autenticado, nunca de la entrada del cliente, así que la
+carpeta de un usuario es inalcanzable desde la sesión de otro. Los segmentos se normalizan: un
+`../` en un nombre no produce una clave que se salga del prefijo. Las **figuras Plotly no se
+respaldan** (se conservan título, descripción y tipo): son cientos de kilobytes reproducibles desde
+los mismos datos.
+
+**Recuperación.** `initialize` comprueba si la sesión viva está vacía y, en ese caso, restaura la
+conversación archivada de ese mismo `session_id`, informando cuántos mensajes recuperó en
+`restored_messages`. Verificado en vivo: tras matar y relanzar la API, `initialize` devolvió
+`restored: 8` y `history` los ocho mensajes. Restaurar nunca sobrescribe un hilo vivo, porque la
+sesión activa siempre es más reciente que el archivo.
+
+**Título de la conversación.** El listado necesita una etiqueta reconocible; un `session_id` no dice
+nada. Por defecto es el **primer mensaje del usuario** recortado —determinista y sin invención—. A
+partir del segundo intercambio se genera además un **resumen con IA** (`summary.py`) que pasa a ser
+la etiqueta visible, conservando el título original. El resumen se somete a la misma regla de
+trazabilidad que cualquier respuesta: si contiene una cifra que no aparece en la conversación, se
+descarta y queda el título. Un fallo del titulador no es un error; solo significa que manda el primer
+mensaje.
+
+**En la vista.** Un panel plegable "Conversaciones anteriores" lista las conversaciones respaldadas
+con su etiqueta, fecha y cantidad de mensajes; abrir una la deja activa y se puede seguir
+conversando en ella. "Nueva" abre un hilo vacío sin tocar el respaldo, y "Limpiar" vacía el hilo
+visible **sin borrar** lo ya respaldado: vaciar la pantalla no es una orden de eliminación.
+
+**Al volver a la pestaña.** La conversación ya no desaparece. `campbell-ai-session-company` guarda,
+junto al `session_id` en almacenamiento de sesión, a qué empresa pertenece el hilo. Antes el store de
+empresa vivía en memoria y se vaciaba en cada montaje, así que volver a la pestaña se interpretaba
+como un cambio de empresa y descartaba el hilo. Ahora un montaje sin empresa almacenada reutiliza la
+sesión, y si el servicio no la tiene en memoria, la restaura desde el respaldo.
+
+### Feedback: valoración y comentario
+
+Las flechas registran dos eventos distintos —la valoración y, opcionalmente, el comentario escrito—
+para que quien vota primero y explica después no vea su explicación descartada como duplicada. Cada
+evento se escribe en el log local JSONL y se respalda en S3 como su propio objeto; una clave derivada
+del evento hace que un reenvío se sobrescriba, en lugar de perder votos en un lectura-modificación-
+escritura sobre un archivo compartido.
+
+El cuadro de comentario aparece **solo después de votar**: preguntar el motivo antes de saber si la
+respuesta sirvió es una pregunta sin contexto, y un campo de texto permanente en cada respuesta se
+lee como una obligación.
+
+Lo que deliberadamente **no** se guarda es la pregunta ni la respuesta. Una valoración es una opinión
+sobre una respuesta; copiar la conversación a un log aparte duplicaría datos del cliente en una
+segunda ruta de retención sin ganar nada.
+
+### Concurrencia y usuarios en paralelo
+
+Una respuesta ocupa un worker durante decenas de segundos y encadena varias llamadas al modelo, así
+que bastan unos pocos usuarios simultáneos para agotar el event loop o la cuota. Sin un límite, el
+modo de fallo es el peor: todas las consultas se degradan juntas hasta expirar, y nadie sabe si
+esperar sirve.
+
+`concurrency.py` acota la admisión en tres ejes, en el borde del servicio (los caminos bloqueante y
+de streaming comparten los contadores):
+
+| Eje | Defecto | Qué evita |
+|---|---|---|
+| Global | 10 simultáneas | Saturar el proceso y la cuota del modelo. |
+| Por usuario | 2 simultáneas | Que una persona con varias pestañas ocupe todo el servicio. |
+| Por minuto | 200 | Superar la cuota upstream en ráfagas. |
+
+Una solicitud que no puede admitirse espera poco y luego falla rápido con `429` y `Retry-After`.
+Fallar rápido es el punto: una cola sin límite convierte una sobrecarga en un timeout, y el usuario
+no sabe si esperar. El límite por usuario **no espera**, porque encolarlo solo retrasaría una consulta
+que ese usuario no está mirando mientras ocupa un cupo que otro sí necesita.
+
+Dos consultas sobre la **misma** conversación siguen serializadas por el candado de sesión, ahora con
+dos presupuestos distintos: la expiración de la llave supera la respuesta más lenta —para que nada se
+intercale— mientras la **espera** es corta, de modo que la segunda pestaña recibe "la sesión está
+ocupada" en vez de retener un worker durante minutos.
+
+Del lado del modelo, `execute_with_retry` reintenta con backoff exponencial **solo** los fallos
+transitorios (429, 5xx, timeouts, conexiones cortadas). Un error permanente —una columna inexistente—
+se propaga en el primer intento: gastar tres llamadas al modelo en un error que no puede cambiar es
+puro costo.
+
+En el dashboard, `429` se clasifica como `busy`: badge "Servicio ocupado", guía que dice esperar unos
+segundos, consulta conservada, botón de reintento y **compositor habilitado**, porque la misma
+pregunta va a funcionar. `capabilities` publica la carga actual (`in_flight`, `peak_in_flight`,
+`admitted`, `rejected`) sin identificar a nadie.
+
+Comportamiento observado en vivo con tres consultas simultáneas del mismo usuario sobre una sesión:
+dos respondieron `200` una tras otra y la tercera recibió `429` con `Retry-After: 5` y el mensaje
+"Ya tienes una consulta de Campbell AI en curso; espera su respuesta antes de enviar otra".
+
 ### Streaming de respuestas
 
 Con `CAMPBELL_AI_STREAMING=true` la API expone `POST /api/v1/campbell-ai/message/stream` como SSE.
@@ -449,6 +696,11 @@ python -m pytest tests/ -q
 | `tests/test_campbell_ai_charts.py` | Tema compartido, builders puros y catálogo con nombre. |
 | `tests/test_campbell_ai_grounding.py` | Auditoría de trazabilidad numérica y catálogo de señales. |
 | `tests/test_campbell_ai_recovery.py` | Esquema con vocabulario de filtros y errores accionables. |
+| `tests/test_campbell_ai_chart_types.py` | Tipos de gráfico recuperados y formas curadas del catálogo. |
+| `tests/test_campbell_ai_unavailable.py` | Clasificación de fallos de la API y degradación de la vista. |
+| `tests/test_campbell_ai_coverage.py` | Capacidades por cliente y gráfico de señales por alerta. |
+| `tests/test_campbell_ai_persistence.py` | Layout de claves, escritura por lotes, índice, aislamiento entre usuarios, restauración y respaldo de feedback. |
+| `tests/test_campbell_ai_concurrency.py` | Límites global, por usuario y por minuto; reintentos transitorios; candado de sesión; `429` con `Retry-After`. |
 | `tests/test_campbell_ai_ui.py` | Layout y callbacks de la vista Dash. |
 | `tests/test_response_quality.py` | Lógica del evaluador de calidad (siempre) y la suite completa (opt-in). |
 
@@ -456,7 +708,7 @@ python -m pytest tests/ -q
 
 Las pruebas anteriores verifican que la capa de datos devuelva las filas correctas. Esa garantía no
 dice nada sobre la **respuesta que lee el usuario**, y editar un prompt es la forma más fácil de
-degradarla sin que nada falle. `tests/quality/` cubre justamente eso: 22 casos que ejecutan los
+degradarla sin que nada falle. `tests/quality/` cubre justamente eso: 29 casos que ejecutan los
 agentes reales y evalúan si la respuesta está fundamentada, completa y con el formato acordado.
 
 Es opt-in porque consume la API de OpenAI (~10 minutos y costo real):
@@ -467,6 +719,11 @@ python -m dotenv run -- python -m tests.quality.runner --client cda --report qua
 
 Filtros útiles: `--case latest_alert`, `--tag graficos`, `--tag seguridad`, `--concurrency 4`.
 Bajo pytest se habilita con `CAMPBELL_AI_QUALITY_SUITE=1`.
+
+Conviene ejecutarla con `CAMPBELL_AI_PERSISTENCE=false`, para no dejar 29 conversaciones de prueba
+en el respaldo del usuario con el que corre. El runner además ensancha el límite de admisión por
+usuario al ancho del lote: todos los casos corren como el mismo usuario y, con el tope de dos,
+`--concurrency 4` habría reportado como fallos consultas que solo estaban en cola.
 
 Cada caso declara en `expectations.py` qué protege y qué debe cumplirse: tipo de respuesta,
 menciones obligatorias, menciones prohibidas, negrita en los datos, declaración del periodo,
@@ -483,3 +740,25 @@ cifra derivada de un código de categoría sin respaldo en los datos.
 
 Los tests del evaluador (`test_response_quality.py`) sí corren siempre, así que un error en la
 lógica de puntuación se detecta sin gastar tokens.
+
+## Novedades de la versión 1.1.0
+
+| Cambio | Dónde |
+|---|---|
+| Respaldo de cada interacción en S3 bajo `campbellAI/`, por empresa y usuario, con escritura por lotes | `persistence.py` |
+| Restauración de la conversación tras expirar la sesión o reiniciar el servicio | `service.initialize`, `runtime.restore` |
+| Historial navegable por usuario, con título del primer mensaje o resumen generado por IA | `persistence.py`, `summary.py`, panel "Conversaciones anteriores" |
+| La conversación ya no desaparece al salir y volver a la pestaña | `campbell-ai-session-company` |
+| Valoración y comentario escrito como eventos separados, ambos respaldados | `feedback.py`, `_feedback_comment_box` |
+| Control de admisión global, por usuario y por minuto, con `429` + `Retry-After` | `concurrency.py`, `api._translate_error` |
+| Reintento con backoff de fallos transitorios del modelo | `concurrency.execute_with_retry` |
+| Candado de sesión con espera acotada: la segunda pestaña recibe "ocupada" en vez de retener un worker | `sessions.py` |
+| Corrección: `synchronize_chat` declaraba un parámetro sin su `State`, por lo que el reintento fallaba | `dashboard/campbell_ai/callbacks.py` |
+
+Verificado en vivo contra el bucket configurado y la API en ejecución: escritura y lectura de los
+objetos bajo `campbellAI/`, listado y reapertura de una conversación, valoración más comentario,
+restauración de ocho mensajes tras reiniciar el proceso, y `429` con `Retry-After` en la tercera
+consulta simultánea de un mismo usuario. Los objetos de esa verificación se eliminaron del bucket.
+
+Sin cambios en el alcance excluido: siguen deshabilitados reportes, PDF, tablas capturadas,
+exportaciones, descargas y archivos.

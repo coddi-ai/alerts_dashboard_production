@@ -15,6 +15,7 @@ import pandas as pd
 
 from src.campbell_ai.errors import CampbellDataError
 from src.campbell_ai.identity import normalize_client_id
+from src.charts.signals import signal_label
 
 
 @dataclass(frozen=True)
@@ -174,6 +175,7 @@ DATASET_FILTERS: dict[str, tuple[FilterSpec, ...]] = {
 TOOL_DATASETS: dict[str, str] = {
     "query_alerts": "alerts",
     "query_alert_detail": "alerts_detail",
+    "query_alert_signals": "alerts_detail",
     "query_maintenance": "maintenance_actions",
     "query_maintenance_summary": "maintenance_summary",
     "query_oil_status": "oil_machine_status",
@@ -182,6 +184,95 @@ TOOL_DATASETS: dict[str, str] = {
     "query_telemetry_components": "telemetry_classified",
     "query_predictive_risk": "predictive_motor",
 }
+
+@dataclass(frozen=True)
+class AnalysisCapability:
+    """One kind of analysis, and the datasets it cannot work without."""
+
+    key: str
+    label: str
+    tools: tuple[str, ...]
+    requires: tuple[str, ...]
+    requires_predictive_module: bool = False
+
+
+# Clients do not all carry the same techniques: EMIN has no telemetry, ENEX only
+# oil, capstone no maintenance. Declaring what each analysis needs lets the agent
+# learn its limits up front instead of discovering them through failures.
+ANALYSIS_CAPABILITIES: tuple[AnalysisCapability, ...] = (
+    AnalysisCapability(
+        "alerts", "Alertas consolidadas", ("query_alerts",), ("alerts",)
+    ),
+    AnalysisCapability(
+        "alert_detail",
+        "Valor medido y umbral de la señal que disparó una alerta",
+        ("query_alert_detail", "query_alert_signals"),
+        ("alerts_detail",),
+    ),
+    AnalysisCapability(
+        "alert_sensor_trend",
+        "Series de las senales de una alerta contra sus limites",
+        ("render_dashboard_chart(alert_sensor_trend)",),
+        ("alerts_detail",),
+    ),
+    AnalysisCapability(
+        "maintenance",
+        "Acciones de mantenimiento",
+        ("query_maintenance",),
+        ("maintenance_actions",),
+    ),
+    AnalysisCapability(
+        "maintenance_summary",
+        "Resumen semanal de mantenimiento",
+        ("query_maintenance_summary",),
+        ("maintenance_summary",),
+    ),
+    AnalysisCapability(
+        "oil_fleet",
+        "Condición de la flota por análisis de aceite",
+        ("query_oil_status",),
+        ("oil_machine_status",),
+    ),
+    AnalysisCapability(
+        "oil_components",
+        "Condición por componente y ensayos fuera de límite",
+        ("query_oil_components",),
+        ("oil_classified",),
+    ),
+    AnalysisCapability(
+        "oil_limits",
+        "Comparación de ensayos contra sus límites de referencia",
+        ("render_dashboard_chart(oil_essay_radar)",),
+        ("oil_classified", "oil_limits"),
+    ),
+    AnalysisCapability(
+        "telemetry_fleet",
+        "Condición de la flota por telemetría",
+        ("query_telemetry_health",),
+        ("telemetry_machine_status",),
+    ),
+    AnalysisCapability(
+        "telemetry_components",
+        "Componentes y señales disparadoras por telemetría",
+        ("query_telemetry_components",),
+        ("telemetry_classified",),
+    ),
+    AnalysisCapability(
+        "predictive_motor",
+        "Modelo predictivo de motor",
+        ("query_predictive_risk(domain='motor')",),
+        ("predictive_motor",),
+        requires_predictive_module=True,
+    ),
+    AnalysisCapability(
+        "predictive_transmission",
+        "Modelo predictivo de transmisión",
+        ("query_predictive_risk(domain='transmision')",),
+        ("predictive_transmission",),
+        requires_predictive_module=True,
+    ),
+)
+
 
 # Shared bands so predictive ranking is read identically by every consumer.
 PREDICTIVE_BANDS: tuple[tuple[float, str], ...] = (
@@ -574,6 +665,27 @@ class DashboardDataRepository:
         }
         return filtered, filtered_dates, metadata
 
+    @staticmethod
+    def _translate_signal_list(value: Any, separators: str = ",;") -> str | None:
+        """Translate one signal code or a delimited list of them into Spanish.
+
+        Alerts and components can be triggered by more than one signal at once
+        (e.g. a telemetry signal alongside a tribology variable), stored as a single
+        delimited string. Each token is looked up independently so a mixed-trigger
+        value like "AirFltr,Hierro" becomes "Restricción del filtro de aire, Hierro"
+        instead of reaching the model as raw codes it must guess at or translate
+        itself.
+        """
+        if value is None or (isinstance(value, float) and pd.isna(value)):
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        tokens = [token.strip() for token in re.split(f"[{re.escape(separators)}]", text) if token.strip()]
+        if not tokens:
+            return None
+        return ", ".join(signal_label(token) or token for token in tokens)
+
     @classmethod
     def _records(cls, frame: pd.DataFrame, columns: list[str], limit: int) -> list[dict[str, Any]]:
         selected = list(
@@ -637,6 +749,79 @@ class DashboardDataRepository:
                 "columns_truncated": len(columns) > 40,
             }
         return json.dumps(compact, ensure_ascii=False, default=str)
+
+    def client_capabilities(self, client: str) -> dict[str, Any]:
+        """Which analyses are possible for this client, and why the rest are not.
+
+        Data coverage differs per company, so an agent that assumes CDA's catalogue
+        will promise analyses that cannot run. Resolving capability once, from the
+        datasets that are actually present, turns those into an upfront limitation
+        instead of a mid-answer failure.
+        """
+        normalized = normalize_client_id(client)
+        validation = self.validate_client(normalized)
+        datasets = validation["datasets"]
+        predictive_allowed = predictive_module_allows(normalized)
+
+        available: list[dict[str, Any]] = []
+        unavailable: list[dict[str, Any]] = []
+        for capability in ANALYSIS_CAPABILITIES:
+            missing = [
+                DATASET_MAP[key].label
+                for key in capability.requires
+                if not datasets.get(key, {}).get("valid")
+            ]
+            blocked_module = (
+                capability.requires_predictive_module and not predictive_allowed
+            )
+            entry = {
+                "key": capability.key,
+                "label": capability.label,
+                "tools": list(capability.tools),
+            }
+            if blocked_module:
+                unavailable.append(
+                    {
+                        **entry,
+                        "reason": "El módulo predictivo no está habilitado para este cliente",
+                    }
+                )
+            elif missing:
+                unavailable.append(
+                    {**entry, "reason": f"Faltan fuentes: {', '.join(missing)}"}
+                )
+            else:
+                available.append(entry)
+
+        return {
+            "company_id": normalized,
+            "available": available,
+            "unavailable": unavailable,
+            "techniques": {
+                "alertas": any(item["key"].startswith("alert") for item in available),
+                "aceite": any(item["key"].startswith("oil") for item in available),
+                "telemetria": any(
+                    item["key"].startswith("telemetry") for item in available
+                ),
+                "mantenimiento": any(
+                    item["key"].startswith("maintenance") for item in available
+                ),
+                "predictivo": any(
+                    item["key"].startswith("predictive") for item in available
+                ),
+            },
+        }
+
+    def describe_capabilities(self, client: str) -> str:
+        """Client capabilities as JSON, with instructions for the agent."""
+        payload = self.client_capabilities(client)
+        payload["note"] = (
+            "Solo prometas los análisis listados en 'available'. Para los de "
+            "'unavailable', informa la limitación con su motivo y ofrece la "
+            "alternativa más cercana entre los disponibles; no los sustituyas por "
+            "otra fuente ni reintentes sus herramientas."
+        )
+        return json.dumps(payload, ensure_ascii=False, default=str)
 
     def describe_dataset(self, client: str, dataset: str = "") -> str:
         """Schema plus the real filter vocabulary, so a failed guess can be corrected.
@@ -778,6 +963,13 @@ class DashboardDataRepository:
         ):
             if column:
                 summary[label] = self._distribution(frame, column)
+        if trigger_var_col and summary.get("by_trigger_var"):
+            # Spanish label per code, keyed the same as by_trigger_var, so the agent
+            # reports "Restricción del filtro de aire" instead of the raw "AirFltr".
+            summary["by_trigger_var_labels"] = {
+                code: self._translate_signal_list(code) or code
+                for code in summary["by_trigger_var"]
+            }
         if date_col and dates is not None and not frame.empty:
             aligned = dates.loc[frame.index].dropna()
             if not aligned.empty:
@@ -800,9 +992,17 @@ class DashboardDataRepository:
         summary["records"] = self._records(
             frame, [value for value in record_columns if value], self._clamp(limit, 1, 50)
         )
+        if trigger_var_col:
+            for record in summary["records"]:
+                record["trigger_var_label"] = self._translate_signal_list(
+                    record.get(trigger_var_col)
+                )
         summary["note"] = (
             "records es una muestra ordenada de mas reciente a mas antigua; "
             "usa total y las distribuciones para conteos y rankings. "
+            "trigger_var_label (y by_trigger_var_labels) trae el nombre en espanol "
+            "de cada senal disparadora: usalo en la respuesta al usuario en vez del "
+            "codigo tecnico de Trigger_Var. "
             "Para el valor medido de la senal que disparo una alerta llama a "
             "query_alert_detail pasando unit_id y, si la conoces, la variable de "
             "Trigger_Var como trigger. El identificador de union con el detalle es "
@@ -1032,13 +1232,14 @@ class DashboardDataRepository:
             frame = frame.assign(
                 __severity=frame[status_col].map(lambda value: severity.get(str(value), 4))
             ).sort_values("__severity")
+        triggering_signals_col = self._resolve_column(frame, ("triggering_signals",))
         columns = [
             unit_col,
             component_col,
             status_col,
             self._resolve_column(frame, ("component_score",)),
             self._resolve_column(frame, ("criticality",)),
-            self._resolve_column(frame, ("triggering_signals",)),
+            triggering_signals_col,
             self._resolve_column(frame, ("signal_coverage",)),
             week_col,
             year_col,
@@ -1052,10 +1253,18 @@ class DashboardDataRepository:
                 frame, [value for value in columns if value], self._clamp(limit, 1, 60)
             ),
             "note": (
-                "triggering_signals nombra las senales que llevaron el componente a ese estado; "
-                "no es una lectura instantanea del sensor."
+                "triggering_signals nombra, ya traducidas al espanol, las senales que "
+                "llevaron el componente a ese estado; no es una lectura instantanea del "
+                "sensor."
             ),
         }
+        if triggering_signals_col:
+            # Purely informational (never used as a filter value elsewhere), so it is
+            # safe to translate in place rather than adding a sibling field.
+            for record in payload["records"]:
+                record[triggering_signals_col] = self._translate_signal_list(
+                    record.get(triggering_signals_col)
+                )
         if status_col and component_col and unit_col and not frame.empty:
             flagged = frame[frame[status_col].astype(str).isin(("Anormal", "Alerta"))]
             payload["flagged_units"] = (
@@ -1221,6 +1430,7 @@ class DashboardDataRepository:
                     else None
                 ),
                 "trigger": signal or None,
+                "trigger_label": self._translate_signal_list(signal),
                 "samples": int(len(chunk)),
             }
             if time_col:
@@ -1230,19 +1440,11 @@ class DashboardDataRepository:
             if state_col:
                 record["machine_states"] = self._distribution(chunk, state_col, top=4)
 
-            upper = (
-                pd.to_numeric(chunk[upper_col], errors="coerce").dropna()
-                if upper_col and upper_col in chunk.columns
-                else pd.Series(dtype="float64")
-            )
-            lower = (
-                pd.to_numeric(chunk[lower_col], errors="coerce").dropna()
-                if lower_col and lower_col in chunk.columns
-                else pd.Series(dtype="float64")
-            )
             if value_col and value_col in chunk.columns:
-                values = pd.to_numeric(chunk[value_col], errors="coerce").dropna()
-                if not values.empty:
+                values = pd.to_numeric(chunk[value_col], errors="coerce")
+                valid = values.notna()
+                if valid.any():
+                    peak_index = values.idxmax()
                     record.update(
                         {
                             "peak_value": round(float(values.max()), 3),
@@ -1250,33 +1452,260 @@ class DashboardDataRepository:
                             "mean_value": round(float(values.mean()), 3),
                         }
                     )
-                    if not upper.empty:
-                        threshold = float(upper.max())
-                        record["upper_limit"] = round(threshold, 3)
-                        record["samples_above_limit"] = int((values > threshold).sum())
-                        record["peak_exceedance"] = round(float(values.max()) - threshold, 3)
-                    if not lower.empty:
-                        threshold = float(lower.min())
-                        record["lower_limit"] = round(threshold, 3)
-                        record["samples_below_limit"] = int((values < threshold).sum())
+                    if state_col:
+                        record["state_at_peak"] = self._scalar(
+                            chunk.loc[peak_index, state_col]
+                        )
+                    # The threshold is state-dependent (a machine at idle has a lower
+                    # ceiling than one operating), so each sample is compared against
+                    # its own limit. Collapsing the column to its maximum reported zero
+                    # exceedances for alerts that did breach their idle limit.
+                    for suffix, key, comparison in (
+                        ("_Upper_Limit", "upper", "above"),
+                        ("_Lower_Limit", "lower", "below"),
+                    ):
+                        column = f"{signal}{suffix}" if signal else None
+                        if not column or column not in chunk.columns:
+                            continue
+                        limits = pd.to_numeric(chunk[column], errors="coerce")
+                        if limits.notna().sum() == 0:
+                            continue
+                        breaches = (
+                            (values > limits) if comparison == "above" else (values < limits)
+                        )
+                        breaches = breaches & valid & limits.notna()
+                        distinct = sorted(
+                            {round(float(value), 3) for value in limits.dropna().unique()}
+                        )
+                        record[f"{key}_limit_at_peak"] = (
+                            round(float(limits.loc[peak_index]), 3)
+                            if pd.notna(limits.loc[peak_index])
+                            else None
+                        )
+                        record[f"{key}_limit_values"] = distinct
+                        record[f"samples_{comparison}_limit"] = int(breaches.sum())
+                        if breaches.any():
+                            worst = values[breaches]
+                            margin = (values - limits)[breaches]
+                            record[f"worst_{comparison}_value"] = round(
+                                float(worst.max() if comparison == "above" else worst.min()),
+                                3,
+                            )
+                            record[f"max_{comparison}_exceedance"] = round(
+                                float(margin.max() if comparison == "above" else -margin.min()),
+                                3,
+                            )
             rows.append(record)
 
         rows.sort(key=lambda item: str(item.get("end") or ""), reverse=True)
+        by_trigger = self._distribution(frame, trigger_col)
         payload = {
             "alerts_matched": len(rows),
             "detail_rows_scanned": int(len(frame)),
-            "by_trigger": (
-                self._distribution(frame, trigger_col)
-            ),
+            "by_trigger": by_trigger,
+            "by_trigger_labels": {
+                code: self._translate_signal_list(code) or code for code in by_trigger
+            },
             "records": rows[: self._clamp(limit, 1, 30)],
             "note": (
-                "Una fila por alerta y senal. peak_value es la lectura maxima registrada y "
-                "upper_limit/lower_limit el umbral aplicable cuando la fuente lo publica. "
-                "Si el umbral viene vacio, no lo inventes. No afirmes unidades de medida "
-                "que la fuente no declara."
+                "Una fila por alerta y senal. peak_value es la lectura maxima registrada. "
+                "trigger_label (y by_trigger_labels) trae el nombre en espanol de la senal: "
+                "usalo en la respuesta al usuario en vez del codigo tecnico de trigger. "
+                "El umbral depende del estado de maquina: upper_limit_values lista los "
+                "umbrales aplicados durante la alerta y upper_limit_at_peak el vigente en "
+                "el pico. samples_above_limit compara cada muestra contra SU propio "
+                "umbral, asi que puede ser mayor que cero aunque el pico no supere el "
+                "umbral mas alto. Si el umbral viene vacio, no lo inventes, y no afirmes "
+                "unidades de medida que la fuente no declara."
             ),
         }
         return json.dumps(payload, ensure_ascii=False, default=str)
+
+    # Operating context rather than monitored signals; the dashboard omits them too.
+    _CONTEXT_SIGNALS = ("GroundSpd", "EngLoad", "Payload")
+
+    def alert_signal_series(
+        self,
+        client: str,
+        alert_id: str = "",
+        unit_id: str = "",
+        signals: tuple[str, ...] = (),
+        max_signals: int = 4,
+    ) -> dict[str, Any]:
+        """Per-signal time series of one alert, with the limits the source publishes.
+
+        The wide detail table samples every sensor during an alert, so plotting all of
+        them yields a dozen unreadable panels. The triggering signal is the default and
+        the caller may name more; `signals_available` lists what actually has values so
+        the choice is informed rather than guessed.
+        """
+        frame = self.load("alerts_detail", client).copy()
+        alert_col = self._resolve_column(frame, ("AlertID", "alert_id"))
+        unit_col = self._resolve_column(frame, ("Unit", "UnitId", "unit_id"))
+        trigger_col = self._resolve_column(frame, ("Trigger", "trigger"))
+        time_col = self._resolve_column(
+            frame, ("TimeStart", "Alert_TimeStart", "Fecha")
+        )
+        if not (alert_col and time_col):
+            raise CampbellDataError(
+                "El detalle de alertas no expone AlertID ni una marca de tiempo"
+            )
+        if unit_id and unit_col:
+            frame = self._filter_unit(frame, unit_col, unit_id)
+        if alert_id and alert_col:
+            resolved = self._normalize_alert_id(alert_id)
+            frame = frame[frame[alert_col].astype(str).str.casefold() == resolved.casefold()]
+        elif not unit_id:
+            raise CampbellDataError(
+                "alert_signal_series requiere alert_id o unit_id"
+            )
+        if frame.empty:
+            raise CampbellDataError(
+                "Sin filas de detalle para esa alerta o equipo"
+            )
+
+        # Without an explicit alert, use the most recent one for that unit.
+        frame[time_col] = pd.to_datetime(frame[time_col], errors="coerce")
+        if not alert_id and alert_col:
+            latest_alert = (
+                frame.sort_values(time_col).iloc[-1][alert_col]
+            )
+            frame = frame[frame[alert_col] == latest_alert]
+        frame = frame.sort_values(time_col)
+
+        catalogued = [
+            str(column)[: -len("_Value")]
+            for column in frame.columns
+            if str(column).endswith("_Value")
+        ]
+        # Only signals with captured values can be plotted; a column that carries
+        # limits but no readings would render an empty panel.
+        with_values = [
+            signal
+            for signal in catalogued
+            if frame[f"{signal}_Value"].notna().any()
+        ]
+        with_limits = [
+            signal
+            for signal in with_values
+            if any(
+                f"{signal}{suffix}" in frame.columns
+                and frame[f"{signal}{suffix}"].notna().any()
+                for suffix in ("_Upper_Limit", "_Lower_Limit")
+            )
+        ]
+        trigger = ""
+        if trigger_col and not frame[trigger_col].dropna().empty:
+            trigger = str(frame[trigger_col].dropna().iloc[0])
+
+        # Signal codes are fixed identifiers, so resolve them ignoring case and
+        # accents: a transcription slip like "engcooltemp" should not abort the chart,
+        # while a genuinely unknown signal still fails below.
+        by_folded = {self._fold(signal): signal for signal in with_values}
+        requested = [str(item).strip() for item in signals if str(item).strip()]
+        resolved = [(item, by_folded.get(self._fold(item))) for item in requested]
+        unknown = [item for item, match in resolved if match is None]
+        selected = [match for _, match in resolved if match is not None]
+        if requested and not selected:
+            # Falling back to the trigger here would plot a different signal than the
+            # one asked for, and the answer would describe the wrong series.
+            raise CampbellDataError(
+                f"Ninguna de las senales solicitadas ({', '.join(requested)}) tiene "
+                f"valores capturados en esta alerta. Disponibles: "
+                f"{', '.join(with_values)}"
+            )
+        if not selected:
+            selected = [trigger] if trigger in with_values else []
+        if not selected:
+            selected = [
+                signal for signal in with_limits if signal not in self._CONTEXT_SIGNALS
+            ][:1] or with_values[:1]
+        selected = list(dict.fromkeys(selected))[: max(1, min(int(max_signals), 6))]
+
+        panels: list[dict[str, Any]] = []
+        for signal in selected:
+            values = pd.to_numeric(frame[f"{signal}_Value"], errors="coerce")
+            mask = values.notna()
+            if not mask.any():
+                continue
+
+            def limit(suffix: str) -> list[float] | None:
+                column = f"{signal}{suffix}"
+                if column not in frame.columns:
+                    return None
+                series = pd.to_numeric(frame.loc[mask, column], errors="coerce")
+                if series.notna().sum() == 0:
+                    return None
+                # Limits are constant within an alert but can arrive sparse.
+                return [float(value) for value in series.ffill().bfill()]
+
+            panels.append(
+                {
+                    "signal": signal,
+                    "times": [stamp.isoformat() for stamp in frame.loc[mask, time_col]],
+                    "values": [float(value) for value in values[mask]],
+                    "upper": limit("_Upper_Limit"),
+                    "lower": limit("_Lower_Limit"),
+                }
+            )
+
+        return {
+            "alert_id": self._scalar(frame[alert_col].iloc[0]) if alert_col else None,
+            "unit_id": (
+                self._scalar(frame[unit_col].dropna().iloc[0])
+                if unit_col and not frame[unit_col].dropna().empty
+                else None
+            ),
+            "trigger": trigger or None,
+            "samples": int(len(frame)),
+            "window": {
+                "start": frame[time_col].min().isoformat(),
+                "end": frame[time_col].max().isoformat(),
+            },
+            "signals_selected": selected,
+            "signals_available": with_values,
+            "signals_with_limits": with_limits,
+            "signals_unknown": unknown,
+            "panels": panels,
+        }
+
+    def query_alert_signals(
+        self, client: str, alert_id: str = "", unit_id: str = ""
+    ) -> str:
+        """Which signals of an alert have captured values, and which have limits."""
+        payload = self.alert_signal_series(client, alert_id=alert_id, unit_id=unit_id)
+        summary = {
+            key: payload[key]
+            for key in (
+                "alert_id",
+                "unit_id",
+                "trigger",
+                "samples",
+                "window",
+                "signals_available",
+                "signals_with_limits",
+            )
+        }
+        summary["trigger_label"] = self._translate_signal_list(payload.get("trigger"))
+        # Parallel Spanish labels, same order as signals_available/signals_with_limits.
+        # Codes stay as-is: they are still needed verbatim as the signal= argument to
+        # alert_signal_series/render_dashboard_chart.
+        summary["signals_available_labels"] = [
+            self._translate_signal_list(code) or code for code in payload["signals_available"]
+        ]
+        summary["signals_with_limits_labels"] = [
+            self._translate_signal_list(code) or code for code in payload["signals_with_limits"]
+        ]
+        summary["note"] = (
+            "signals_available son las senales con valores capturados en esta alerta; "
+            "sus nombres en espanol estan en signals_available_labels (mismo orden) y "
+            "trigger_label traduce trigger. Usa los nombres en espanol al responder al "
+            "usuario y los codigos solo como argumentos de otras herramientas. "
+            "Para graficarlas usa render_dashboard_chart(alert_sensor_trend) indicando "
+            "unit_id, alert_id y opcionalmente signal. GroundSpd, EngLoad y Payload son "
+            "contexto de operacion, no senales monitoreadas."
+        )
+        return json.dumps(summary, ensure_ascii=False, default=str)
 
     def query_maintenance_summary(
         self, client: str, unit_id: str = "", limit: int = 10
