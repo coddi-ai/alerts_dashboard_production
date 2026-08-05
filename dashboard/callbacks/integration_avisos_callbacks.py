@@ -1,10 +1,20 @@
 """Reactive callbacks for Conexión ERP (Validación de Avisos / Seguimiento de Avisos).
 
 Both pages' content depends on the globally-selected client (client-selector
-in the navbar) rather than a page-local dropdown (migration_guide.md §3), so
-every data-loading callback here resolves the active client the same way
-predictive_pages_callbacks.py._resolve_client does: client-selector ->
-user-info-store's first client -> settings default.
+in the navbar) rather than a page-local dropdown (migration_guide.md §3).
+List/KPI/chart callbacks (which have no other way to know which client to
+load) resolve it the same way predictive_pages_callbacks.py._resolve_client
+does: client-selector -> user-info-store's first client -> settings default.
+
+Warning-scoped callbacks (view detail / approve / reject) instead resolve
+client_id from the warning record itself via
+erp_warning_store.find_by_id_any_client — the record is the source of truth
+for which client a warning belongs to, and this keeps those actions working
+regardless of what's currently selected in the client-selector.
+
+Access to approve/reject is governed entirely by whether the operator can
+reach this tab and see the warning at all (platform login + client access);
+there's no separate identity/permission check layered on top of that.
 """
 from __future__ import annotations
 
@@ -16,7 +26,6 @@ import plotly.express as px
 from dash import Input, Output, State, callback, html
 
 from config.settings import get_settings
-from dashboard.auth import can_access_client
 from dashboard.tabs.tab_integration_validacion_avisos import (
     create_detail_form,
     create_detail_placeholder,
@@ -96,18 +105,15 @@ def _select_pending(_n_clicks):
 @callback(
     Output("erp-validator-form-content", "children"),
     Input("erp-validator-selected-warning-id", "data"),
-    State("client-selector", "value"),
-    State("user-info-store", "data"),
 )
-def _render_detail(warning_id, selected_client, user_data):
+def _render_detail(warning_id):
     if not warning_id:
         return create_detail_placeholder("Seleccione un aviso pendiente.")
-    client_id = _resolve_client(selected_client, user_data)
-    found = erp_warning_store.find_by_id(client_id, warning_id)
+    found = erp_warning_store.find_by_id_any_client(warning_id)
     if found is None:
-        logger.warning("client=%s warning_id=%s not found (no longer pending?)", client_id, warning_id)
+        logger.warning("warning_id=%s not found (no longer pending?)", warning_id)
         return create_detail_placeholder("El aviso ya no está pendiente.")
-    warning, _state = found
+    warning, _client_id, _state = found
     return create_detail_form(warning)
 
 
@@ -130,8 +136,7 @@ def _toggle_rejection_collapse(_n_clicks, is_open):
     Input("erp-validator-btn-approve", "n_clicks"),
     Input("erp-validator-btn-confirm-reject", "n_clicks"),
     State("erp-validator-selected-warning-id", "data"),
-    State("client-selector", "value"),
-    State("user-info-store", "data"),
+    State("erp-validator-field-operator", "value"),
     State("erp-validator-field-title", "value"),
     State("erp-validator-field-description", "value"),
     State("erp-validator-field-action", "value"),
@@ -144,8 +149,7 @@ def _handle_action(
     _approve_clicks,
     _confirm_reject_clicks,
     warning_id,
-    selected_client,
-    user_data,
+    operator_name,
     title,
     description,
     recommended_action,
@@ -153,15 +157,28 @@ def _handle_action(
     severity,
     reject_reason,
 ):
+    """Access to this action is governed entirely by whether the operator can
+    reach this tab and see the warning at all (platform login + the warning
+    existing under one of their clients) — no separate identity/permission
+    check here. `client_id` comes from the warning record itself, not the
+    client-selector, so this doesn't depend on that selector's state either.
+    The operator's name is a required field on the form itself (recorded as
+    `validated_by`) rather than read from the session, since that read has
+    proven unreliable for this callback."""
     if not warning_id:
         raise dash.exceptions.PreventUpdate
 
-    client_id = _resolve_client(selected_client, user_data)
-    operator_id = (user_data or {}).get("username") or "unknown"
+    found = erp_warning_store.find_by_id_any_client(warning_id)
+    if found is None:
+        logger.warning("warning_id=%s not found for action (no longer pending?)", warning_id)
+        return "", False, "El aviso ya no está disponible.", True, None
 
-    if not can_access_client(user_data or {}, client_id.upper()):
-        logger.warning("operator=%s denied write access to client=%s", operator_id, client_id)
-        return "", False, "No tiene permisos para modificar avisos de este cliente.", True, dash.no_update
+    _warning, client_id, _state = found
+    operator_id = (operator_name or "").strip()
+
+    if not operator_id:
+        logger.warning("client=%s warning_id=%s action blocked: operator not provided", client_id, warning_id)
+        return "", False, "Debe indicar el nombre del operador.", True, dash.no_update
 
     triggered = dash.ctx.triggered_id
 
