@@ -4,6 +4,12 @@ Componentes de gráficos para la página de evidencia.
 import plotly.graph_objects as go
 import pandas as pd
 
+from dashboard.components.oil_charts import (
+    get_essay_limits_four,
+    consolidate_limit_entries,
+    limit_line_color,
+)
+
 
 def _oil_date_col(df) -> str:
     """
@@ -290,13 +296,14 @@ def create_radar_comparison(unit_row, df_latest, failure_modes):
     return fig
 
 
-def create_oil_timeseries_90d(df_unit, variables, oil_labels, oil_thresholds=None, oil_range=None):
+def create_oil_timeseries_90d(df_unit, variables, oil_labels, oil_limits_four=None, oil_range=None):
     """
     Crear serie temporal de variables de aceite.
     Ventana: max(últimos 90 días, últimas 3 muestras reales).
     Usa sampleDate como identificador de muestra real.
-    
-    Si hay 1 sola variable y existen umbrales, muestra líneas de límite.
+
+    Si hay 1 sola variable y existen límites, muestra líneas de límite
+    (fuente: stewart_limits_four.parquet, LIC/LIM/LSM/LSC - contrato v2.8).
     """
 
     if not variables:
@@ -332,20 +339,20 @@ def create_oil_timeseries_90d(df_unit, variables, oil_labels, oil_thresholds=Non
         return None
     
     fig = go.Figure()
-    
-    show_limits = (len(variables) == 1 and oil_thresholds is not None and oil_range is not None)
-    
+
+    show_limits = (len(variables) == 1 and oil_limits_four and oil_range is not None)
+
     for var in variables:
         if var not in df_filtered.columns:
             continue
-        
+
         series = df_filtered[[date_col, var]].dropna(subset=[var])
         if series.empty:
             continue
-        
+
         x_dates = pd.to_datetime(series[date_col])
         y_values = series[var].astype(float)
-        
+
         # Main trace: values
         fig.add_trace(go.Scatter(
             x=x_dates,
@@ -356,32 +363,33 @@ def create_oil_timeseries_90d(df_unit, variables, oil_labels, oil_thresholds=Non
             marker=dict(size=6),
             hovertemplate="%{x|%d %b %Y}<br><b>%{y:.2f}</b><extra></extra>",
         ))
-        
-        # Threshold lines (only for single variable mode)
-        if show_limits and oil_thresholds and var in oil_thresholds:
-            thresholds = oil_thresholds[var].get(oil_range)
-            if thresholds:
-                normal, alert, critic = thresholds
+
+        # Threshold lines (only for single variable mode) - four-limit Stewart
+        # output (LIC/LIM/LSM/LSC, v2.8). Equal/near-equal limits are
+        # consolidated into one line with a user-friendly label, null lower
+        # limits are never plotted, and lower-limit lines use the shared
+        # purple color - same helpers as every other oil chart in the app.
+        if show_limits:
+            essay_limits = get_essay_limits_four(oil_limits_four, var, oil_range)
+            if essay_limits:
+                feature_label = oil_labels.get(var, var)
+                tier_entries = [
+                    {'value': essay_limits.get('LIC'), 'tier': 'LIC', 'feature': feature_label},
+                    {'value': essay_limits.get('LIM'), 'tier': 'LIM', 'feature': feature_label},
+                    {'value': essay_limits.get('LSM'), 'tier': 'LSM', 'feature': feature_label},
+                    {'value': essay_limits.get('LSC'), 'tier': 'LSC', 'feature': feature_label},
+                ]
+                if essay_limits.get('LIC') is None or essay_limits.get('LIM') is None:
+                    tier_entries = [e for e in tier_entries if e['tier'] not in ('LIC', 'LIM')]
+
                 x_range = [x_dates.min(), x_dates.max()]
-                
-                fig.add_trace(go.Scatter(
-                    x=x_range, y=[normal, normal],
-                    mode="lines", name=f"Normal ({normal:.0f})",
-                    line=dict(width=1.5, dash="dot", color="#1d9e75"),
-                    hoverinfo="skip",
-                ))
-                fig.add_trace(go.Scatter(
-                    x=x_range, y=[alert, alert],
-                    mode="lines", name=f"Alerta ({alert:.0f})",
-                    line=dict(width=1.5, dash="dot", color="#ef9f27"),
-                    hoverinfo="skip",
-                ))
-                fig.add_trace(go.Scatter(
-                    x=x_range, y=[critic, critic],
-                    mode="lines", name=f"Crítico ({critic:.0f})",
-                    line=dict(width=1.5, dash="dot", color="#e24b4a"),
-                    hoverinfo="skip",
-                ))
+                for line in consolidate_limit_entries(tier_entries):
+                    fig.add_trace(go.Scatter(
+                        x=x_range, y=[line['value'], line['value']],
+                        mode="lines", name=line['label'],
+                        line=dict(width=1.5, dash="dot", color=limit_line_color(line['tiers'])),
+                        hoverinfo="skip",
+                    ))
     
     fig.update_layout(
         paper_bgcolor="rgba(0,0,0,0)",

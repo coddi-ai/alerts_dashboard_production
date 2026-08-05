@@ -150,9 +150,13 @@ mostly for the upstream pipeline's own use and for a few loaders in `src/data/lo
 predate the golden-layer optimization.
 
 Path resolution should go through `config/settings.py::Settings` helpers
-(`get_technique_path`, `get_machine_status_path`, `get_stewart_limits_path`,
+(`get_technique_path`, `get_machine_status_path`, `get_stewart_limits_four_path`,
 `get_consolidated_alerts_path`, etc.) rather than hand-building path strings, so behavior stays
-consistent between local dev and the Docker-mounted path.
+consistent between local dev and the Docker-mounted path. For oil, `get_stewart_limits_four_path`
+(four-limit `LIC`/`LIM`/`LSM`/`LSC` output, data contract v2.8) is what all current oil-technique
+dashboard logic reads; the older `get_stewart_limits_path`/`get_stewart_limits_inferior_path`
+(legacy three-limit `threshold_normal`/`threshold_alert`/`threshold_critic` shape) remain for
+backward compatibility only — see [documentation/oil/dashboard_documentation.md](oil/dashboard_documentation.md#-current-classification-behavior-v28).
 
 ---
 

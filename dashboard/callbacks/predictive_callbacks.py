@@ -446,16 +446,18 @@ def register_callbacks(app):
     def update_oil_chart(selected_vars, oil_range, selected_unit, client, component):
         """Update oil timeseries chart based on user-selected variables."""
         from dashboard.components.predictive_charts import create_oil_timeseries_90d
-        from dashboard.components.predictive_config import OIL_LABELS, OIL_THRESHOLDS
+        from dashboard.components.predictive_config import OIL_LABELS, load_predictive_oil_limits_four
 
         if not selected_vars or not selected_unit or not client or not component:
             return html.P("Seleccione al menos una variable de aceite.",
                          className="text-muted", style={"fontSize": "13px", "padding": "20px", "textAlign": "center"})
 
-        # Resolve per-client label/threshold dicts (fallback to cda if missing)
+        # Resolve per-client labels (fallback to cda if missing) and the
+        # four-limit Stewart dict (LIC/LIM/LSM/LSC, v2.8) for this component -
+        # never the legacy three-limit OIL_THRESHOLDS table.
         _ckey = (client or "cda").lower()
         oil_labels = OIL_LABELS.get(_ckey, OIL_LABELS["cda"])
-        oil_thresholds = OIL_THRESHOLDS.get(_ckey, OIL_THRESHOLDS["cda"])
+        oil_limits_four = load_predictive_oil_limits_four(_ckey, component)
 
         components = _discover_components(client)
         filepath = components.get(component)
@@ -470,10 +472,10 @@ def register_callbacks(app):
         if df_unit.empty:
             return html.P("No hay datos para esta unidad.", className="text-muted")
 
-        # Always pass thresholds — the chart function shows limit lines when len(vars)==1
+        # Always pass limits — the chart function shows limit lines when len(vars)==1
         fig = create_oil_timeseries_90d(
             df_unit, selected_vars, oil_labels,
-            oil_thresholds=oil_thresholds,
+            oil_limits_four=oil_limits_four,
             oil_range=oil_range,
         )
 

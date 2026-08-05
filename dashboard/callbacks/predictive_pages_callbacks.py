@@ -17,6 +17,7 @@ import dash
 
 from dashboard.layout import create_placeholder_content
 from config.settings import get_settings
+from config.client_services import is_service_enabled
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -34,13 +35,9 @@ def _resolve_client(selected_client, user_data) -> str:
 
 def _render_component(client: str, component: str):
     settings = get_settings()
-    predictive_allowed = [c.lower() for c in settings.predictive_allowed_clients]
-    if client not in predictive_allowed:
-        logger.warning(
-            f"Predictive module accessed by non-allowed client: {client}. "
-            f"Allowed: {predictive_allowed}"
-        )
-        return create_placeholder_content('Predictivo (Solo disponible para CDA)')
+    if not is_service_enabled(client, 'predictive'):
+        logger.warning(f"Predictive module accessed by client without access: {client}")
+        return create_placeholder_content('Predictivo (no disponible para este cliente)')
 
     data_dir = Path(settings.data_root) / "predictive" / "golden" / client
     component_file = data_dir / f"{component}.csv"

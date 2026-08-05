@@ -1,7 +1,7 @@
 # Data Contracts - Oil Analysis Data Product
 
-**Version**: 2.7  
-**Last Updated**: July 29, 2026  
+**Version**: 2.8  
+**Last Updated**: August 4, 2026  
 **Owner**: Oil Analysis Data Product Team
 
 ---
@@ -34,6 +34,9 @@ This document defines the data contracts for the Oil Analysis Data Product, spec
 **Processing Modes**:
 1. **Historical**: One-time bulk processing with Stewart Limits calculation
 2. **Incremental**: Daily processing using existing Stewart Limits
+
+**Key Enhancements (v2.8)**:
+- **Four-Limit Stewart Output**: New `LIC`/`LIM`/`LSM`/`LSC` structure (P2/P5/P95/P98) for direct consumption by the main service, stored separately in `stewart_limits_four.parquet`. `LIC`/`LIM` are null when the minimum observed value is `<= 0` or `GroupElement` is `Desgaste`/`Aditivo`. Fully additive — `stewart_limits.parquet` and its schema are unchanged.
 
 **Key Enhancements (v2.7)**:
 - **Stewart Limits Inferior**: New lower ("too low") thresholds for essays in groups Aditivo, Conteo, and Fisico Quimico (e.g. additive depletion), stored separately in `stewart_limits_inferior.parquet` for retro-compatibility
@@ -83,13 +86,15 @@ data/
 │   │   ├── machine_status.parquet          # Aggregated machine health status
 │   │   ├── stewart_limits.parquet          # Statistical thresholds for CDA (upper)
 │   │   ├── stewart_limits_inferior.parquet # Statistical thresholds for CDA (lower)
-│   │   └── stewart_limits_ratio.parquet    # Evolution ratio thresholds for CDA
+│   │   ├── stewart_limits_ratio.parquet    # Evolution ratio thresholds for CDA
+│   │   └── stewart_limits_four.parquet     # Four-limit output (LIC/LIM/LSM/LSC) for CDA
 │   └── emin/
 │       ├── classified.parquet
 │       ├── machine_status.parquet
 │       ├── stewart_limits.parquet
 │       ├── stewart_limits_inferior.parquet
-│       └── stewart_limits_ratio.parquet
+│       ├── stewart_limits_ratio.parquet
+│       └── stewart_limits_four.parquet
 │
 └── essays_elements.xlsx          # Auxiliary: Essay metadata and mappings
 ```
@@ -107,13 +112,15 @@ s3://{BUCKET_NAME}/MultiTechnique Alerts/oil/
     │   ├── machine_status.parquet
     │   ├── stewart_limits.parquet
     │   ├── stewart_limits_inferior.parquet
-    │   └── stewart_limits_ratio.parquet
+    │   ├── stewart_limits_ratio.parquet
+    │   └── stewart_limits_four.parquet
     └── emin/
         ├── classified.parquet
         ├── machine_status.parquet
         ├── stewart_limits.parquet
         ├── stewart_limits_inferior.parquet
-        └── stewart_limits_ratio.parquet
+        ├── stewart_limits_ratio.parquet
+        └── stewart_limits_four.parquet
 ```
 
 ---
@@ -593,6 +600,48 @@ GE_1000 (aged oil, additives depleted — lower/more permissive floor):
 
 ---
 
+#### 6. Four-Limit Stewart Output (`stewart_limits_four.parquet`) 🆕 v2.8
+
+**Purpose**: Four-limit structure (LIC/LIM/LSM/LSC) shaped for direct consumption by the main service, using its native field names — no limit-name transformation required downstream.
+
+**Schema**:
+
+| Column | Type | Description | Example |
+|--------|------|-------------|---------|
+| `client` | string | Client identifier | 'CDA' |
+| `machine` | string | Normalized machine name | 'camion' |
+| `component` | string | Component name (normalized/grouped) | 'motor diesel' |
+| `essay` | string | Essay name | 'Hierro' |
+| `oilHourRange` | string | Oil age category | 'LT_1000', 'GE_1000', 'UNKNOWN' |
+| `GroupElement` | string \| null | Essay classification from `essays_elements.xlsx` | 'Desgaste' |
+| `min_value` | float \| null | Minimum observed (non-null) value for this essay/component/oilHourRange | 12.0 |
+| `LIC` | float \| null | Límite Inferior Condenatorio (2nd percentile) — null when lower limits don't apply | 8.0 |
+| `LIM` | float \| null | Límite Inferior Marginal (5th percentile) — null when lower limits don't apply | 10.0 |
+| `LSM` | float | Límite Superior Marginal (95th percentile) | 45.0 |
+| `LSC` | float | Límite Superior Condenatorio (98th percentile) | 58.0 |
+| `sample_count` | int | Number of samples used for calculation | 450 |
+| `calculation_date` | string | ISO timestamp of calculation | '2026-08-04T10:30:00' |
+
+**This is a fully additive, independent output** — it is generated in the same pipeline run as `stewart_limits.parquet` but does not read from, write to, or replace it (or `stewart_limits_inferior.parquet` / `stewart_limits_ratio.parquet`). It is primarily intended to feed the main service, but as of the dashboard's four-limit migration it is **also** the sole limits source for oil-technique dashboard views in this repo (Monitoring ▸ Aceite ▸ Detalle de Reporte, Alertas ▸ Detalle ▸ Evidencia de Aceite, the Stewart Limits tab, and — on an exact component-name match only — Predictivo ▸ {component} ▸ Evidencia ▸ Evidencia de Aceite) — see [dashboard_documentation.md](dashboard_documentation.md) for the dashboard-side classification rules (`LIC`/`LIM`/`LSM`/`LSC` → Inferior Condenatorio/Inferior Marginal/Normal/Superior Marginal/Superior Condenatorio).
+
+**Lower-limit applicability (`LIC`/`LIM` null when)**:
+- `min_value <= 0`, OR
+- `GroupElement` is `"Desgaste"` (case-insensitive, trimmed), OR
+- `GroupElement` is `"Aditivo"` (case-insensitive, trimmed)
+
+`LSM`/`LSC` are always calculated regardless of the above — only `LIC`/`LIM` are nulled.
+
+**Consistency rules enforced per row**:
+- `LSM < LSC` always; if the calculated values tie, `LSC = LSM + 1`
+- `LIC < LIM` always (when applicable); if the calculated values tie, `LIC = LIM - 1`
+- When all four are applicable: `LIC < LIM < LSM < LSC`
+
+**Calculation**: Same filtered dataset and per-client/machine/component/oilHourRange grouping as `stewart_limits.parquet`, at percentiles 2/5/95/98 instead of 90/95/98. See [docs/STEWART_LIMITS.md](docs/STEWART_LIMITS.md#four-limit-stewart-output-liclimlsmlsc) for full detail.
+
+**Capstone**: Not computed — no source data to compute percentiles from (same as Stewart Limits Inferior).
+
+---
+
 ## ☁️ S3 Storage
 
 ### Upload Behavior
@@ -605,7 +654,7 @@ GE_1000 (aged oil, additives depleted — lower/more permissive floor):
 
 ✅ **Uploaded** (see `S3Uploader.upload_golden_layer()` in [src/data/s3_uploader.py](src/data/s3_uploader.py)):
 - Silver layer: `{CLIENT}.parquet`
-- Golden layer: `classified.parquet`, `machine_status.parquet`, `stewart_limits.parquet`, `stewart_limits_inferior.parquet` (NEW v2.7), `cleaned_component_hours.parquet`
+- Golden layer: `classified.parquet`, `machine_status.parquet`, `stewart_limits.parquet`, `stewart_limits_inferior.parquet` (v2.7), `stewart_limits_four.parquet` (NEW v2.8), `cleaned_component_hours.parquet`
 
 ❌ **Not Uploaded**:
 - Bronze layer (raw data stays local)
@@ -619,7 +668,8 @@ s3://{BUCKET_NAME}/MultiTechnique Alerts/oil/silver/{CLIENT}.parquet
 s3://{BUCKET_NAME}/MultiTechnique Alerts/oil/golden/{client}/classified.parquet
 s3://{BUCKET_NAME}/MultiTechnique Alerts/oil/golden/{client}/machine_status.parquet
 s3://{BUCKET_NAME}/MultiTechnique Alerts/oil/golden/{client}/stewart_limits.parquet
-s3://{BUCKET_NAME}/MultiTechnique Alerts/oil/golden/{client}/stewart_limits_inferior.parquet  (NEW v2.7)
+s3://{BUCKET_NAME}/MultiTechnique Alerts/oil/golden/{client}/stewart_limits_inferior.parquet  (v2.7)
+s3://{BUCKET_NAME}/MultiTechnique Alerts/oil/golden/{client}/stewart_limits_four.parquet  (NEW v2.8)
 s3://{BUCKET_NAME}/MultiTechnique Alerts/oil/golden/{client}/cleaned_component_hours.parquet
 ```
 
@@ -689,6 +739,33 @@ AWS_S3_PREFIX=MultiTechnique Alerts/oil/
 - Fully additive and backward compatible: `stewart_limits.parquet` schema and existing consumers are unaffected
 - `limit_source_inferior` on old (pre-v2.7) classified rows will be absent until the pipeline is re-run
 - Existing `breached_essays` entries from before v2.7 will lack the `direction` field — treat a missing `direction` as `'upper'` (the only kind of breach that existed before this version)
+
+---
+
+### Version 2.8 (August 4, 2026) - FOUR-LIMIT STEWART OUTPUT (LIC/LIM/LSM/LSC)
+**Major Feature**: A four-limit structure using the main service's own field names, so it can be consumed without any limit-name transformation
+
+#### New Golden Layer File
+- **`stewart_limits_four.parquet`**: New schema (`client`, `machine`, `component`, `essay`, `oilHourRange`, `GroupElement`, `min_value`, `LIC`, `LIM`, `LSM`, `LSC`, `sample_count`, `calculation_date`)
+  - `LSM` (95th percentile) and `LSC` (98th percentile) are always calculated
+  - `LIC` (2nd percentile) and `LIM` (5th percentile) are null when the minimum observed value for the essay/component is `<= 0`, or `GroupElement` is `Desgaste` or `Aditivo` (case-insensitive, whitespace-trimmed)
+  - `LSM < LSC` enforced (tie corrected to `LSC = LSM + 1`); `LIC < LIM` enforced when applicable (tie corrected to `LIC = LIM - 1`)
+  - Stratified by `oilHourRange`, same grouping as `stewart_limits.parquet` — no cross-range consistency constraint applied
+  - Not computed for Capstone (no source data)
+  - Fully additive: does not read from, write to, or replace `stewart_limits.parquet`, `stewart_limits_inferior.parquet`, or `stewart_limits_ratio.parquet`
+  - As of the dashboard-side four-limit migration, this repo's own oil-technique dashboard views (previously built on `stewart_limits.parquet`/`stewart_limits_inferior.parquet`) now read from this file instead — see [dashboard_documentation.md](dashboard_documentation.md)
+
+#### Pipeline Changes
+- `src/processing/stewart_limits.py`: new `calculate_stewart_limits_four()` and `calculate_all_limits_four()`
+- `src/processing/essay_metadata.py`: new `FOUR_LIMIT_EXCLUDED_GROUPS` constant and `is_four_limit_lower_excluded()` helper
+- `src/data/exporters.py`: new `export_stewart_limits_four_parquet()`
+- `src/pipeline/silver_to_gold.py`: computes and saves `stewart_limits_four.parquet` alongside the existing limits outputs, in the same `recalculate_limits` run
+- `config/settings.py`: new `get_stewart_limits_four_path()`
+- `src/data/s3_uploader.py`: uploads `stewart_limits_four.parquet` as part of the Golden layer
+
+#### Migration Notes
+- Fully additive and backward compatible: no existing file's schema or content changes; `stewart_limits.parquet` in particular is untouched
+- `stewart_limits_four.parquet` only exists after the pipeline is run with `--recalculate-limits`, same as the other limits files
 
 ---
 

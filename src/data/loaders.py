@@ -243,6 +243,62 @@ def load_stewart_limits(file_path: str | Path) -> Dict:
     return limits
 
 
+def load_stewart_limits_four(file_path: str | Path) -> Dict:
+    """
+    Load pre-computed four-limit Stewart Limits (LIC/LIM/LSM/LSC) from Parquet file (v2.8).
+
+    Args:
+        file_path: Path to stewart_limits_four.parquet
+
+    Returns:
+        Dictionary with limits structure:
+        {client: {machine: {component: {essay: {oilHourRange: {LIC, LIM, LSM, LSC, min_value,
+        GroupElement, sample_count, calculation_date}}}}}}
+
+        LIC/LIM are None (not 0) whenever the source column is null - a missing lower limit
+        must never be treated as a lower limit of zero.
+    """
+    file_path = Path(file_path)
+    logger.info(f"Loading four-limit Stewart Limits from {file_path}")
+
+    if not file_path.exists():
+        logger.warning(f"Four-limit Stewart Limits file not found: {file_path}")
+        return {}
+
+    df = safe_read_parquet(file_path)
+
+    if df.empty:
+        logger.warning("Four-limit Stewart Limits dataframe is empty")
+        return {}
+
+    def _nullable_float(value) -> Optional[float]:
+        return None if pd.isna(value) else float(value)
+
+    limits: Dict = {}
+    for _, row in df.iterrows():
+        client = row['client']
+        machine = row['machine']
+        component = row['component']
+        essay = row['essay']
+        oil_hour_range = row.get('oilHourRange', 'ALL')
+
+        limits.setdefault(client, {}).setdefault(machine, {}).setdefault(component, {}).setdefault(essay, {})
+
+        limits[client][machine][component][essay][oil_hour_range] = {
+            'LIC': _nullable_float(row.get('LIC')),
+            'LIM': _nullable_float(row.get('LIM')),
+            'LSM': _nullable_float(row.get('LSM')),
+            'LSC': _nullable_float(row.get('LSC')),
+            'min_value': _nullable_float(row.get('min_value')),
+            'GroupElement': row.get('GroupElement'),
+            'sample_count': row.get('sample_count', 0),
+            'calculation_date': row.get('calculation_date'),
+        }
+
+    logger.info(f"Loaded four-limit Stewart Limits for {len(limits)} clients")
+    return limits
+
+
 def save_stewart_limits(limits: Dict, file_path: str | Path) -> None:
     """
     Save Stewart Limits to Parquet file.
