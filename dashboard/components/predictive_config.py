@@ -342,6 +342,60 @@ OIL_THRESHOLDS = {
 
 
 # =============================================================================
+# Four-limit Stewart lookup for the predictive oil-evidence view (v2.8)
+# =============================================================================
+#
+# OIL_THRESHOLDS above is the legacy hardcoded 3-tuple table (kept only for
+# historical reference - no live code path reads it anymore). The predictive
+# oil-evidence view (predictive > {component} > evidence > oil evidence) now
+# sources its limits from stewart_limits_four.parquet instead, via
+# load_predictive_oil_limits_four() below.
+
+# Machine dimension for the Stewart Limits lookup. Every predictive component
+# today (motor, transmision) is a haul-truck subsystem - confirmed directly
+# against stewart_limits_four.parquet, whose `machine` column is 'camion' for
+# every row, for both CDA and CAPSTONE.
+PREDICTIVE_STEWART_MACHINE = 'camion'
+
+
+def load_predictive_oil_limits_four(client: str, component: str) -> dict:
+    """
+    Resolve the four-limit Stewart dict (LIC/LIM/LSM/LSC, data contract v2.8)
+    for one predictive component ('motor', 'transmision', ...), or {} if
+    unavailable.
+
+    The predictive module's `component` key-space does not always match
+    stewart_limits_four.parquet's `component` field 1:1 - e.g. CDA's Stewart
+    component is literally 'motor' (an exact match), but CAPSTONE splits
+    engine components into 'motor diesel'/'motor traccion derecho'/'motor
+    traccion izquierdo' (no unambiguous match to predictive's generic
+    'motor'). Rather than guess which Capstone sub-component to use - a wrong
+    limit is worse than an absent one, the same principle already applied to
+    OIL_THRESHOLDS["capstone"] above - this only resolves limits when
+    `component` matches a Stewart Limits component name EXACTLY for that
+    client; otherwise it returns {} (no limits shown for that combination),
+    never falling back to the legacy OIL_THRESHOLDS table above.
+
+    Args:
+        client: Client key, any case ('cda', 'CDA', 'capstone', ...).
+        component: Predictive component key ('motor', 'transmision', ...).
+
+    Returns:
+        Nested dict {essay: {oilHourRange: {LIC, LIM, LSM, LSC, ...}}}, or {}.
+    """
+    from config.settings import get_settings
+    from src.data.loaders import load_stewart_limits_four
+
+    settings = get_settings()
+    limits_file = settings.get_stewart_limits_four_path(client)
+    if not limits_file.exists():
+        return {}
+
+    limits = load_stewart_limits_four(limits_file)
+    return limits.get(client.upper(), {}).get(PREDICTIVE_STEWART_MACHINE, {}).get(component, {})
+
+
+# =============================================================================
 # FAILURE_MODE_METHODOLOGY  —  client -> component -> {mode: descripción}
 # =============================================================================
 

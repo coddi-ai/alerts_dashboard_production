@@ -69,6 +69,164 @@ FOUR_LIMIT_STATUS_HEX_COLORS = {
     'Superior Condenatorio': '#dc3545',
 }
 
+# ---------------------------------------------------------------------------
+# User-friendly limit labels, equal/similar-value consolidation, and trace
+# colors - shared by every oil time-series/radar visualization so none of this
+# is duplicated (or drifts) per chart.
+# ---------------------------------------------------------------------------
+
+# Upper-limit line color (unchanged - existing "condemnation line" red).
+UPPER_LIMIT_COLOR = '#dc3545'
+# Lower-limit line color. Must be purple (not blue) per the user-facing
+# requirement, and centrally defined here so no chart hardcodes its own.
+LOWER_LIMIT_COLOR = '#6f42c1'
+
+# Tier -> severity word (direction-agnostic) and direction word, used to build
+# combined labels like "Límite marginal y condenatorio de viscosidad".
+FOUR_LIMIT_TIER_WORDS = {
+    'LIC': 'condenatorio',
+    'LIM': 'marginal',
+    'LSM': 'marginal',
+    'LSC': 'condenatorio',
+}
+FOUR_LIMIT_TIER_DIRECTION = {
+    'LIC': 'inferior',
+    'LIM': 'inferior',
+    'LSM': 'superior',
+    'LSC': 'superior',
+}
+
+# Tolerance used to decide whether two limit values are "close enough" to be
+# treated as equivalent and rendered as a single consolidated trace, instead
+# of two overlapping/duplicated lines. Scale-aware: the absolute floor covers
+# small-magnitude essays, the relative term covers large-magnitude ones.
+LIMIT_VALUE_ABS_TOLERANCE = 0.5
+LIMIT_VALUE_REL_TOLERANCE = 0.02  # 2% of the larger of the two values
+
+
+def limit_values_are_equivalent(value_a, value_b) -> bool:
+    """
+    True when two limit values are equal or close enough (scale-aware
+    tolerance) to be treated as the same line. Null/non-numeric input is
+    never equivalent to anything (never silently coerced to 0).
+    """
+    if value_a is None or value_b is None:
+        return False
+    try:
+        value_a = float(value_a)
+        value_b = float(value_b)
+    except (TypeError, ValueError):
+        return False
+    if pd.isna(value_a) or pd.isna(value_b):
+        return False
+    tolerance = max(LIMIT_VALUE_ABS_TOLERANCE, LIMIT_VALUE_REL_TOLERANCE * max(abs(value_a), abs(value_b)))
+    return abs(value_a - value_b) <= tolerance
+
+
+def _single_tier_label(feature: str, tier: str, other_line_exists: bool) -> str:
+    if not other_line_exists:
+        return f"Límite {feature}"
+    return f"Límite {FOUR_LIMIT_TIER_DIRECTION[tier]} {feature}"
+
+
+def _combined_tier_label(feature: str, tiers) -> str:
+    words = list(dict.fromkeys(FOUR_LIMIT_TIER_WORDS[t] for t in tiers))
+    directions = {FOUR_LIMIT_TIER_DIRECTION[t] for t in tiers}
+    joined = " y ".join(words)
+    if directions == {'inferior'}:
+        return f"Límite {joined} inferior de {feature}"
+    return f"Límite {joined} de {feature}"
+
+
+def consolidate_limit_entries(entries):
+    """
+    Group limit entries whose values are equivalent (within
+    limit_values_are_equivalent tolerance) into single consolidated lines with
+    a user-friendly label, so equal/near-equal limits never render as
+    duplicated overlapping traces.
+
+    Args:
+        entries: list of dicts, each {'value': float, 'tier': 'LIC'|'LIM'|'LSM'|'LSC',
+            'feature': str}. `feature` should be the same display name already
+            used for that essay's value trace (e.g. its legend name). Null/
+            non-numeric values must be filtered out by the caller before
+            calling this (an entry with a non-numeric value is dropped here
+            defensively rather than plotted).
+
+    Returns:
+        List of dicts, one per consolidated line, each:
+        {'value': float, 'label': str, 'tiers': [...], 'features': [...]}
+        - Single feature, single tier, no sibling line for that feature ->
+          "Límite {feature}"
+        - Single feature, single tier, WITH a sibling line for that feature
+          (e.g. a separate upper and lower line both present) ->
+          "Límite superior/inferior {feature}"
+        - Single feature, multiple tiers merged (e.g. LSM and LSC coincide) ->
+          "Límite {tier words} [inferior] de {feature}"
+        - Multiple features merged (same tier, different essays) ->
+          "Límite {feature1} y {feature2}"
+    """
+    valid_entries = []
+    for e in entries:
+        value = e.get('value')
+        if value is None:
+            continue
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            continue
+        if pd.isna(value):
+            continue
+        valid_entries.append({**e, 'value': value})
+
+    if not valid_entries:
+        return []
+
+    sorted_entries = sorted(valid_entries, key=lambda e: e['value'])
+    clusters = []
+    for entry in sorted_entries:
+        if clusters and limit_values_are_equivalent(clusters[-1]['value'], entry['value']):
+            clusters[-1]['members'].append(entry)
+            clusters[-1]['value'] = sum(m['value'] for m in clusters[-1]['members']) / len(clusters[-1]['members'])
+        else:
+            clusters.append({'value': entry['value'], 'members': [entry]})
+
+    # How many distinct rendered lines touch each feature - needed to decide
+    # whether a lone single-tier line for a feature needs a direction
+    # qualifier (a sibling line for that same feature exists elsewhere).
+    feature_cluster_count = {}
+    for cluster in clusters:
+        for feature in {m['feature'] for m in cluster['members']}:
+            feature_cluster_count[feature] = feature_cluster_count.get(feature, 0) + 1
+
+    results = []
+    for cluster in clusters:
+        members = cluster['members']
+        features = list(dict.fromkeys(m['feature'] for m in members))
+        tiers = list(dict.fromkeys(m['tier'] for m in members))
+
+        if len(features) > 1:
+            label = "Límite " + " y ".join(features)
+        elif len(tiers) > 1:
+            label = _combined_tier_label(features[0], tiers)
+        else:
+            other_line_exists = feature_cluster_count.get(features[0], 1) > 1
+            label = _single_tier_label(features[0], tiers[0], other_line_exists)
+
+        results.append({'value': cluster['value'], 'label': label, 'tiers': tiers, 'features': features})
+
+    return results
+
+
+def limit_line_color(tiers) -> str:
+    """
+    Trace color for a (possibly consolidated) limit line, based on the
+    direction of its tier(s): purple for lower-only, red for upper (or mixed).
+    Central definition so no chart hardcodes its own upper/lower colors.
+    """
+    directions = {FOUR_LIMIT_TIER_DIRECTION[t] for t in tiers}
+    return LOWER_LIMIT_COLOR if directions == {'inferior'} else UPPER_LIMIT_COLOR
+
 
 def get_essay_limits_four(comp_limits_four, essay, oil_hour_range):
     """
@@ -225,9 +383,10 @@ def build_oil_time_series_grid(history: pd.DataFrame, comp_limits_four: dict, oi
         fig = go.Figure()
         colors = chart_config.get('palette', ['#1f77b4', '#ff7f0e'])
 
-        # Collect limits for deduplication
-        limit_entries = []  # [(value, essay_name), ...]  -- upper (LSC)
-        limit_entries_lower = []  # [(value, essay_name), ...]  -- lower (LIC), only when available
+        # Collect limits for consolidation (equal/near-equal values across
+        # essays sharing this chart must render as one line, not duplicates).
+        upper_entries = []  # [{'value', 'tier': 'LSC', 'feature': essay}, ...]
+        lower_entries = []  # [{'value', 'tier': 'LIC', 'feature': essay}, ...] - only when available
 
         for idx, essay in enumerate(available_essays):
             essay_values = history[essay].dropna()
@@ -247,51 +406,31 @@ def build_oil_time_series_grid(history: pd.DataFrame, comp_limits_four: dict, oi
             # Collect upper condemnation limit (LSC) - always available
             essay_limits = get_essay_limits_four(comp_limits_four, essay, oil_hour_range)
             if essay_limits and essay_limits.get('LSC') is not None:
-                limit_entries.append((essay_limits['LSC'], essay))
+                upper_entries.append({'value': essay_limits['LSC'], 'tier': 'LSC', 'feature': essay})
 
             # Collect lower condemnation limit (LIC) - only draw when BOTH LIC
             # and LIM are available; never render a lower-limit trace for
             # essay groups where the contract nulls out lower limits
             # (Desgaste, Aditivo) or where min_value <= 0.
             if essay_limits and essay_limits.get('LIC') is not None and essay_limits.get('LIM') is not None:
-                limit_entries_lower.append((essay_limits['LIC'], essay))
+                lower_entries.append({'value': essay_limits['LIC'], 'tier': 'LIC', 'feature': essay})
 
-        # Consolidate duplicate limits (same value → one line, combined label)
-        limit_by_value = {}
-        for val, name in limit_entries:
-            rounded_val = round(val, 2)
-            limit_by_value.setdefault(rounded_val, []).append(name)
-
-        for val, names in limit_by_value.items():
-            if len(names) > 1:
-                label = " y ".join(names) + " LSC"
-            else:
-                label = f"{names[0]} LSC" if len(available_essays) > 1 else "LSC"
+        for line in consolidate_limit_entries(upper_entries):
             fig.add_hline(
-                y=val,
-                line=dict(color='#dc3545', width=1.5, dash='dash'),
-                annotation_text=label,
+                y=line['value'],
+                line=dict(color=UPPER_LIMIT_COLOR, width=1.5, dash='dash'),
+                annotation_text=line['label'],
                 annotation_position="top right",
-                annotation_font=dict(size=8, color='#dc3545'),
+                annotation_font=dict(size=8, color=UPPER_LIMIT_COLOR),
             )
 
-        # Consolidate duplicate lower limits the same way
-        limit_by_value_lower = {}
-        for val, name in limit_entries_lower:
-            rounded_val = round(val, 2)
-            limit_by_value_lower.setdefault(rounded_val, []).append(name)
-
-        for val, names in limit_by_value_lower.items():
-            if len(names) > 1:
-                label = " y ".join(names) + " LIC"
-            else:
-                label = f"{names[0]} LIC" if len(available_essays) > 1 else "LIC"
+        for line in consolidate_limit_entries(lower_entries):
             fig.add_hline(
-                y=val,
-                line=dict(color='#0072B2', width=1.5, dash='dash'),
-                annotation_text=label,
+                y=line['value'],
+                line=dict(color=LOWER_LIMIT_COLOR, width=1.5, dash='dash'),
+                annotation_text=line['label'],
                 annotation_position="bottom right",
-                annotation_font=dict(size=8, color='#0072B2'),
+                annotation_font=dict(size=8, color=LOWER_LIMIT_COLOR),
             )
 
         fig.update_layout(

@@ -1,7 +1,7 @@
 # Multi-Technical Alerts Dashboard - Overview
 
-**Version**: 2.4.0  
-**Last Updated**: August 4, 2026  
+**Version**: 2.4.1  
+**Last Updated**: August 5, 2026  
 **Owner**: Technical Alerts Team
 
 ---
@@ -477,6 +477,28 @@ Alerts are generated through technique-specific logic:
 ---
 
 ## 🔄 Version History
+
+### Version 2.4.1 (August 2026)
+- **Predictive Oil-Evidence Migration**: `Predictivo ▸ {component} ▸ Evidencia ▸ Evidencia de
+  Aceite` now sources limits from `stewart_limits_four.parquet` instead of a hardcoded
+  `OIL_THRESHOLDS` table unrelated to any Stewart Limits file. Only resolves limits on an exact
+  component-name match per client (CDA's `'motor'`/`'transmision'` match directly; Capstone's split
+  engine components do not, and correctly show no limits rather than a guessed one)
+- **User-Friendly Limit Labels**: Chart annotations no longer show raw `LIC`/`LIM`/`LSM`/`LSC`
+  acronyms - labeled `"Límite {feature}"`, qualified `"Límite superior/inferior {feature}"` when
+  both directions are shown, or combined (`"Límite marginal y condenatorio de viscosidad"`) when
+  two tiers of the same feature coincide
+- **Equal/Similar Limit Consolidation**: A centrally-defined, scale-aware tolerance
+  (`dashboard/components/oil_charts.py::limit_values_are_equivalent`) prevents duplicated
+  overlapping lines/labels when two limits are equal or nearly equal
+- **Lower-Limit Color**: All lower-limit traces (`LIC`/`LIM`) now render in purple
+  (`LOWER_LIMIT_COLOR`) instead of blue, consistently across every oil chart
+- **Oil Evidence Tendencia Date Filter**: `Alertas ▸ Detalle ▸ Evidencia de Aceite ▸ Tendencia` has
+  a new isolated date-range filter on the oil report date (`sampleDate`, inclusive, defaulting to
+  the equipment/component's latest 12 months) - scoped only to that chart, not the rest of
+  Monitoring ▸ Alertas
+- See [dashboard_documentation.md](../oil/dashboard_documentation.md) ("Current Classification
+  Behavior (v2.8+)") for full detail
 
 ### Version 2.4.0 (August 2026)
 - **Four-Limit Stewart Migration**: All oil-technique dashboard logic (Monitoring ▸ Aceite ▸

@@ -65,6 +65,53 @@ positive data get the full 5-tier path.
   Evidencia de Aceite (radar charts per essay group, evidence tables, Tendencia grid)
 - `dashboard/callbacks/limits_callbacks.py` / `dashboard/tabs/tab_limits.py` - standalone Stewart
   Limits tab (registered but **not reachable** from navigation; kept in sync for completeness)
+- `dashboard/components/predictive_config.py::load_predictive_oil_limits_four()`, consumed by
+  `predictive_charts.py::create_oil_timeseries_90d`, `predictive_tables.py::_get_status`, and
+  `tab_predictive_evidence.py::_analyze_oil_observations` - Predictivo ▸ {component} ▸ Evidencia ▸
+  Evidencia de Aceite (see "Predictive oil-evidence view" below for the component-mapping caveat)
+
+**Chart presentation rules** (`dashboard/components/oil_charts.py`), shared by every oil
+time-series/radar visualization:
+- **User-friendly labels**: chart annotations never show raw `LIC`/`LIM`/`LSM`/`LSC` acronyms.
+  A single limit line for a feature is labeled `"Límite {feature}"` (e.g. `"Límite viscosidad"`); if
+  a feature has both an upper and a lower line shown simultaneously, each is qualified
+  (`"Límite superior {feature}"` / `"Límite inferior {feature}"`); if two tiers of the *same*
+  feature collide (see below), the label names both tiers, e.g.
+  `"Límite marginal y condenatorio de viscosidad"` (`consolidate_limit_entries()` /
+  `_single_tier_label()` / `_combined_tier_label()`).
+- **Equal/similar-value consolidation**: before plotting, limit values are compared with
+  `limit_values_are_equivalent()` — a single, centrally-defined, scale-aware tolerance
+  (`LIMIT_VALUE_ABS_TOLERANCE = 0.5`, `LIMIT_VALUE_REL_TOLERANCE = 0.02` i.e. 2% of the larger
+  value). Values within tolerance render as **one** consolidated line/label instead of duplicated
+  overlapping traces; null/non-numeric values are dropped before comparison, never plotted as a
+  zero-line.
+- **Lower-limit color**: every lower-limit trace (`LIC`, `LIM`, or a consolidated lower-only line)
+  renders in `LOWER_LIMIT_COLOR` (`'#6f42c1'`, purple) instead of blue; upper-limit traces use
+  `UPPER_LIMIT_COLOR` (`'#dc3545'`, red). Both are centrally defined constants — no chart hardcodes
+  its own color — and `limit_line_color(tiers)` resolves the right one for a given line.
+
+**Predictive oil-evidence view** (`predictive > {component} > evidence > oil evidence`): previously
+sourced 3 hardcoded threshold values (normal/alert/critic) from a hand-authored
+`OIL_THRESHOLDS` table in `predictive_config.py` (unrelated to any Stewart Limits parquet file).
+Now sourced from `stewart_limits_four.parquet` via `load_predictive_oil_limits_four(client,
+component)`. Caveat: the predictive module's `component` key-space (`'motor'`, `'transmision'` -
+its per-component CSV filenames) doesn't always match `stewart_limits_four.parquet`'s `component`
+field 1:1 - e.g. CDA's Stewart component is literally `'motor'` (exact match), but CAPSTONE splits
+engine components into `'motor diesel'`/`'motor traccion derecho'`/`'motor traccion izquierdo'` (no
+unambiguous match to predictive's generic `'motor'`). Rather than guess which Capstone
+sub-component to use - a wrong limit is worse than an absent one, the same principle already
+applied to `OIL_THRESHOLDS["capstone"]` - this only resolves limits on an **exact** component-name
+match for that client; otherwise it returns `{}` (no limits shown), never falling back to the
+legacy `OIL_THRESHOLDS` table. The machine dimension is hardcoded to `'camion'`
+(`PREDICTIVE_STEWART_MACHINE`), confirmed against real data as the only machine type for both
+CDA and CAPSTONE's predictive components.
+
+**Alertas ▸ Detalle ▸ Evidencia de Aceite ▸ Tendencia date filter**: an isolated date-range filter
+(`alert-oil-tendencia-date-range`) on the oil **report** date (`sampleDate`, inclusive boundaries),
+defaulting to the latest 12 months of that equipment/component's own history
+(`_build_oil_tendencia_view()` in `alerts_callbacks.py`). Scoped narrowly by design - it only
+re-renders the Tendencia chart itself, and does not affect the alerts list/table/KPIs/exports
+elsewhere in Monitoring ▸ Alertas.
 
 **Not migrated (out of scope / dead code)**:
 - `dashboard/components/charts.py::create_radar_chart` / `create_time_series_chart` - imported by
@@ -73,15 +120,13 @@ positive data get the full 5-tier path.
 - `dashboard/callbacks/reports_callbacks.py`'s old radar/value-analysis-table code and
   `dashboard/callbacks/alerts_callbacks.py`'s `create_oil_radar_chart` import were dead code
   (unreachable, no callers) and were removed rather than migrated
-- The Predictive module's `OIL_THRESHOLDS` system (`dashboard/components/predictive_config.py`,
-  consumed by `predictive_tables.py`/`predictive_charts.py`/`tab_predictive_evidence.py`) is a
-  separate, hardcoded, non-Stewart threshold table unrelated to `stewart_limits*.parquet` - not in
-  scope for this migration
 - The legacy `stewart_limits.parquet` / `stewart_limits_inferior.parquet` files, their loaders
   (`load_stewart_limits`, `load_stewart_limits_for_client`, `save_stewart_limits` in
   `src/data/loaders.py`), path helpers (`get_stewart_limits_path`,
   `get_stewart_limits_inferior_path`), and `StewartLimits` schema remain in place, unmodified, for
   backward compatibility - nothing in this repo's oil logic depends on them anymore
+- The Predictive module's legacy `OIL_THRESHOLDS` dict remains defined in `predictive_config.py`
+  for historical reference only - no live code path reads it anymore
 
 ---
 

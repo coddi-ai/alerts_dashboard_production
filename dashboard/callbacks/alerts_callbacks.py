@@ -41,6 +41,8 @@ from dashboard.components.oil_charts import (
     classify_four_limit_value,
     FOUR_LIMIT_STATUS_ORDER,
     FOUR_LIMIT_STATUS_HEX_COLORS,
+    UPPER_LIMIT_COLOR,
+    LOWER_LIMIT_COLOR,
 )
 from dashboard.components.alerts_tables import (
     create_alerts_datatable,
@@ -925,6 +927,52 @@ def create_telemetry_evidence_section(alert_row: pd.Series, client: str) -> html
         ])
 
 
+def _build_oil_tendencia_view(history_full, comp_limits, oil_hour_range, start_date, end_date):
+    """
+    Build the Tendencia (oil report history) sub-view: a date-range filter on
+    the oil REPORT date (sampleDate, inclusive boundaries) plus the shared
+    9-chart time-series grid. Isolated by design - this filter only affects
+    this chart, not the rest of Monitoring > Alertas.
+
+    Args:
+        history_full: Unfiltered sampleDate-sorted history for this equipment/component.
+        comp_limits: Four-limit Stewart limits dict for this component.
+        oil_hour_range: oilHourRange of the most recent sample, for limit lookup.
+        start_date, end_date: ISO date strings (or None for no bound).
+
+    Returns:
+        List of Dash components (date-range picker row + the chart grid).
+    """
+    history = history_full
+    if not history.empty:
+        if start_date:
+            history = history[history['sampleDate'] >= pd.to_datetime(start_date)]
+        if end_date:
+            history = history[history['sampleDate'] <= pd.to_datetime(end_date)]
+
+    grid = build_oil_time_series_grid(history, comp_limits, oil_hour_range)
+
+    return [
+        dbc.Row([
+            dbc.Col([
+                html.Small("Rango de fechas (reporte de aceite): ", className="text-muted me-2"),
+                dcc.DatePickerRange(
+                    id='alert-oil-tendencia-date-range',
+                    start_date=start_date,
+                    end_date=end_date,
+                    display_format='DD/MM/YYYY',
+                    className="d-inline-block",
+                ),
+            ], width='auto'),
+            dbc.Col([
+                dbc.Button([html.I(className="fas fa-times me-1"), "Limpiar"],
+                           id='alert-oil-tendencia-date-clear', color="outline-secondary", size="sm")
+            ], width='auto'),
+        ], className="mb-2 align-items-center g-2"),
+        grid,
+    ]
+
+
 def create_oil_evidence_section(alert_row: pd.Series, client: str) -> html.Div:
     """
     Create oil evidence section with grouped radar charts and threshold tables.
@@ -1015,16 +1063,37 @@ def create_oil_evidence_section(alert_row: pd.Series, client: str) -> html.Div:
         logger.info(f"Sample oilHourRange: {sample_oil_hour_range}")
 
         # ── Tendencia: same equipment/component history, shared grid builder ──
+        # Scoped to a date-range filter on the oil REPORT date (sampleDate),
+        # defaulting to this equipment/component's own latest 12 months of
+        # history. This filter is isolated to the Tendencia chart below - it
+        # does not affect the alerts list/table/KPIs elsewhere in Monitoring >
+        # Alertas.
         unit_id = oil_report.get('unitId')
         oil_component_name = oil_report.get('componentName')
-        tendencia_history = oil_classified[
+        tendencia_history_full = oil_classified[
             (oil_classified['unitId'] == unit_id) & (oil_classified['componentName'] == oil_component_name)
         ].copy()
-        if not tendencia_history.empty:
-            tendencia_history['sampleDate'] = pd.to_datetime(tendencia_history['sampleDate'])
-            tendencia_history = tendencia_history.sort_values('sampleDate')
-        tendencia_content = build_oil_time_series_grid(
-            tendencia_history, comp_limits, sample_oil_hour_range
+        if not tendencia_history_full.empty:
+            tendencia_history_full['sampleDate'] = pd.to_datetime(tendencia_history_full['sampleDate'])
+            tendencia_history_full = tendencia_history_full.sort_values('sampleDate')
+
+        default_end = tendencia_history_full['sampleDate'].max() if not tendencia_history_full.empty else None
+        default_start = (default_end - pd.DateOffset(months=12)) if default_end is not None else None
+        default_start_str = default_start.strftime('%Y-%m-%d') if default_start is not None else None
+        default_end_str = default_end.strftime('%Y-%m-%d') if default_end is not None else None
+
+        tendencia_context = {
+            'client': client,
+            'unit_id': unit_id,
+            'component_name': oil_component_name,
+            'machine': machine,
+            'component_normalized': component_normalized,
+            'oil_hour_range': sample_oil_hour_range,
+        }
+
+        tendencia_view_children = _build_oil_tendencia_view(
+            tendencia_history_full, comp_limits, sample_oil_hour_range,
+            start_date=default_start_str, end_date=default_end_str,
         )
 
         # Stratified limit lookup with fallback, shared with Monitoring > Oil > Details
@@ -1114,17 +1183,19 @@ def create_oil_evidence_section(alert_row: pd.Series, client: str) -> html.Div:
             # Create radar chart
             fig = go.Figure()
             
-            # Add threshold rings - LIC/LIM only shown when the group has lower limits
+            # Add threshold rings - LIC/LIM only shown when the group has lower
+            # limits. Lower-limit rings use the shared purple (not blue),
+            # matching every other oil visualization.
             if group_has_lower:
                 ring_specs = [
-                    (80, 'LSC (Superior Condenatorio)', 'red'),
+                    (80, 'LSC (Superior Condenatorio)', UPPER_LIMIT_COLOR),
                     (60, 'LSM (Superior Marginal)', 'orange'),
-                    (40, 'LIM (Inferior Marginal)', '#0072B2'),
-                    (20, 'LIC (Inferior Condenatorio)', '#b30000'),
+                    (40, 'LIM (Inferior Marginal)', LOWER_LIMIT_COLOR),
+                    (20, 'LIC (Inferior Condenatorio)', LOWER_LIMIT_COLOR),
                 ]
             else:
                 ring_specs = [
-                    (80, 'LSC (Superior Condenatorio)', 'red'),
+                    (80, 'LSC (Superior Condenatorio)', UPPER_LIMIT_COLOR),
                     (60, 'LSM (Superior Marginal)', 'orange'),
                 ]
 
@@ -1338,6 +1409,7 @@ def create_oil_evidence_section(alert_row: pd.Series, client: str) -> html.Div:
                     ], className="mb-3")
                 ])
             ]),
+            dcc.Store(id='alert-oil-tendencia-context', data=tendencia_context),
             dcc.Tabs(
                 id='alert-oil-view-selector',
                 value='tendencia',
@@ -1349,7 +1421,7 @@ def create_oil_evidence_section(alert_row: pd.Series, client: str) -> html.Div:
                 ],
                 className='mb-3'
             ),
-            html.Div(id='alert-oil-tendencia-view', children=[tendencia_content]),
+            html.Div(id='alert-oil-tendencia-view', children=tendencia_view_children),
             html.Div(id='alert-oil-radar-view', children=[html.Div(charts_and_tables)],
                      style={'display': 'none'}),
         ], className="mb-5")
@@ -1374,6 +1446,57 @@ def toggle_oil_evidence_view(view):
     if view == 'ultimo_ensayo':
         return {'display': 'none'}, {'display': 'block'}
     return {'display': 'block'}, {'display': 'none'}
+
+
+@callback(
+    Output('alert-oil-tendencia-view', 'children'),
+    Input('alert-oil-tendencia-date-range', 'start_date'),
+    Input('alert-oil-tendencia-date-range', 'end_date'),
+    State('alert-oil-tendencia-context', 'data'),
+    prevent_initial_call=True,
+)
+def update_oil_tendencia_range(start_date, end_date, context):
+    """
+    Re-filter the Tendencia chart by oil report date (sampleDate). Isolated by
+    design: only this chart's Output is touched, nothing else in Monitoring >
+    Alertas reacts to this filter.
+    """
+    if not context:
+        raise PreventUpdate
+
+    from src.data.loaders import load_stewart_limits_four
+    from config.settings import get_settings
+
+    client = context['client']
+    oil_classified = load_oil_classified(client)
+    history_full = oil_classified[
+        (oil_classified['unitId'] == context['unit_id'])
+        & (oil_classified['componentName'] == context['component_name'])
+    ].copy()
+    if not history_full.empty:
+        history_full['sampleDate'] = pd.to_datetime(history_full['sampleDate'])
+        history_full = history_full.sort_values('sampleDate')
+
+    settings = get_settings()
+    limits_file = settings.get_stewart_limits_four_path(client)
+    limits = load_stewart_limits_four(limits_file) if limits_file.exists() else {}
+    comp_limits = limits.get(client, {}).get(context['machine'], {}).get(context['component_normalized'], {})
+
+    return _build_oil_tendencia_view(
+        history_full, comp_limits, context['oil_hour_range'],
+        start_date=start_date, end_date=end_date,
+    )
+
+
+@callback(
+    Output('alert-oil-tendencia-date-range', 'start_date'),
+    Output('alert-oil-tendencia-date-range', 'end_date'),
+    Input('alert-oil-tendencia-date-clear', 'n_clicks'),
+    prevent_initial_call=True,
+)
+def clear_oil_tendencia_date_range(_):
+    """Clear the Tendencia date filter, showing the full available history."""
+    return None, None
 
 
 def create_maintenance_evidence_section(alert_row: pd.Series, client: str) -> html.Div:

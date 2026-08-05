@@ -16,6 +16,9 @@ from dashboard.components.oil_charts import (
     get_essay_limits_four,
     build_oil_time_series_grid,
     classify_four_limit_value,
+    consolidate_limit_entries,
+    limit_line_color,
+    UPPER_LIMIT_COLOR,
     FOUR_LIMIT_STATUS_ORDER,
     FOUR_LIMIT_STATUS_HEX_COLORS,
 )
@@ -581,63 +584,34 @@ def register_reports_callbacks(app):
                     row=idx, col=1
                 )
                 
-                # Add four-limit (LIC/LIM/LSM/LSC) reference lines if available
+                # Add four-limit (LIC/LIM/LSM/LSC) reference lines if available.
+                # Equal/near-equal limits are consolidated into one line with a
+                # user-friendly label (never plotted as duplicated overlapping
+                # traces), and null lower limits are never plotted at all.
                 essay_limits = get_essay_limits_four(comp_limits, essay, oil_hour_range)
                 if essay_limits:
-                    lic = essay_limits.get('LIC')
-                    lim = essay_limits.get('LIM')
-                    lsm = essay_limits.get('LSM')
-                    lsc = essay_limits.get('LSC')
-                    has_lower = lic is not None and lim is not None
+                    tier_entries = [
+                        {'value': essay_limits.get('LIC'), 'tier': 'LIC', 'feature': essay},
+                        {'value': essay_limits.get('LIM'), 'tier': 'LIM', 'feature': essay},
+                        {'value': essay_limits.get('LSM'), 'tier': 'LSM', 'feature': essay},
+                        {'value': essay_limits.get('LSC'), 'tier': 'LSC', 'feature': essay},
+                    ]
+                    # Lower limits (LIC/LIM) only ever appear here when BOTH are
+                    # available (get_essay_limits_four already enforces this at
+                    # the source), so filtering out None entries is sufficient -
+                    # never render a lower-limit trace when the contract nulls
+                    # them out for this essay/component.
+                    if essay_limits.get('LIC') is None or essay_limits.get('LIM') is None:
+                        tier_entries = [e for e in tier_entries if e['tier'] not in ('LIC', 'LIM')]
 
-                    # Lower limits (LIC/LIM) are only drawn when BOTH are
-                    # available - never render a lower-limit trace when the
-                    # contract nulls them out for this essay/component.
-                    if has_lower:
+                    for line in consolidate_limit_entries(tier_entries):
                         fig.add_trace(
                             go.Scatter(
                                 x=essay_dates,
-                                y=[lic] * len(essay_dates),
+                                y=[line['value']] * len(essay_dates),
                                 mode='lines',
-                                name='LIC (Inferior Condenatorio)',
-                                line=dict(color='#b30000', dash='dash', width=1),
-                                showlegend=(idx == 1)
-                            ),
-                            row=idx, col=1
-                        )
-                        fig.add_trace(
-                            go.Scatter(
-                                x=essay_dates,
-                                y=[lim] * len(essay_dates),
-                                mode='lines',
-                                name='LIM (Inferior Marginal)',
-                                line=dict(color='#0072B2', dash='dash', width=1),
-                                showlegend=(idx == 1)
-                            ),
-                            row=idx, col=1
-                        )
-
-                    # Upper limits (LSM/LSC) are always calculated
-                    if lsm is not None:
-                        fig.add_trace(
-                            go.Scatter(
-                                x=essay_dates,
-                                y=[lsm] * len(essay_dates),
-                                mode='lines',
-                                name='LSM (Superior Marginal)',
-                                line=dict(color='orange', dash='dash', width=1),
-                                showlegend=(idx == 1)
-                            ),
-                            row=idx, col=1
-                        )
-                    if lsc is not None:
-                        fig.add_trace(
-                            go.Scatter(
-                                x=essay_dates,
-                                y=[lsc] * len(essay_dates),
-                                mode='lines',
-                                name='LSC (Superior Condenatorio)',
-                                line=dict(color='red', dash='dash', width=1),
+                                name=line['label'],
+                                line=dict(color=limit_line_color(line['tiers']), dash='dash', width=1),
                                 showlegend=(idx == 1)
                             ),
                             row=idx, col=1
@@ -925,6 +899,7 @@ def register_reports_callbacks(app):
                             '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
 
             fig = go.Figure()
+            limit_entries = []
             for idx, var in enumerate(variables[:10]):
                 vals = history[var].dropna()
                 if vals.empty:
@@ -937,25 +912,26 @@ def register_reports_callbacks(app):
                     line=dict(color=color, width=2), marker=dict(size=5)
                 ))
 
-                # Upper (LSC) and, when available, lower (LIC) condemnation limits
+                # Collect upper (LSC) and, when available, lower (LIC) limits -
+                # consolidated and drawn after the loop so equal/near-equal
+                # limits across different variables render as one line, not
+                # duplicates.
                 if show_limits:
                     essay_lims = get_essay_limits_four(comp_limits, var, oil_hour_range)
                     if essay_lims and essay_lims.get('LSC') is not None:
-                        fig.add_hline(
-                            y=essay_lims['LSC'],
-                            line=dict(color=color, width=1.5, dash='dash'),
-                            annotation_text=f"{var} LSC",
-                            annotation_position="top right",
-                            annotation_font=dict(size=8, color=color),
-                        )
+                        limit_entries.append({'value': essay_lims['LSC'], 'tier': 'LSC', 'feature': var})
                     if essay_lims and essay_lims.get('LIC') is not None and essay_lims.get('LIM') is not None:
-                        fig.add_hline(
-                            y=essay_lims['LIC'],
-                            line=dict(color=color, width=1.5, dash='dot'),
-                            annotation_text=f"{var} LIC",
-                            annotation_position="bottom right",
-                            annotation_font=dict(size=8, color=color),
-                        )
+                        limit_entries.append({'value': essay_lims['LIC'], 'tier': 'LIC', 'feature': var})
+
+            for line in consolidate_limit_entries(limit_entries):
+                color = limit_line_color(line['tiers'])
+                fig.add_hline(
+                    y=line['value'],
+                    line=dict(color=color, width=1.5, dash='dash'),
+                    annotation_text=line['label'],
+                    annotation_position="top right" if color == UPPER_LIMIT_COLOR else "bottom right",
+                    annotation_font=dict(size=8, color=color),
+                )
 
             fig.update_layout(
                 title="Analítica Avanzada - Tendencia Personalizada",

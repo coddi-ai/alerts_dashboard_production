@@ -19,7 +19,7 @@ from dashboard.components.predictive_config import (
     get_telemetry_signals_for_mode,
     OIL_LABELS,
     TELEMETRY_LABELS,
-    OIL_THRESHOLDS,
+    load_predictive_oil_limits_four,
 )
 from dashboard.components.predictive_kpis import create_kpi_card, create_kpi_row
 from dashboard.components.predictive_charts import (
@@ -29,23 +29,28 @@ from dashboard.components.predictive_charts import (
     create_telemetry_signal_chart,
 )
 from dashboard.components.predictive_tables import create_oil_variables_table
+from dashboard.components.oil_charts import get_essay_limits_four, classify_four_limit_value
 
 logger = get_logger(__name__)
 
 
 # ── Client-scoped label/threshold resolution ──────────────────────────────────
 
-def _resolve_client_dicts(client):
+def _resolve_client_dicts(client, component):
     """
-    Resolve the per-client OIL_LABELS / TELEMETRY_LABELS / OIL_THRESHOLDS once.
-    Falls back to 'cda' if the client is missing so callers never KeyError.
-    Returns (oil_labels, telem_labels, oil_thresholds).
+    Resolve the per-client OIL_LABELS / TELEMETRY_LABELS, and the four-limit
+    Stewart dict (LIC/LIM/LSM/LSC, data contract v2.8) for `component`.
+    Labels fall back to 'cda' if the client is missing so callers never
+    KeyError. Returns (oil_labels, telem_labels, oil_limits_four) -
+    oil_limits_four is {} when unavailable (see
+    load_predictive_oil_limits_four for why this never silently falls back to
+    the legacy three-limit structure).
     """
     ckey = (client or "cda").lower()
     oil_labels = OIL_LABELS.get(ckey, OIL_LABELS["cda"])
     telem_labels = TELEMETRY_LABELS.get(ckey, TELEMETRY_LABELS["cda"])
-    oil_thresholds = OIL_THRESHOLDS.get(ckey, OIL_THRESHOLDS["cda"])
-    return oil_labels, telem_labels, oil_thresholds
+    oil_limits_four = load_predictive_oil_limits_four(ckey, component)
+    return oil_labels, telem_labels, oil_limits_four
 
 
 # ── Data Loading (Multi-Component) ────────────────────────────────────────────
@@ -159,7 +164,7 @@ def _oil_date_col(df) -> str:
     return "Fecha"
 
 
-def _analyze_oil_observations(df_unit, oil_vars, df_latest, oil_labels, oil_thresholds):
+def _analyze_oil_observations(df_unit, oil_vars, df_latest, oil_labels, oil_limits_four):
     """Generate data-driven observations for oil variables."""
     observations = []
     if not oil_vars or df_unit.empty:
@@ -183,29 +188,43 @@ def _analyze_oil_observations(df_unit, oil_vars, df_latest, oil_labels, oil_thre
         current_val = float(current_val)
         label = oil_labels.get(var, var)
 
-        # 1. Threshold check
-        if var in oil_thresholds:
-            thresholds = oil_thresholds[var].get(oil_range)
-            if thresholds:
-                normal, alert, critic = thresholds
-                if current_val > critic:
-                    observations.append({
-                        "type": "critical",
-                        "icon": "fas fa-exclamation-triangle",
-                        "text": f"{label} está en **{current_val:.1f}**, superando el umbral crítico ({critic:.0f})"
-                    })
-                elif current_val > alert:
-                    observations.append({
-                        "type": "warning",
-                        "icon": "fas fa-exclamation-circle",
-                        "text": f"{label} está en **{current_val:.1f}**, en zona de alerta (umbral: {alert:.0f})"
-                    })
-                elif current_val <= normal:
-                    observations.append({
-                        "type": "ok",
-                        "icon": "fas fa-check-circle",
-                        "text": f"{label} está en **{current_val:.1f}**, dentro de rango normal"
-                    })
+        # 1. Threshold check - four-limit Stewart output (LIC/LIM/LSM/LSC, v2.8)
+        essay_limits = get_essay_limits_four(oil_limits_four, var, oil_range)
+        if essay_limits and essay_limits.get('LSM') is not None and essay_limits.get('LSC') is not None:
+            status = classify_four_limit_value(
+                current_val, essay_limits.get('LIC'), essay_limits.get('LIM'),
+                essay_limits['LSM'], essay_limits['LSC']
+            )
+            if status == 'Superior Condenatorio':
+                observations.append({
+                    "type": "critical",
+                    "icon": "fas fa-exclamation-triangle",
+                    "text": f"{label} está en **{current_val:.1f}**, superando el límite superior condenatorio ({essay_limits['LSC']:.0f})"
+                })
+            elif status == 'Superior Marginal':
+                observations.append({
+                    "type": "warning",
+                    "icon": "fas fa-exclamation-circle",
+                    "text": f"{label} está en **{current_val:.1f}**, en zona de alerta (límite superior marginal: {essay_limits['LSM']:.0f})"
+                })
+            elif status == 'Inferior Condenatorio':
+                observations.append({
+                    "type": "critical",
+                    "icon": "fas fa-exclamation-triangle",
+                    "text": f"{label} está en **{current_val:.1f}**, por debajo del límite inferior condenatorio ({essay_limits['LIC']:.0f})"
+                })
+            elif status == 'Inferior Marginal':
+                observations.append({
+                    "type": "warning",
+                    "icon": "fas fa-exclamation-circle",
+                    "text": f"{label} está en **{current_val:.1f}**, en zona de alerta (límite inferior marginal: {essay_limits['LIM']:.0f})"
+                })
+            elif status == 'Normal':
+                observations.append({
+                    "type": "ok",
+                    "icon": "fas fa-check-circle",
+                    "text": f"{label} está en **{current_val:.1f}**, dentro de rango normal"
+                })
 
         # 2. Trend analysis (unique oil samples)
         samples = df_oil[df_oil[var].notna()]
@@ -316,7 +335,7 @@ def _analyze_telemetry_observations(df_unit, telem_vars, telem_labels, days=90):
 
 def _generate_insight_data(unit, df_unit, df_latest, failure_mode, component="motor", client="cda"):
     """Generate complete insight data for a failure mode and unit."""
-    oil_labels, telem_labels, oil_thresholds = _resolve_client_dicts(client)
+    oil_labels, telem_labels, oil_limits_four = _resolve_client_dicts(client, component)
     modes = get_failure_modes_for_component(component, client)
     mode_config = modes.get(failure_mode, {})
     if not mode_config:
@@ -343,7 +362,7 @@ def _generate_insight_data(unit, df_unit, df_latest, failure_mode, component="mo
 
     # Collect observations
     observations = []
-    observations.extend(_analyze_oil_observations(df_unit, oil_vars, df_latest, oil_labels, oil_thresholds))
+    observations.extend(_analyze_oil_observations(df_unit, oil_vars, df_latest, oil_labels, oil_limits_four))
     observations.extend(_analyze_telemetry_observations(df_unit, telem_vars, telem_labels))
 
     # Fleet comparison for the overall failure mode score
@@ -649,7 +668,7 @@ def render_initial_content(unit, df, df_latest, component="motor", client=None):
 
 def render_detailed_evidence(unit, df, df_latest, failure_mode, component="motor", client="cda"):
     """Render oil and telemetry evidence for a unit and failure mode."""
-    oil_labels, telem_labels, oil_thresholds = _resolve_client_dicts(client)
+    oil_labels, telem_labels, oil_limits_four = _resolve_client_dicts(client, component)
     failure_modes = get_failure_modes_dict(component, client)
 
     if not failure_mode or failure_mode not in failure_modes:
@@ -683,7 +702,7 @@ def render_detailed_evidence(unit, df, df_latest, failure_mode, component="motor
 
     # Oil variables table (static, always shows all vars for the mode)
     if oil_vars and not df_unit.empty:
-        oil_table = create_oil_variables_table(df_unit, oil_vars, oil_labels, oil_thresholds)
+        oil_table = create_oil_variables_table(df_unit, oil_vars, oil_labels, oil_limits_four)
     else:
         oil_table = html.Div()
 
@@ -744,7 +763,7 @@ def render_detailed_evidence(unit, df, df_latest, failure_mode, component="motor
                 ),
                 html.P([
                     html.I(className="fas fa-info-circle me-1"),
-                    "Si seleccionas 1 sola variable, se muestran las líneas de límite (Normal, Alerta, Crítico)."
+                    "Si seleccionas 1 sola variable, se muestran sus límites disponibles."
                 ], className="text-muted", style={"fontSize": "11px", "fontStyle": "italic", "marginBottom": "12px"}),
             ], style={"marginBottom": "8px"}),
             # Hidden stores for oil chart callback

@@ -218,6 +218,6 @@ if __name__ == '__main__':
     
     app.run(
         host=host,
-        port=8888,
+        port=port,
         debug=False
     )
