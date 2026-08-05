@@ -11,89 +11,113 @@ import json
 from pathlib import Path
 from config.settings import get_settings
 from src.utils.file_utils import safe_read_parquet
-from src.data.loaders import load_stewart_limits
-from dashboard.components.charts import create_radar_chart, create_time_series_chart
+from src.data.loaders import load_stewart_limits_four
+from dashboard.components.oil_charts import (
+    get_essay_limits_four,
+    build_oil_time_series_grid,
+    classify_four_limit_value,
+    consolidate_limit_entries,
+    limit_line_color,
+    UPPER_LIMIT_COLOR,
+    FOUR_LIMIT_STATUS_ORDER,
+    FOUR_LIMIT_STATUS_HEX_COLORS,
+)
 import dash_bootstrap_components as dbc
 import logging
 
 logger = logging.getLogger(__name__)
 
 
-def get_essay_limits(comp_limits, essay, oil_hour_range):
+def normalize_breached_essays(breached_value):
     """
-    Get essay limits with oil-hour stratification fallback logic (v2.3).
+    Normalize breached_essays to a list of essay names (strings).
     
-    Fallback hierarchy:
-    1. Try exact match: oilHourRange from sample
-    2. Try 'ALL' for v2.2 compatibility
-    3. Try averaging across all available oil hour ranges
-    4. Return None if essay not found
+    Handles both formats:
+    - v2.6+: JSON string containing list of dicts: '[{"essay": "Hierro", "group": "Desgaste", "points": 5}]'
+    - Legacy: List of strings: ["Hierro", "Cobre"]
     
     Args:
-        comp_limits: Nested dict {essay: {oilHourRange: {threshold_normal, ...}}}
-        essay: Essay name
-        oil_hour_range: Oil hour range from sample ('LT_1000', 'GE_1000', 'UNKNOWN')
+        breached_value: Raw value from sample['breached_essays']
     
     Returns:
-        Dict with threshold_normal, threshold_alert, threshold_critic or None
+        List of essay names (strings)
     """
-    if essay not in comp_limits:
-        return None
+    if breached_value is None or (isinstance(breached_value, float) and pd.isna(breached_value)):
+        return []
     
-    essay_limits = comp_limits[essay]
+    # If it's a string, try to parse as JSON
+    if isinstance(breached_value, str):
+        try:
+            parsed = json.loads(breached_value)
+            # If parsed is a list of dicts, extract essay names
+            if isinstance(parsed, list) and len(parsed) > 0:
+                if isinstance(parsed[0], dict):
+                    return [item.get('essay', '') for item in parsed if isinstance(item, dict) and 'essay' in item]
+                else:
+                    # List of strings (legacy format)
+                    return parsed
+            return []
+        except (json.JSONDecodeError, TypeError):
+            return []
     
-    # If essay_limits is already a dict with thresholds (v2.2 format), return it
-    if 'threshold_normal' in essay_limits:
-        return essay_limits
+    # If it's already a list
+    if isinstance(breached_value, list):
+        if len(breached_value) > 0 and isinstance(breached_value[0], dict):
+            # List of dicts - extract essay names
+            return [item.get('essay', '') for item in breached_value if isinstance(item, dict) and 'essay' in item]
+        else:
+            # List of strings
+            return breached_value
     
-    # v2.3 format: try exact oilHourRange match
-    if oil_hour_range in essay_limits:
-        return essay_limits[oil_hour_range]
-    
-    # Fallback: try 'ALL' for v2.2 compatibility
-    if 'ALL' in essay_limits:
-        return essay_limits['ALL']
-    
-    # Fallback: average across all available oil hour ranges
-    if essay_limits:
-        available_ranges = list(essay_limits.keys())
-        if available_ranges:
-            avg_limits = {
-                'threshold_normal': sum(essay_limits[r].get('threshold_normal', 0) for r in available_ranges) / len(available_ranges),
-                'threshold_alert': sum(essay_limits[r].get('threshold_alert', 0) for r in available_ranges) / len(available_ranges),
-                'threshold_critic': sum(essay_limits[r].get('threshold_critic', 0) for r in available_ranges) / len(available_ranges)
-            }
-            return avg_limits
-    
-    return None
+    return []
+
+
+def _format_anomaly_type(anomaly_val):
+    """Format anomaly type for display, handling missing/Normal gracefully."""
+    if anomaly_val is None or (isinstance(anomaly_val, float) and pd.isna(anomaly_val)):
+        return "—"
+    val = str(anomaly_val).strip()
+    if not val or val == 'Normal':
+        return "—"
+    return val
 
 
 def calculate_breached_essays_from_data(sample, limits, client, machine, component):
     """
-    Calculate breached essays dynamically from sample data and Stewart Limits.
-    
+    Calculate breached essays dynamically from sample data and the four-limit
+    Stewart output (LIC/LIM/LSM/LSC, data contract v2.8).
+
     This function provides a fallback when the breached_essays field in the data
     is missing, null, or inconsistent with essays_broken count.
-    
+
+    Uses the sample's componentNameNormalized for limit lookup to avoid
+    mismatches from manual normalization.
+
     Args:
         sample: pandas Series with sample data
-        limits: Stewart Limits dictionary structure
+        limits: Four-limit Stewart Limits dictionary structure, as returned by
+            load_stewart_limits_four(...)
         client: Client name
         machine: Machine name (normalized)
-        component: Component name (normalized)
-    
+        component: Component name (original — used as fallback only)
+
     Returns:
-        List of essay names that breached their thresholds (Normal/Alert/Critic)
+        List of essay names classified outside the Normal band (Inferior
+        Marginal/Condenatorio or Superior Marginal/Condenatorio)
     """
     if not limits or not sample is not None:
         return []
     
-    # Normalize component name (remove left/right position indicators)
-    component_normalized = component.lower()
-    for suffix in [' izquierdo', ' derecho', ' izquierda', ' derecha']:
-        if component_normalized.endswith(suffix):
-            component_normalized = component_normalized[:-len(suffix)].strip()
-            break
+    # Use componentNameNormalized from the sample itself (most reliable)
+    component_normalized = sample.get('componentNameNormalized', None)
+    if not component_normalized or (isinstance(component_normalized, float) and pd.isna(component_normalized)):
+        # Fallback: manual normalization from original name
+        component_normalized = component.lower()
+        for suffix in [' izquierdo', ' derecho', ' izquierda', ' derecha',
+                       ' trasero', ' trasera', ' delantero', ' delantera']:
+            if component_normalized.endswith(suffix):
+                component_normalized = component_normalized[:-len(suffix)].strip()
+                break
     
     # Get limits for this specific component
     if client not in limits or machine not in limits[client] or component_normalized not in limits[client][machine]:
@@ -133,15 +157,18 @@ def calculate_breached_essays_from_data(sample, limits, client, machine, compone
             if value is None:
                 continue
             
-            # Get thresholds with oil-hour stratification (v2.3)
-            essay_limits = get_essay_limits(comp_limits, col, oil_hour_range)
-            if not essay_limits:
+            # Get four-limit thresholds (LIC/LIM/LSM/LSC) with oil-hour stratification
+            essay_limits = get_essay_limits_four(comp_limits, col, oil_hour_range)
+            if not essay_limits or essay_limits.get('LSM') is None or essay_limits.get('LSC') is None:
                 continue
-            
-            normal_threshold = essay_limits.get('threshold_normal', float('inf'))
-            
-            # Essay is breached if it exceeds the Normal threshold
-            if value >= normal_threshold:
+
+            status = classify_four_limit_value(
+                value, essay_limits.get('LIC'), essay_limits.get('LIM'),
+                essay_limits['LSM'], essay_limits['LSC']
+            )
+
+            # Essay is breached if it falls outside the Normal band
+            if status != 'Normal':
                 breached.append(col)
         except (ValueError, TypeError):
             continue
@@ -407,18 +434,18 @@ def register_reports_callbacks(app):
         
         settings = get_settings()
         reports_file = settings.get_classified_reports_path(client)
-        limits_file = settings.get_stewart_limits_path(client)
-        
+        limits_file = settings.get_stewart_limits_four_path(client)
+
         logger.info(f"Reports file: {reports_file}, exists: {reports_file.exists()}")
-        
+
         if not reports_file.exists():
             logger.error(f"Reports file not found: {reports_file}")
             return (html.Div(), html.P("Sin datos"), html.Div(),
                    html.P("Sin datos"), [], None, html.Div())
-        
+
         try:
             df = safe_read_parquet(reports_file)
-            limits = load_stewart_limits(limits_file) if limits_file.exists() else None
+            limits = load_stewart_limits_four(limits_file) if limits_file.exists() else None
             
             logger.info(f"Loaded {len(df)} rows, filtering for: familia={familia}, equipo={equipo}, component={component}, date={sample_date}")
             
@@ -448,8 +475,8 @@ def register_reports_callbacks(app):
             # 2. Decision Summary (OIL-R-02) - with data quality check
             decision_summary = create_decision_summary(sample, limits, client, familia, component)
             
-            # 3. Evidence Tables AND Radar Charts (OIL-R-03)
-            evidence_container = create_evidence_tables_and_radar(sample, limits, df)
+            # 3. Evidence Tables only (radar removed July 2026)
+            evidence_container = create_evidence_tables_only(sample, limits, df)
             
             # 4. AI Recommendation (OIL-R-04) - Plain text display
             ai_recommendation, _ = create_ai_diagnosis_and_action(sample)
@@ -458,13 +485,7 @@ def register_reports_callbacks(app):
             essay_options = get_essay_options(df)
             
             # Pre-select breached essays (up to 6) - use calculated if stored is empty
-            breached_essays = []
-            breached_value = sample.get('breached_essays')
-            if breached_value is not None and not (isinstance(breached_value, float) and pd.isna(breached_value)):
-                try:
-                    breached_essays = json.loads(breached_value)
-                except:
-                    breached_essays = []
+            breached_essays = normalize_breached_essays(sample.get('breached_essays'))
             
             # Fallback: calculate from data if empty
             if not breached_essays and limits:
@@ -507,14 +528,14 @@ def register_reports_callbacks(app):
         
         settings = get_settings()
         reports_file = settings.get_classified_reports_path(client)
-        limits_file = settings.get_stewart_limits_path(client)
-        
+        limits_file = settings.get_stewart_limits_four_path(client)
+
         if not reports_file.exists():
             return Figure()
-        
+
         try:
             df = safe_read_parquet(reports_file)
-            limits = load_stewart_limits(limits_file) if limits_file.exists() else None
+            limits = load_stewart_limits_four(limits_file) if limits_file.exists() else None
             
             # Filter to this equipment and component
             history = df[(df['unitId'] == equipo) & (df['componentName'] == component)].sort_values('sampleDate')
@@ -563,46 +584,34 @@ def register_reports_callbacks(app):
                     row=idx, col=1
                 )
                 
-                # Add threshold lines if available
-                essay_limits = get_essay_limits(comp_limits, essay, oil_hour_range)
+                # Add four-limit (LIC/LIM/LSM/LSC) reference lines if available.
+                # Equal/near-equal limits are consolidated into one line with a
+                # user-friendly label (never plotted as duplicated overlapping
+                # traces), and null lower limits are never plotted at all.
+                essay_limits = get_essay_limits_four(comp_limits, essay, oil_hour_range)
                 if essay_limits:
-                    # Normal threshold
-                    if 'threshold_normal' in essay_limits:
+                    tier_entries = [
+                        {'value': essay_limits.get('LIC'), 'tier': 'LIC', 'feature': essay},
+                        {'value': essay_limits.get('LIM'), 'tier': 'LIM', 'feature': essay},
+                        {'value': essay_limits.get('LSM'), 'tier': 'LSM', 'feature': essay},
+                        {'value': essay_limits.get('LSC'), 'tier': 'LSC', 'feature': essay},
+                    ]
+                    # Lower limits (LIC/LIM) only ever appear here when BOTH are
+                    # available (get_essay_limits_four already enforces this at
+                    # the source), so filtering out None entries is sufficient -
+                    # never render a lower-limit trace when the contract nulls
+                    # them out for this essay/component.
+                    if essay_limits.get('LIC') is None or essay_limits.get('LIM') is None:
+                        tier_entries = [e for e in tier_entries if e['tier'] not in ('LIC', 'LIM')]
+
+                    for line in consolidate_limit_entries(tier_entries):
                         fig.add_trace(
                             go.Scatter(
                                 x=essay_dates,
-                                y=[essay_limits['threshold_normal']] * len(essay_dates),
+                                y=[line['value']] * len(essay_dates),
                                 mode='lines',
-                                name='Normal',
-                                line=dict(color='green', dash='dash', width=1),
-                                showlegend=(idx == 1)
-                            ),
-                            row=idx, col=1
-                        )
-                    
-                    # Alert threshold
-                    if 'threshold_alert' in essay_limits:
-                        fig.add_trace(
-                            go.Scatter(
-                                x=essay_dates,
-                                y=[essay_limits['threshold_alert']] * len(essay_dates),
-                                mode='lines',
-                                name='Alerta',
-                                line=dict(color='orange', dash='dash', width=1),
-                                showlegend=(idx == 1)
-                            ),
-                            row=idx, col=1
-                        )
-                    
-                    # Critic threshold
-                    if 'threshold_critic' in essay_limits:
-                        fig.add_trace(
-                            go.Scatter(
-                                x=essay_dates,
-                                y=[essay_limits['threshold_critic']] * len(essay_dates),
-                                mode='lines',
-                                name='Crítico',
-                                line=dict(color='red', dash='dash', width=1),
+                                name=line['label'],
+                                line=dict(color=limit_line_color(line['tiers']), dash='dash', width=1),
                                 showlegend=(idx == 1)
                             ),
                             row=idx, col=1
@@ -634,6 +643,312 @@ def register_reports_callbacks(app):
         except Exception as e:
             logger.exception(f"Error in update_time_series: {e}")
             return Figure()
+
+    # ========================================
+    # 9-Chart Time Series Grid (July 2026)
+    # ========================================
+
+    @app.callback(
+        Output('reports-time-series-grid', 'children'),
+        [Input('reports-component-selector', 'value'),
+         Input('reports-equipo-selector', 'value'),
+         Input('reports-date-range-picker', 'start_date'),
+         Input('reports-date-range-picker', 'end_date'),
+         Input('client-selector', 'value')],
+        prevent_initial_call=True
+    )
+    def update_time_series_grid(component, equipo, start_date, end_date, client):
+        """
+        Generate 9-chart time series grid for oil analysis trends.
+
+        Uses DatePickerRange for filtering. Shows LSC (upper) always, and
+        LIC (lower) only for essays where the four-limit contract provides it.
+        """
+        if not all([component, equipo, client]):
+            return html.P("Seleccione equipo y componente para ver tendencias", className="text-muted")
+
+        settings = get_settings()
+        reports_file = settings.get_classified_reports_path(client)
+        limits_file = settings.get_stewart_limits_four_path(client)
+
+        if not reports_file.exists():
+            return html.P("No hay datos disponibles", className="text-muted")
+
+        try:
+            df = safe_read_parquet(reports_file)
+            limits = load_stewart_limits_four(limits_file) if limits_file.exists() else None
+
+            # Filter to equipment + component
+            history = df[(df['unitId'] == equipo) & (df['componentName'] == component)].copy()
+            if history.empty:
+                return html.P("Sin historial para este equipo/componente", className="text-muted")
+
+            history['sampleDate'] = pd.to_datetime(history['sampleDate'])
+            history = history.sort_values('sampleDate')
+
+            # Apply date range filter
+            if start_date:
+                history = history[history['sampleDate'] >= pd.to_datetime(start_date)]
+            if end_date:
+                history = history[history['sampleDate'] <= pd.to_datetime(end_date)]
+
+            if history.empty:
+                return html.P("Sin datos en el rango seleccionado", className="text-muted")
+
+            # Get limits for this component
+            familia = history.iloc[0].get('machineName', '')
+            component_normalized = history.iloc[0].get('componentNameNormalized', component)
+            oil_hour_range = history.iloc[-1].get('oilHourRange', 'UNKNOWN')
+
+            comp_limits = {}
+            if limits:
+                comp_limits = limits.get(client, {}).get(familia, {}).get(component_normalized, {})
+
+            return build_oil_time_series_grid(history, comp_limits, oil_hour_range)
+
+        except Exception as e:
+            logger.exception(f"Error in update_time_series_grid: {e}")
+            return html.P(f"Error: {str(e)}", className="text-danger")
+
+    # ========================================
+    # Comment History Table
+    # ========================================
+    @app.callback(
+        Output('reports-comment-history-container', 'children'),
+        [Input('reports-component-selector', 'value'),
+         Input('reports-equipo-selector', 'value'),
+         Input('client-selector', 'value')],
+        prevent_initial_call=True
+    )
+    def update_comment_history(component, equipo, client):
+        """Show historical comments/recommendations for the selected unit/component."""
+        if not all([component, equipo, client]):
+            return html.P("Seleccione equipo y componente para ver el historial de comentarios.",
+                          className="text-muted")
+
+        settings = get_settings()
+        reports_file = settings.get_classified_reports_path(client)
+        if not reports_file.exists():
+            return html.P("Sin datos", className="text-muted")
+
+        try:
+            df = safe_read_parquet(reports_file)
+            history = df[(df['unitId'] == equipo) & (df['componentName'] == component)].copy()
+            if history.empty:
+                return html.P("Sin historial para este equipo/componente", className="text-muted")
+
+            history['sampleDate'] = pd.to_datetime(history['sampleDate'])
+            history = history.sort_values('sampleDate', ascending=False)
+
+            # Build comment history table data
+            table_rows = []
+            for _, row in history.iterrows():
+                rec = row.get('ai_recommendation', None)
+                comment = str(rec) if pd.notna(rec) and rec else '—'
+                anomaly = row.get('anomalyType', None)
+                anomaly_str = str(anomaly) if pd.notna(anomaly) and anomaly != 'Normal' else '—'
+                table_rows.append({
+                    'reportId': str(row.get('sampleNumber', '—')),
+                    'date': row['sampleDate'].strftime('%Y-%m-%d'),
+                    'status': str(row.get('report_status', '—')),
+                    'anomalyType': anomaly_str,
+                    'comment': comment[:500],
+                })
+
+            if not table_rows:
+                return html.P("Sin comentarios disponibles", className="text-muted")
+
+            # Color map for status column
+            status_styles = []
+            for st, bg in [('Normal', '#d4edda'), ('Alerta', '#fff3cd'), ('Anormal', '#f8d7da')]:
+                status_styles.append({
+                    'if': {'filter_query': '{status} = "' + st + '"', 'column_id': 'status'},
+                    'backgroundColor': bg, 'fontWeight': 'bold'
+                })
+
+            return dash_table.DataTable(
+                columns=[
+                    {'name': 'ID Reporte', 'id': 'reportId'},
+                    {'name': 'Fecha', 'id': 'date'},
+                    {'name': 'Estado', 'id': 'status'},
+                    {'name': 'Anomalía', 'id': 'anomalyType'},
+                    {'name': 'Comentario / Recomendación', 'id': 'comment'},
+                ],
+                data=table_rows,
+                style_table={'overflowX': 'auto'},
+                style_cell={
+                    'textAlign': 'left', 'padding': '8px',
+                    'fontSize': '12px', 'whiteSpace': 'normal', 'height': 'auto'
+                },
+                style_header={
+                    'backgroundColor': '#6c757d', 'color': 'white',
+                    'fontWeight': 'bold', 'textAlign': 'center'
+                },
+                style_cell_conditional=[
+                    {'if': {'column_id': 'reportId'}, 'width': '12%'},
+                    {'if': {'column_id': 'date'}, 'width': '10%'},
+                    {'if': {'column_id': 'status'}, 'width': '8%', 'textAlign': 'center'},
+                    {'if': {'column_id': 'anomalyType'}, 'width': '15%'},
+                    {'if': {'column_id': 'comment'}, 'width': '55%', 'minWidth': '200px'},
+                ],
+                style_data_conditional=status_styles,
+                page_size=10,
+                sort_action='native',
+            )
+
+        except Exception as e:
+            logger.exception(f"Error in comment history: {e}")
+            return html.P(f"Error: {str(e)}", className="text-danger")
+
+    # ========================================
+    # Advanced Analytics - Variable Options
+    # ========================================
+    @app.callback(
+        Output('advanced-analytics-variables', 'options'),
+        [Input('reports-component-selector', 'value'),
+         Input('reports-equipo-selector', 'value'),
+         Input('client-selector', 'value')],
+        prevent_initial_call=True
+    )
+    def populate_advanced_analytics_options(component, equipo, client):
+        """Populate available variables for advanced analytics."""
+        if not all([component, equipo, client]):
+            return []
+        settings = get_settings()
+        reports_file = settings.get_classified_reports_path(client)
+        if not reports_file.exists():
+            return []
+        try:
+            df = safe_read_parquet(reports_file)
+            history = df[(df['unitId'] == equipo) & (df['componentName'] == component)]
+            if history.empty:
+                return []
+            # Find numeric essay columns that have data
+            essay_cols = ['Hierro', 'Cromo', 'Aluminio', 'Cobre', 'Plomo', 'Níquel',
+                          'Plata', 'Estaño', 'Titanio', 'Vanadio', 'Manganeso',
+                          'Silicio', 'Potasio', 'Sodio', 'Zinc', 'Bario', 'Boro',
+                          'Calcio', 'Molibdeno', 'Magnesio', 'Fósforo', 'Viscocidad',
+                          'Índice PQ', 'Numero Total Basico', 'Oxidación', 'Agua',
+                          'Refrigerante', 'Combustible', 'Hollín']
+            available = [c for c in essay_cols if c in history.columns and history[c].notna().any()]
+            return [{'label': c, 'value': c} for c in available]
+        except:
+            return []
+
+    # ========================================
+    # Advanced Analytics - Generate Chart
+    # ========================================
+    @app.callback(
+        Output('advanced-analytics-chart-container', 'children'),
+        [Input('advanced-analytics-generate', 'n_clicks')],
+        [State('advanced-analytics-variables', 'value'),
+         State('advanced-analytics-show-limits', 'value'),
+         State('reports-component-selector', 'value'),
+         State('reports-equipo-selector', 'value'),
+         State('reports-date-range-picker', 'start_date'),
+         State('reports-date-range-picker', 'end_date'),
+         State('client-selector', 'value')],
+        prevent_initial_call=True
+    )
+    def generate_advanced_analytics(n_clicks, variables, show_limits_val,
+                                     component, equipo, start_date, end_date, client):
+        """Generate custom trend chart for selected variables."""
+        import plotly.graph_objects as go
+        from dash import dcc
+
+        if not n_clicks or not variables or not all([component, equipo, client]):
+            raise PreventUpdate
+
+        settings = get_settings()
+        reports_file = settings.get_classified_reports_path(client)
+        limits_file = settings.get_stewart_limits_four_path(client)
+
+        if not reports_file.exists():
+            return html.P("Sin datos", className="text-muted")
+
+        try:
+            df = safe_read_parquet(reports_file)
+            limits = load_stewart_limits_four(limits_file) if limits_file.exists() else None
+
+            history = df[(df['unitId'] == equipo) & (df['componentName'] == component)].copy()
+            if history.empty:
+                return html.P("Sin historial", className="text-muted")
+
+            history['sampleDate'] = pd.to_datetime(history['sampleDate'])
+            history = history.sort_values('sampleDate')
+
+            if start_date:
+                history = history[history['sampleDate'] >= pd.to_datetime(start_date)]
+            if end_date:
+                history = history[history['sampleDate'] <= pd.to_datetime(end_date)]
+
+            if history.empty:
+                return html.P("Sin datos en el rango seleccionado", className="text-muted")
+
+            # Limits
+            comp_limits = {}
+            oil_hour_range = 'UNKNOWN'
+            if limits:
+                familia = history.iloc[0].get('machineName', '')
+                comp_norm = history.iloc[0].get('componentNameNormalized', component)
+                comp_limits = limits.get(client, {}).get(familia, {}).get(comp_norm, {})
+                oil_hour_range = history.iloc[-1].get('oilHourRange', 'UNKNOWN')
+
+            show_limits = 'show' in (show_limits_val or [])
+            colors_cycle = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
+                            '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
+
+            fig = go.Figure()
+            limit_entries = []
+            for idx, var in enumerate(variables[:10]):
+                vals = history[var].dropna()
+                if vals.empty:
+                    continue
+                dates = history.loc[vals.index, 'sampleDate']
+                color = colors_cycle[idx % len(colors_cycle)]
+
+                fig.add_trace(go.Scatter(
+                    x=dates, y=vals, mode='lines+markers', name=var,
+                    line=dict(color=color, width=2), marker=dict(size=5)
+                ))
+
+                # Collect upper (LSC) and, when available, lower (LIC) limits -
+                # consolidated and drawn after the loop so equal/near-equal
+                # limits across different variables render as one line, not
+                # duplicates.
+                if show_limits:
+                    essay_lims = get_essay_limits_four(comp_limits, var, oil_hour_range)
+                    if essay_lims and essay_lims.get('LSC') is not None:
+                        limit_entries.append({'value': essay_lims['LSC'], 'tier': 'LSC', 'feature': var})
+                    if essay_lims and essay_lims.get('LIC') is not None and essay_lims.get('LIM') is not None:
+                        limit_entries.append({'value': essay_lims['LIC'], 'tier': 'LIC', 'feature': var})
+
+            for line in consolidate_limit_entries(limit_entries):
+                color = limit_line_color(line['tiers'])
+                fig.add_hline(
+                    y=line['value'],
+                    line=dict(color=color, width=1.5, dash='dash'),
+                    annotation_text=line['label'],
+                    annotation_position="top right" if color == UPPER_LIMIT_COLOR else "bottom right",
+                    annotation_font=dict(size=8, color=color),
+                )
+
+            fig.update_layout(
+                title="Analítica Avanzada - Tendencia Personalizada",
+                height=400,
+                margin=dict(l=50, r=20, t=50, b=40),
+                hovermode='x unified',
+                legend=dict(orientation='h', yanchor='bottom', y=-0.25, xanchor='center', x=0.5),
+                plot_bgcolor='white', paper_bgcolor='white'
+            )
+            fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor='#f0f0f0')
+            fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor='#f0f0f0')
+
+            return dcc.Graph(figure=fig, config={'displayModeBar': True})
+
+        except Exception as e:
+            logger.exception(f"Error in advanced analytics: {e}")
+            return html.P(f"Error: {str(e)}", className="text-danger")
 
 
 # Helper functions
@@ -679,416 +994,6 @@ def create_sample_info_card(sample):
             ])
         ])
     ], color="light")
-
-
-def normalize_value(value, normal, alert, critic):
-    """Normalize essay value to 0-100 scale based on thresholds."""
-    if pd.isna(value):
-        return 0
-    
-    # Below normal threshold - linear scale from 0 to 50
-    if value <= normal:
-        if normal == 0:
-            return 0
-        return (value / normal) * 50
-    
-    # Normal to alert range - scale from 50 to 70
-    elif value <= alert:
-        if alert == normal:
-            return 50
-        return 50 + ((value - normal) / (alert - normal)) * 20
-    
-    # Alert to critic range - scale from 70 to 90
-    elif value <= critic:
-        if critic == alert:
-            return 70
-        return 70 + ((value - alert) / (critic - alert)) * 20
-    
-    # Above critic - scale from 90 to 100
-    else:
-        # Handle zero critic to avoid division by zero
-        if critic == 0:
-            return 100
-        return 90 + min((value - critic) / critic * 10, 10)
-
-
-def create_radar_charts_by_group(sample, limits, df):
-    """Create radar charts grouped by GroupElement with corresponding value tables."""
-    import plotly.graph_objects as go
-    from pathlib import Path
-    from dash import dcc
-    
-    # Load essays_elements to get GroupElement mapping
-    essays_file = Path("data/oil/essays_elements.xlsx")
-    if not essays_file.exists():
-        return html.P("essays_elements.xlsx not found", className="text-muted")
-    
-    try:
-        essays_df = pd.read_excel(essays_file)
-        essays_df = essays_df.dropna(subset=['ElementNameSpanish', 'GroupElement'])
-        
-        # Group essays by GroupElement
-        group_mapping = essays_df.groupby('GroupElement')['ElementNameSpanish'].apply(list).to_dict()
-        
-        # Order groups: Desgaste, Aditivos, then others alphabetically
-        priority_groups = ['Desgaste', 'Aditivos']
-        ordered_groups = []
-        
-        # Add priority groups first (if they exist)
-        for group in priority_groups:
-            if group in group_mapping:
-                ordered_groups.append(group)
-        
-        # Add remaining groups alphabetically
-        remaining_groups = sorted([g for g in group_mapping.keys() if g not in priority_groups])
-        ordered_groups.extend(remaining_groups)
-        
-        # Get limits for this component (use normalized name for lookup)
-        machine = sample.get('machineName', '')
-        component = sample.get('componentName', '')
-        component_normalized = sample.get('componentNameNormalized', component)
-        client = sample.get('client', '')
-        
-        if limits and client in limits and machine in limits[client] and component_normalized in limits[client][machine]:
-            comp_limits = limits[client][machine][component_normalized]
-        else:
-            return html.P("No hay límites disponibles para gráficos radiales", className="text-muted")
-        
-        # Get oil hour range from sample (v2.3)
-        oil_hour_range = sample.get('oilHourRange', 'UNKNOWN')
-        
-        # Create radar charts
-        charts = []
-        
-        # Iterate through groups in specified order
-        for group_name in ordered_groups:
-            essays = group_mapping[group_name]
-            
-            # Filter essays that exist in sample and have limits
-            valid_essays = []
-            for e in essays:
-                if e in sample.index and pd.notna(sample[e]):
-                    essay_limits = get_essay_limits(comp_limits, e, oil_hour_range)
-                    if essay_limits:
-                        valid_essays.append(e)
-            
-            if not valid_essays:
-                continue
-            
-            # Normalize values
-            normalized_values = []
-            actual_values = []
-            
-            for essay in valid_essays:
-                value = float(sample[essay])
-                actual_values.append(value)
-                
-                essay_limits = get_essay_limits(comp_limits, essay, oil_hour_range)
-                normal = essay_limits.get('threshold_normal', 0)
-                alert = essay_limits.get('threshold_alert', 0)
-                critic = essay_limits.get('threshold_critic', 0)
-                
-                norm_value = normalize_value(value, normal, alert, critic)
-                normalized_values.append(norm_value)
-            
-            # Create radar chart
-            fig = go.Figure()
-            
-            # Add threshold rings
-            fig.add_trace(go.Scatterpolar(
-                r=[90] * len(valid_essays),
-                theta=valid_essays,
-                name='Crítico',
-                line=dict(color='red', dash='dash', width=2),
-                fill=None,
-                mode='lines'
-            ))
-            
-            fig.add_trace(go.Scatterpolar(
-                r=[70] * len(valid_essays),
-                theta=valid_essays,
-                name='Alerta',
-                line=dict(color='orange', dash='dash', width=2),
-                fill=None,
-                mode='lines'
-            ))
-            
-            fig.add_trace(go.Scatterpolar(
-                r=[50] * len(valid_essays),
-                theta=valid_essays,
-                name='Normal',
-                line=dict(color='green', dash='dash', width=2),
-                fill=None,
-                mode='lines'
-            ))
-            
-            # Determine color based on status
-            status_color = {
-                'Anormal': '#dc3545',
-                'Alerta': '#ffc107',
-                'Normal': '#28a745'
-            }.get(sample.get('report_status', 'Normal'), '#1f77b4')
-            
-            # Add actual values
-            fig.add_trace(go.Scatterpolar(
-                r=normalized_values,
-                theta=valid_essays,
-                name='Valores Actuales',
-                line=dict(color=status_color, width=3),
-                fill='toself',
-                fillcolor=status_color,
-                opacity=0.4,
-                hovertemplate='<b>%{theta}</b><br>Valor: %{customdata}<br>Normalizado: %{r:.1f}<extra></extra>',
-                customdata=actual_values
-            ))
-            
-            # Update layout
-            fig.update_layout(
-                polar=dict(
-                    radialaxis=dict(
-                        visible=True,
-                        range=[0, 100],
-                        tickvals=[0, 25, 50, 75, 100],
-                        ticktext=['0', '25', '50', '75', '100']
-                    ),
-                    angularaxis=dict(
-                        rotation=90,
-                        direction='clockwise'
-                    )
-                ),
-                title=dict(
-                    text=f"{group_name}",
-                    x=0.5,
-                    xanchor='center',
-                    font=dict(size=14)
-                ),
-                showlegend=True,
-                legend=dict(
-                    orientation='h',
-                    yanchor='bottom',
-                    y=-0.2,
-                    xanchor='center',
-                    x=0.5,
-                    font=dict(size=10)
-                ),
-                height=350,
-                margin=dict(l=50, r=50, t=50, b=50)
-            )
-            
-            # Create value table for this group
-            group_table_data = []
-            for i, essay in enumerate(valid_essays):
-                value = actual_values[i]
-                essay_limits = get_essay_limits(comp_limits, essay, oil_hour_range)
-                normal = essay_limits.get('threshold_normal', 0) if essay_limits else 0
-                alert = essay_limits.get('threshold_alert', 0) if essay_limits else 0
-                critic = essay_limits.get('threshold_critic', 0) if essay_limits else 0
-                
-                # Determine status
-                if value >= critic:
-                    status = 'Crítico'
-                    color = '#dc3545'  # red
-                elif value >= alert:
-                    status = 'Condenatorio'
-                    color = '#fd7e14'  # orange
-                elif value >= normal:
-                    status = 'Marginal'
-                    color = '#ffc107'  # yellow
-                else:
-                    status = 'Normal'
-                    color = '#28a745'  # green
-                
-                group_table_data.append({
-                    'essay': essay,
-                    'value': round(value, 2),
-                    'status': status,
-                    'normal': round(normal, 2),
-                    'alert': round(alert, 2),
-                    'critic': round(critic, 2),
-                    '_color': color
-                })
-            
-            # Sort by status severity
-            status_order = {'Crítico': 0, 'Condenatorio': 1, 'Marginal': 2, 'Normal': 3}
-            group_table_data.sort(key=lambda x: (status_order.get(x['status'], 4), x['essay']))
-            
-            # Create table for this group
-            group_table = dash_table.DataTable(
-                columns=[
-                    {'name': 'Essay', 'id': 'essay'},
-                    {'name': 'Value', 'id': 'value', 'type': 'numeric'},
-                    {'name': 'Status', 'id': 'status'},
-                    {'name': 'Normal', 'id': 'normal', 'type': 'numeric'},
-                    {'name': 'Alert', 'id': 'alert', 'type': 'numeric'},
-                    {'name': 'Critic', 'id': 'critic', 'type': 'numeric'}
-                ],
-                data=[{k: v for k, v in item.items() if k != '_color'} for item in group_table_data],
-                style_cell={
-                    'textAlign': 'left',
-                    'padding': '8px',
-                    'fontSize': '12px',
-                    'overflow': 'hidden',
-                    'textOverflow': 'ellipsis',
-                    'maxWidth': 0
-                },
-                style_header={
-                    'backgroundColor': '#17a2b8',
-                    'color': 'white',
-                    'fontWeight': 'bold',
-                    'textAlign': 'center'
-                },
-                style_data_conditional=[
-                    {
-                        'if': {'row_index': i, 'column_id': 'status'},
-                        'backgroundColor': item['_color'],
-                        'color': 'white' if item['_color'] in ['#dc3545', '#17a2b8', '#28a745'] else 'black',
-                        'fontWeight': 'bold'
-                    }
-                    for i, item in enumerate(group_table_data)
-                ],
-                page_size=10,
-                style_table={'overflowX': 'auto'}
-            )
-            
-            # Add section for this GroupElement
-            charts.append(
-                html.Div([
-                    html.H5(f"📊 {group_name}", className="mt-3 mb-3"),
-                    dbc.Row([
-                        dbc.Col([
-                            dcc.Graph(figure=fig, config={'displayModeBar': False})
-                        ], width=6),
-                        dbc.Col([
-                            group_table
-                        ], width=6)
-                    ])
-                ], className="mb-4")
-            )
-        
-        return html.Div(charts) if charts else html.P("No radar data available", className="text-muted")
-        
-    except Exception as e:
-        logger.exception(f"Error creating radar charts: {e}")
-        return html.P(f"Error: {str(e)}", className="text-danger")
-
-
-def create_value_analysis_table(sample, limits):
-    """Create value analysis table showing all essays with thresholds."""
-    if limits is None:
-        return html.P("No limits data available", className="text-muted")
-    
-    # Get limits for this component
-    machine = sample.get('machineName', '')
-    component = sample.get('componentName', '')
-    client = sample.get('client', '')
-    
-    if not (limits and client in limits and machine in limits[client] and component in limits[client][machine]):
-        return html.P("No hay límites disponibles", className="text-muted")
-    
-    comp_limits = limits[client][machine][component]
-    
-    # Get oil hour range from sample (v2.3)
-    oil_hour_range = sample.get('oilHourRange', 'UNKNOWN')
-    
-    # Get metadata columns to exclude
-    metadata_cols = {'client', 'sampleNumber', 'sampleDate', 'unitId', 'machineName', 
-                    'machineModel', 'machineBrand', 'machineHours', 'machineSerialNumber',
-                    'componentName', 'componentHours', 'componentSerialNumber',
-                    'oilMeter', 'oilBrand', 'oilType', 'oilWeight',
-                    'previousSampleNumber', 'previousSampleDate', 'daysSincePrevious',
-                    'group_element', 'essay_score', 'report_status',
-                    'breached_essays', 'ai_recommendation', 'ai_analysis',
-                    'unitId_generated', 'componentName_generated', 'sampleDate_generated', 
-                    'client_generated', 'sampleDate_str', 'oilHourRange', 'limit_source'}
-    
-    # Add evolution_ratio columns to metadata (v2.3)
-    metadata_cols.update({col for col in sample.index if col.startswith('evolution_ratio_')})
-    
-    # Build comparison data
-    analysis_data = []
-    
-    for col in sample.index:
-        if col not in metadata_cols and pd.notna(sample[col]):
-            essay_limits = get_essay_limits(comp_limits, col, oil_hour_range)
-            if not essay_limits:
-                continue
-            
-            try:
-                value = float(sample[col])
-                normal = essay_limits.get('threshold_normal', 0)
-                alert = essay_limits.get('threshold_alert', 0)
-                critic = essay_limits.get('threshold_critic', 0)
-                
-                # Determine status
-                if value >= critic:
-                    status = 'Crítico'
-                    color = '#dc3545'  # red
-                elif value >= alert:
-                    status = 'Condenatorio'
-                    color = '#fd7e14'  # orange
-                elif value >= normal:
-                    status = 'Marginal'
-                    color = '#ffc107'  # yellow
-                else:
-                    status = 'Normal'
-                    color = '#28a745'  # green
-                
-                analysis_data.append({
-                    'essay': col,
-                    'value': round(value, 2),
-                    'status': status,
-                    'normal': round(normal, 2),
-                    'alert': round(alert, 2),
-                    'critic': round(critic, 2),
-                    '_color': color
-                })
-            except:
-                continue
-    
-    if not analysis_data:
-        return html.P("No hay datos de análisis disponibles", className="text-muted")
-    
-    # Sort by status severity
-    status_order = {'Crítico': 0, 'Condenatorio': 1, 'Marginal': 2, 'Normal': 3}
-    analysis_data.sort(key=lambda x: (status_order.get(x['status'], 4), x['essay']))
-    
-    # Create table
-    return dash_table.DataTable(
-        columns=[
-            {'name': 'Essay', 'id': 'essay'},
-            {'name': 'Value', 'id': 'value', 'type': 'numeric'},
-            {'name': 'Status', 'id': 'status'},
-            {'name': 'Normal', 'id': 'normal', 'type': 'numeric'},
-            {'name': 'Alert', 'id': 'alert', 'type': 'numeric'},
-            {'name': 'Critic', 'id': 'critic', 'type': 'numeric'}
-        ],
-        data=[{k: v for k, v in item.items() if k != '_color'} for item in analysis_data],
-        style_cell={
-            'textAlign': 'left',
-            'padding': '8px',
-            'fontSize': '12px',
-            'overflow': 'hidden',
-            'textOverflow': 'ellipsis',
-            'maxWidth': 0
-        },
-        style_header={
-            'backgroundColor': '#17a2b8',
-            'color': 'white',
-            'fontWeight': 'bold',
-            'textAlign': 'center'
-        },
-        style_data_conditional=[
-            {
-                'if': {'row_index': i, 'column_id': 'status'},
-                'backgroundColor': item['_color'],
-                'color': 'white' if item['_color'] in ['#dc3545', '#17a2b8', '#28a745'] else 'black',
-                'fontWeight': 'bold'
-            }
-            for i, item in enumerate(analysis_data)
-        ],
-        page_size=15,
-        style_table={'overflowX': 'auto', 'maxHeight': '600px', 'overflowY': 'auto'}
-    )
 
 
 def create_historical_comparison(sample, df, equipo, component):
@@ -1253,6 +1158,7 @@ def create_report_identity_display(sample):
     Create sticky report identity display (OIL-R-01).
     
     Shows: client, machine/unit, component, sample date, report status, severity score.
+    Includes component horómetro when available.
     """
     if sample is None or sample.empty:
         return html.Div()
@@ -1262,6 +1168,15 @@ def create_report_identity_display(sample):
         'Alerta': 'warning',
         'Normal': 'success'
     }.get(sample.get('report_status', 'Normal'), 'secondary')
+    
+    # Build component hours display
+    comp_hours_display = 'N/A'
+    comp_hours_val = sample.get('componentHours')
+    if comp_hours_val is not None and not (isinstance(comp_hours_val, float) and pd.isna(comp_hours_val)):
+        try:
+            comp_hours_display = f"{float(comp_hours_val):,.0f} hrs"
+        except (ValueError, TypeError):
+            comp_hours_display = 'N/A'
     
     return dbc.Row([
         dbc.Col([
@@ -1281,7 +1196,13 @@ def create_report_identity_display(sample):
                 html.Small("Componente", className="text-muted d-block"),
                 html.Strong(str(sample.get('componentName', 'N/A')).title())
             ])
-        ], width=3),
+        ], width=2),
+        dbc.Col([
+            html.Div([
+                html.Small("Horómetro Comp.", className="text-muted d-block"),
+                html.Strong(comp_hours_display, style={'color': '#17a2b8'})
+            ])
+        ], width=1),
         dbc.Col([
             html.Div([
                 html.Small("Fecha de Muestra", className="text-muted d-block"),
@@ -1313,13 +1234,7 @@ def create_decision_summary(sample, limits, client, machine, component):
     }.get(sample.get('report_status', 'Normal'), 'secondary')
     
     # Parse stored breached essays
-    stored_breached_essays = []
-    breached_value = sample.get('breached_essays')
-    if breached_value is not None and not (isinstance(breached_value, float) and pd.isna(breached_value)):
-        try:
-            stored_breached_essays = json.loads(breached_value)
-        except:
-            stored_breached_essays = []
+    stored_breached_essays = normalize_breached_essays(sample.get('breached_essays'))
     
     # Calculate breached essays from actual data
     calculated_breached_essays = calculate_breached_essays_from_data(sample, limits, client, machine, component) if limits else []
@@ -1341,15 +1256,18 @@ def create_decision_summary(sample, limits, client, machine, component):
     prev_date = "N/A"
     days_since = "N/A"
     prev_sample_date = sample.get('previousSampleDate')
-    if prev_sample_date is not None and not (isinstance(prev_sample_date, float) and pd.isna(prev_sample_date)):
+    has_previous = (prev_sample_date is not None
+                    and not (isinstance(prev_sample_date, float) and pd.isna(prev_sample_date))
+                    and pd.notna(prev_sample_date))
+    if has_previous:
         prev_date = pd.to_datetime(prev_sample_date).strftime('%Y-%m-%d')
     
     days_prev = sample.get('daysSincePrevious')
-    if days_prev is not None and not (isinstance(days_prev, float) and pd.isna(days_prev)):
+    if has_previous and days_prev is not None and not (isinstance(days_prev, float) and pd.isna(days_prev)):
         days_since = f"{int(days_prev)} d\u00edas"
     
     main_summary = dbc.Row([
-        # Simplified metrics: Status | Essays Broken | Breached Essays
+        # Simplified metrics: Status | Anomaly | Essays Broken | Breached Essays
         dbc.Col([
             dbc.Card([
                 dbc.CardBody([
@@ -1369,21 +1287,31 @@ def create_decision_summary(sample, limits, client, machine, component):
                                 html.H4(html.Span(sample.get('report_status', 'N/A'), 
                                        className=f"badge bg-{status_color}"))
                             ])
-                        ], width=4),
+                        ], width=3),
+                        dbc.Col([
+                            html.Div([
+                                html.Small("Anomalía Detectada", className="text-muted d-block mb-1"),
+                                html.P(
+                                    _format_anomaly_type(sample.get('anomalyType')),
+                                    className="mb-0 fw-bold",
+                                    style={'fontSize': '0.9rem'}
+                                )
+                            ])
+                        ], width=3),
                         dbc.Col([
                             html.Div([
                                 html.Small("Ensayos Fuera de L\u00edmite", className="text-muted d-block mb-1"),
                                 html.H3(f"{essays_broken_count}", 
                                        className=f"text-{status_color}")
                             ])
-                        ], width=4),
+                        ], width=3),
                         dbc.Col([
                             html.Div([
                                 html.Small("Ensayos Cr\u00edticos", className="text-muted d-block mb-1"),
                                 html.P(breached_text, className="mb-0", 
                                       style={'fontSize': '0.9rem', 'fontWeight': 'bold'})
                             ])
-                        ], width=4)
+                        ], width=3)
                     ])
                 ])
             ], color="light")
@@ -1470,13 +1398,7 @@ def create_evidence_tables(sample, limits, df):
         oil_hour_range = sample.get('oilHourRange', 'UNKNOWN')
         
         # Parse breached essays
-        breached_essays = []
-        breached_value = sample.get('breached_essays')
-        if breached_value is not None and not (isinstance(breached_value, float) and pd.isna(breached_value)):
-            try:
-                breached_essays = json.loads(breached_value)
-            except:
-                breached_essays = []
+        breached_essays = normalize_breached_essays(sample.get('breached_essays'))
         
         # Create evidence tables by group
         tables = []
@@ -1488,59 +1410,55 @@ def create_evidence_tables(sample, limits, df):
             valid_essays = []
             for e in essays:
                 if e in sample.index and pd.notna(sample[e]):
-                    essay_limits = get_essay_limits(comp_limits, e, oil_hour_range)
+                    essay_limits = get_essay_limits_four(comp_limits, e, oil_hour_range)
                     if essay_limits:
                         valid_essays.append(e)
-            
+
             if not valid_essays:
                 continue
-            
+
             # Build table data
+            def _fmt_limit(v):
+                return round(v, 1) if v is not None else '—'
+
             table_data = []
             for essay in valid_essays:
                 value = float(sample[essay])
-                essay_limits = get_essay_limits(comp_limits, essay, oil_hour_range)
-                normal = essay_limits.get('threshold_normal', 0)
-                alert = essay_limits.get('threshold_alert', 0)
-                critic = essay_limits.get('threshold_critic', 0)
-                
-                # Determine status
-                if value >= critic:
-                    status = 'Crítico'
-                    color = '#dc3545'
-                elif value >= alert:
-                    status = 'Condenatorio'
-                    color = '#fd7e14'
-                elif value >= normal:
-                    status = 'Marginal'
-                    color = '#ffc107'
-                else:
-                    status = 'Normal'
-                    color = '#28a745'
-                
+                essay_limits = get_essay_limits_four(comp_limits, essay, oil_hour_range)
+                lic = essay_limits.get('LIC')
+                lim = essay_limits.get('LIM')
+                lsm = essay_limits.get('LSM')
+                lsc = essay_limits.get('LSC')
+
+                status = classify_four_limit_value(value, lic, lim, lsm, lsc)
+                color = FOUR_LIMIT_STATUS_HEX_COLORS.get(status, '#28a745')
+
                 # Check if breached
                 is_breached = essay in breached_essays
-                
+
                 table_data.append({
                     'essay': essay,
                     'value': round(value, 2),
-                    'limite_marginal': round(alert, 1),
-                    'limite_condenatorio': round(critic, 1),
+                    'lic': _fmt_limit(lic),
+                    'lim': _fmt_limit(lim),
+                    'lsm': _fmt_limit(lsm),
+                    'lsc': _fmt_limit(lsc),
                     'status': status,
                     '_color': color
                 })
-            
+
             # Sort by status severity (worst first)
-            status_order = {'Crítico': 0, 'Condenatorio': 1, 'Marginal': 2, 'Normal': 3}
-            table_data.sort(key=lambda x: (status_order.get(x['status'], 4), x['essay']))
-            
+            table_data.sort(key=lambda x: (FOUR_LIMIT_STATUS_ORDER.get(x['status'], 9), x['essay']))
+
             # Create table
             group_table = dash_table.DataTable(
                 columns=[
                     {'name': 'Ensayo', 'id': 'essay'},
                     {'name': 'Valor Actual (ppm)', 'id': 'value', 'type': 'numeric'},
-                    {'name': 'Límite Marginal', 'id': 'limite_marginal', 'type': 'numeric'},
-                    {'name': 'Límite Condenatorio', 'id': 'limite_condenatorio', 'type': 'numeric'},
+                    {'name': 'LIC', 'id': 'lic'},
+                    {'name': 'LIM', 'id': 'lim'},
+                    {'name': 'LSM', 'id': 'lsm'},
+                    {'name': 'LSC', 'id': 'lsc'},
                     {'name': 'Estado', 'id': 'status'}
                 ],
                 data=[{k: v for k, v in item.items() if k != '_color'} for item in table_data],
@@ -1583,284 +1501,8 @@ def create_evidence_tables(sample, limits, df):
         return html.P(f"Error: {str(e)}", className="text-danger")
 
 
-def create_evidence_tables_and_radar(sample, limits, df):
-    """
-    Create combined evidence display with BOTH tables AND radar charts (OIL-R-03).
-    
-    Shows evidence grouped by essay category:
-    - Evidence table (primary - for detailed threshold analysis)
-    - Radar chart (secondary - for visual pattern recognition)
-    """
-    from pathlib import Path
-    from dash import dcc
-    import plotly.graph_objects as go
-    
-    # Load essays_elements to get GroupElement mapping
-    essays_file = Path("data/oil/essays_elements.xlsx")
-    if not essays_file.exists():
-        return html.P("essays_elements.xlsx not found", className="text-muted")
-    
-    try:
-        essays_df = pd.read_excel(essays_file)
-        essays_df = essays_df.dropna(subset=['ElementNameSpanish', 'GroupElement'])
-        
-        # Group essays by GroupElement
-        group_mapping = essays_df.groupby('GroupElement')['ElementNameSpanish'].apply(list).to_dict()
-        
-        # Order groups: Desgaste first, then others alphabetically
-        priority_groups = ['Desgaste', 'Contaminacion', 'Aditivos']
-        ordered_groups = []
-        
-        for group in priority_groups:
-            if group in group_mapping:
-                ordered_groups.append(group)
-        
-        remaining_groups = sorted([g for g in group_mapping.keys() if g not in priority_groups])
-        ordered_groups.extend(remaining_groups)
-        
-        # Get limits for this component
-        machine = sample.get('machineName', '')
-        component = sample.get('componentName', '')
-        component_normalized = sample.get('componentNameNormalized', component)
-        client = sample.get('client', '')
-        
-        if not (limits and client in limits and machine in limits[client] and component_normalized in limits[client][machine]):
-            return html.P("No hay límites disponibles para análisis de evidencia", className="text-muted")
-        
-        comp_limits = limits[client][machine][component_normalized]
-        
-        # Get oil hour range from sample (v2.3)
-        oil_hour_range = sample.get('oilHourRange', 'UNKNOWN')
-        
-        # Parse breached essays
-        breached_essays = []
-        breached_value = sample.get('breached_essays')
-        if breached_value is not None and not (isinstance(breached_value, float) and pd.isna(breached_value)):
-            try:
-                breached_essays = json.loads(breached_value)
-            except:
-                breached_essays = []
-        
-        # Create combined sections (tables + radar charts) by group
-        sections = []
-        
-        for group_name in ordered_groups:
-            essays = group_mapping[group_name]
-            
-            # Filter essays that exist in sample and have limits
-            valid_essays = []
-            for e in essays:
-                if e in sample.index and pd.notna(sample[e]):
-                    essay_limits = get_essay_limits(comp_limits, e, oil_hour_range)
-                    if essay_limits:
-                        valid_essays.append(e)
-            
-            if not valid_essays:
-                continue
-            
-            # ============================================================
-            # Build table data
-            # ============================================================
-            table_data = []
-            for essay in valid_essays:
-                value = float(sample[essay])
-                essay_limits = get_essay_limits(comp_limits, essay, oil_hour_range)
-                normal = essay_limits.get('threshold_normal', 0)
-                alert = essay_limits.get('threshold_alert', 0)
-                critic = essay_limits.get('threshold_critic', 0)
-                
-                # Determine status
-                if value >= critic:
-                    status = 'Crítico'
-                    color = '#dc3545'
-                elif value >= alert:
-                    status = 'Condenatorio'
-                    color = '#fd7e14'
-                elif value >= normal:
-                    status = 'Marginal'
-                    color = '#ffc107'
-                else:
-                    status = 'Normal'
-                    color = '#28a745'
-                
-                # Check if breached
-                is_breached = essay in breached_essays
-                
-                table_data.append({
-                    'essay': essay,
-                    'value': round(value, 2),
-                    'limite_marginal': round(alert, 1),
-                    'limite_condenatorio': round(critic, 1),
-                    'status': status,
-                    '_color': color
-                })
-            
-            # Sort by status severity (worst first)
-            status_order = {'Crítico': 0, 'Condenatorio': 1, 'Marginal': 2, 'Normal': 3}
-            table_data.sort(key=lambda x: (status_order.get(x['status'], 4), x['essay']))
-            
-            # Create table
-            group_table = dash_table.DataTable(
-                columns=[
-                    {'name': 'Ensayo', 'id': 'essay'},
-                    {'name': 'Valor (ppm)', 'id': 'value', 'type': 'numeric'},
-                    {'name': 'Límite Marginal', 'id': 'limite_marginal', 'type': 'numeric'},
-                    {'name': 'Límite Condenatorio', 'id': 'limite_condenatorio', 'type': 'numeric'},
-                    {'name': 'Estado', 'id': 'status'}
-                ],
-                data=[{k: v for k, v in item.items() if k != '_color'} for item in table_data],
-                style_cell={
-                    'textAlign': 'left',
-                    'padding': '8px',
-                    'fontSize': '12px'
-                },
-                style_header={
-                    'backgroundColor': '#17a2b8',
-                    'color': 'white',
-                    'fontWeight': 'bold',
-                    'textAlign': 'center'
-                },
-                style_data_conditional=[
-                    {
-                        'if': {'row_index': i, 'column_id': 'status'},
-                        'backgroundColor': item['_color'],
-                        'color': 'white' if item['_color'] in ['#dc3545', '#17a2b8', '#28a745'] else 'black',
-                        'fontWeight': 'bold'
-                    }
-                    for i, item in enumerate(table_data)
-                ],
-                page_size=10,
-                style_table={'overflowX': 'auto'}
-            )
-            
-            # ============================================================
-            # Build radar chart
-            # ============================================================
-            # Normalize values for radar
-            normalized_values = []
-            actual_values = []
-            
-            for essay in valid_essays:
-                value = float(sample[essay])
-                actual_values.append(value)
-                
-                essay_limits = get_essay_limits(comp_limits, essay, oil_hour_range)
-                normal = essay_limits.get('threshold_normal', 0)
-                alert = essay_limits.get('threshold_alert', 0)
-                critic = essay_limits.get('threshold_critic', 0)
-                
-                norm_value = normalize_value(value, normal, alert, critic)
-                normalized_values.append(norm_value)
-            
-            # Create radar chart
-            fig = go.Figure()
-            
-            # Add threshold rings
-            fig.add_trace(go.Scatterpolar(
-                r=[90] * len(valid_essays),
-                theta=valid_essays,
-                name='Crítico',
-                line=dict(color='red', dash='dash', width=2),
-                fill=None,
-                mode='lines'
-            ))
-            
-            fig.add_trace(go.Scatterpolar(
-                r=[70] * len(valid_essays),
-                theta=valid_essays,
-                name='Alerta',
-                line=dict(color='orange', dash='dash', width=2),
-                fill=None,
-                mode='lines'
-            ))
-            
-            fig.add_trace(go.Scatterpolar(
-                r=[50] * len(valid_essays),
-                theta=valid_essays,
-                name='Normal',
-                line=dict(color='green', dash='dash', width=2),
-                fill=None,
-                mode='lines'
-            ))
-            
-            # Determine color based on status
-            status_color = {
-                'Anormal': '#dc3545',
-                'Alerta': '#ffc107',
-                'Normal': '#28a745'
-            }.get(sample.get('report_status', 'Normal'), '#1f77b4')
-            
-            # Add actual values
-            fig.add_trace(go.Scatterpolar(
-                r=normalized_values,
-                theta=valid_essays,
-                name='Current Values',
-                line=dict(color=status_color, width=3),
-                fill='toself',
-                fillcolor=status_color,
-                opacity=0.4,
-                hovertemplate='<b>%{theta}</b><br>Value: %{customdata}<br>Normalized: %{r:.1f}<extra></extra>',
-                customdata=actual_values
-            ))
-            
-            # Update layout
-            fig.update_layout(
-                polar=dict(
-                    radialaxis=dict(
-                        visible=True,
-                        range=[0, 100],
-                        tickvals=[0, 25, 50, 75, 100]
-                    ),
-                    angularaxis=dict(
-                        rotation=90,
-                        direction='clockwise'
-                    )
-                ),
-                title=dict(
-                    text=f"{group_name} - Radar View",
-                    x=0.5,
-                    xanchor='center',
-                    font=dict(size=13)
-                ),
-                showlegend=True,
-                legend=dict(
-                    orientation='h',
-                    yanchor='bottom',
-                    y=-0.2,
-                    xanchor='center',
-                    x=0.5,
-                    font=dict(size=9)
-                ),
-                height=350,
-                margin=dict(l=50, r=50, t=50, b=50)
-            )
-            
-            # ============================================================
-            # Combine table and radar in 2-column layout
-            # ============================================================
-            sections.append(
-                html.Div([
-                    html.H5(f"📊 {group_name}", className="mt-3 mb-3"),
-                    dbc.Row([
-                        # Left: Table (primary)
-                        dbc.Col([
-                            html.H6("Evidence Table", className="text-muted mb-2", style={'fontSize': '0.9rem'}),
-                            group_table
-                        ], width=7),
-                        # Right: Radar (secondary)
-                        dbc.Col([
-                            html.H6("Patrón Visual", className="text-muted mb-2", style={'fontSize': '0.9rem'}),
-                            dcc.Graph(figure=fig, config={'displayModeBar': False})
-                        ], width=5)
-                    ])
-                ], className="mb-4")
-            )
-        
-        return html.Div(sections) if sections else html.P("No hay datos de evidencia disponibles", className="text-muted")
-        
-    except Exception as e:
-        logger.exception(f"Error creating evidence tables and radar: {e}")
-        return html.P(f"Error: {str(e)}", className="text-danger")
+# Alias: tables-only evidence (radar removed July 2026)
+create_evidence_tables_only = create_evidence_tables
 
 
 def create_ai_diagnosis_and_action(sample):

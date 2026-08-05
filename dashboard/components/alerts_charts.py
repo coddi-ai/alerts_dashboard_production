@@ -1,9 +1,12 @@
 # Standard color mapping for sistema
 SISTEMA_COLORS = {
-    'Tren de Fuerza': '#1f77b4',
-    'Motor': '#ff7f0e',
-    'Frenos': '#2ca02c',
-    'Direccion': '#d62728',
+    'Tren de Fuerza': '#4f8a8b',
+    'Tren de fuerza': '#4f8a8b',
+    'Motor': '#355c7d',
+    'Frenos': '#d08c60',
+    'Direccion': '#7c6a9a',
+    'Dirección': '#7c6a9a',
+    'Dirección': '#7c6a9a',
 }
 """
 Chart components for Alerts Dashboard.
@@ -25,12 +28,117 @@ from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+# Keep raw values for filtering, but use one client-facing label in every
+# alert chart. Capstone publishes ``motor`` while the dashboard presents it
+# as ``Motor``.
+SYSTEM_TRANSLATION = {
+    'Tren de Fuerza': 'Tren de fuerza',
+    'Tren de fuerza': 'Tren de fuerza',
+    'tren de fuerza': 'Tren de fuerza',
+    'Motor': 'Motor',
+    'motor': 'Motor',
+    'Frenos': 'Frenos',
+    'frenos': 'Frenos',
+    'Direccion': 'Dirección',
+    'Dirección': 'Dirección',
+}
+
+
+def translate_system_label(value) -> str:
+    """Return the display label for a raw alert system value."""
+    if value is None or (not isinstance(value, (list, tuple, dict)) and pd.isna(value)):
+        return 'Sin sistema'
+    raw = str(value).strip()
+    if not raw:
+        return 'Sin sistema'
+    translated = SYSTEM_TRANSLATION.get(raw)
+    if translated is not None:
+        return translated
+    folded = raw.casefold()
+    for key, label in SYSTEM_TRANSLATION.items():
+        if key.casefold() == folded:
+            return label
+    return raw
+
 # Operational state color mapping
 STATE_COLORS = {
     'Operacional': '#2ecc71',  # Green
     'Ralenti': '#f39c12',      # Orange
+    'RalentÃ­': '#f39c12',
+    'IDLE': '#f39c12',
+    'PREPARACION': '#f39c12',
+    'PREPARACIÃ“N': '#f39c12',
+    'PreparaciÃ³n': '#f39c12',
+    'RPM_BAJA': '#f39c12',
+    'HABILITADO': '#2ecc71',
+    'Habilitado': '#2ecc71',
+    'Potencia': '#2ecc71',
+    'potencia': '#2ecc71',
+    'Transicion': '#f39c12',
     'ND': '#95a5a6'            # Gray
 }
+
+STATE_LABELS = {
+    'HABILITADO': 'Operacional',
+    'Habilitado': 'Operacional',
+    'Operacional': 'Operacional',
+    'Potencia': 'Potencia',
+    'potencia': 'Potencia',
+    'PREPARACION': 'PreparaciÃ³n',
+    'PREPARACIÃ“N': 'PreparaciÃ³n',
+    'PreparaciÃ³n': 'PreparaciÃ³n',
+    'Ralenti': 'RalentÃ­ / Idle',
+    'RalentÃ­': 'RalentÃ­ / Idle',
+    'IDLE': 'RalentÃ­ / Idle',
+    'RPM_BAJA': 'RalentÃ­ / RPM baja',
+}
+
+# Capstone state labels may arrive with either UTF-8 or legacy decoded text.
+# Normalize both forms for the legend without changing CDA's existing states.
+STATE_COLORS.update({
+    'Preparaci\u00f3n': '#f39c12',
+    'PREPARACI\u00d3N': '#f39c12',
+    'Transici\u00f3n': '#f39c12',
+    'Transicion': '#f39c12',
+})
+STATE_LABELS.update({
+    'Preparaci\u00f3n': 'Preparaci\u00f3n',
+    'PREPARACI\u00d3N': 'Preparaci\u00f3n',
+    'PreparaciÃ³n': 'Preparaci\u00f3n',
+    'PREPARACION': 'Preparaci\u00f3n',
+    'Transici\u00f3n': 'Transici\u00f3n',
+    'Transicion': 'Transici\u00f3n',
+})
+
+# Explicit canonical aliases keep Capstone's accented state values in the
+# same palette as their unaccented/legacy variants.
+STATE_COLORS['Transición'] = '#f39c12'
+STATE_LABELS['Transición'] = 'Transición'
+
+
+def _state_lookup(value, mapping: Dict, default):
+    """Resolve state aliases case-insensitively while preserving raw values."""
+    if value is None or (not isinstance(value, (list, tuple, dict)) and pd.isna(value)):
+        return default
+    raw = str(value).strip()
+    if not raw:
+        return default
+    if raw in mapping:
+        return mapping[raw]
+    folded = raw.casefold()
+    for key, mapped in mapping.items():
+        if str(key).casefold() == folded:
+            return mapped
+    return default
+
+
+def _state_color(value, default='#95a5a6'):
+    return _state_lookup(value, STATE_COLORS, default)
+
+
+def _state_label(value):
+    fallback = str(value).strip() if value is not None else ''
+    return _state_lookup(value, STATE_LABELS, fallback)
 
 # Spanish feature names mapping
 FEATURE_NAMES_ES = {
@@ -43,6 +151,25 @@ FEATURE_NAMES_ES = {
     "RtExhTemp": 'Temperatura del escape derecho del motor',
     "LtExhTemp": 'Temperatura del escape izquierdo del motor',
     "AirFltr": 'Estado del filtro de aire del motor',
+    "LckupSlip": 'Deslizamiento del embrague de bloqueo',
+    "TrnSlip": 'Deslizamiento de la transmisión',
+    # Variables de tribología que pueden aparecer junto a una señal de
+    # telemetría en una alerta mixta.
+    "Hierro": 'Hierro',
+    "Aluminio": 'Aluminio',
+    "Zinc": 'Zinc',
+    "Calcio": 'Calcio',
+    "Fósforo": 'Fósforo',
+    "Índice PQ": 'Índice PQ',
+    "Oxidación": 'Oxidación',
+    "Hollín": 'Hollín',
+    "Silicio": 'Silicio',
+    "Potasio": 'Potasio',
+    "Níquel": 'Níquel',
+    "Cobre": 'Cobre',
+    "Cromo": 'Cromo',
+    "Plomo": 'Plomo',
+    "Estaño": 'Estaño',
     "DiffLubePres": 'Presión del lubricante del diferencial',
     "DiffTemp": 'Temperatura del diferencial',
     "TrnLubeTemp": 'Temperatura del lubricante de la transmisión',
@@ -53,6 +180,41 @@ FEATURE_NAMES_ES = {
     "LtFBrkTemp": 'Temperatura del freno delantero izquierdo',
     "StrgOilTemp": 'Temperatura del aceite de dirección'
 }
+
+# Capstone canonical signal names. These keys are additive and do not change
+# the established CDA labels or chart rendering.
+FEATURE_NAMES_ES.update({
+    'engine_speed_rpm': 'Velocidad del motor',
+    'engine_load_pct': 'Carga del motor',
+    'coolant_temp_c': 'Temperatura del refrigerante',
+    'coolant_pressure_psi': 'Presi\u00f3n del refrigerante',
+    'ecu_temp_c': 'Temperatura de la ECU',
+    'crankcase_pressure_inh2o': 'Presi\u00f3n del c\u00e1rter',
+    'compressor_intake_temp_c': 'Temperatura de admisi\u00f3n del compresor',
+    'turbo_speed_rpm': 'Velocidad del turbo',
+    'oil_filter_dp_psi': 'Presi\u00f3n diferencial del filtro de aceite',
+    'oil_filter_dp_mcrs_psi': 'Presi\u00f3n diferencial del filtro de aceite (MCRS)',
+    'oil_temp_c': 'Temperatura del aceite',
+    'fuel_pump_intake_pressure_psi': 'Presi\u00f3n de admisi\u00f3n de la bomba de combustible',
+    'oil_diff_pressure_psi': 'Presi\u00f3n diferencial del aceite',
+    'pre_filter_oil_pressure_psi': 'Presi\u00f3n de aceite pre-filtro',
+    'rifle_oil_pressure_psi': 'Presi\u00f3n de aceite del rifle',
+    'post_engine_pressure_psi': 'Presi\u00f3n de aceite post-motor',
+    'oil_level_pct': 'Nivel de aceite',
+    'oil_priming_state': 'Estado de cebado del aceite',
+    'fan_speed_rpm': 'Velocidad del ventilador',
+    'power_hp': 'Potencia del motor',
+    'imp_lb_psi': 'Presi\u00f3n de admisi\u00f3n banco izquierdo',
+    'imp_rb_psi': 'Presi\u00f3n de admisi\u00f3n banco derecho',
+    'imt_lbf_c': 'Temperatura de admisi\u00f3n banco izquierdo frontal',
+    'imt_lbr_c': 'Temperatura de admisi\u00f3n banco izquierdo trasero',
+    'imt_rbf_c': 'Temperatura de admisi\u00f3n banco derecho frontal',
+    'imt_rbr_c': 'Temperatura de admisi\u00f3n banco derecho trasero',
+    'egt_avg_c': 'Temperatura promedio de gases de escape',
+    'egt_lb_c': 'Temperatura de escape banco izquierdo',
+    'egt_rb_c': 'Temperatura de escape banco derecho',
+    **{f'egt_{index:02d}_c': f'Temperatura de escape cilindro {index:02d}' for index in range(1, 17)},
+})
 
 # Features to omit from dashboard
 OMITTED_FEATURES = ['GroundSpd', 'EngLoad']
@@ -77,28 +239,32 @@ def create_alerts_per_unit_chart(alerts_df: pd.DataFrame) -> go.Figure:
         )
     
     try:
-        # Count alerts per unit and system
-        alerts_per_unit = alerts_df.groupby(['UnitId', 'sistema']).size().reset_index(name='Count')
+        # Count alerts per unit and translated display system.
+        alerts_per_unit = alerts_df.copy()
+        alerts_per_unit['_system_display'] = alerts_per_unit['sistema'].map(translate_system_label)
+        alerts_per_unit = alerts_per_unit.groupby(
+            ['UnitId', '_system_display']
+        ).size().reset_index(name='Count')
         
         # Sort systems in reverse alphabetical order for consistent ordering
-        alerts_per_unit['sistema'] = pd.Categorical(
-            alerts_per_unit['sistema'],
-            categories=sorted(alerts_per_unit['sistema'].unique(), reverse=True),
+        alerts_per_unit['_system_display'] = pd.Categorical(
+            alerts_per_unit['_system_display'],
+            categories=sorted(alerts_per_unit['_system_display'].unique(), reverse=True),
             ordered=True
         )
-        alerts_per_unit = alerts_per_unit.sort_values('sistema')
+        alerts_per_unit = alerts_per_unit.sort_values('_system_display')
         
         # Create horizontal bar chart
         fig = px.bar(
             alerts_per_unit,
             y='UnitId',
             x='Count',
-            color='sistema',
+            color='_system_display',
             orientation='h',
             title=None,
-            labels={'Count': 'Número de Alertas', 'UnitId': 'Unidad'},
             template='plotly_white',
             height=500,
+            labels={'Count': 'Número de Alertas', 'UnitId': 'Unidad', '_system_display': 'Sistema'},
             color_discrete_map=SISTEMA_COLORS
         )
         # Horizontal, compact legend at top right
@@ -149,26 +315,30 @@ def create_alerts_per_month_chart(alerts_df: pd.DataFrame) -> go.Figure:
         )
     
     try:
-        # Count alerts per month and system
-        alerts_per_month = alerts_df.groupby(['Month', 'sistema']).size().reset_index(name='Count')
+        # Count alerts per month and translated display system.
+        alerts_per_month = alerts_df.copy()
+        alerts_per_month['_system_display'] = alerts_per_month['sistema'].map(translate_system_label)
+        alerts_per_month = alerts_per_month.groupby(
+            ['Month', '_system_display']
+        ).size().reset_index(name='Count')
         alerts_per_month['Month_str'] = alerts_per_month['Month'].astype(str)
         
         # Sort systems in reverse alphabetical order for consistent ordering
-        alerts_per_month['sistema'] = pd.Categorical(
-            alerts_per_month['sistema'],
-            categories=sorted(alerts_per_month['sistema'].unique(), reverse=True),
+        alerts_per_month['_system_display'] = pd.Categorical(
+            alerts_per_month['_system_display'],
+            categories=sorted(alerts_per_month['_system_display'].unique(), reverse=True),
             ordered=True
         )
-        alerts_per_month = alerts_per_month.sort_values('sistema')
+        alerts_per_month = alerts_per_month.sort_values('_system_display')
         
         # Create vertical bar chart
         fig = px.bar(
             alerts_per_month,
             x='Month_str',
             y='Count',
-            color='sistema',
+            color='_system_display',
             title=None,
-            labels={'Month_str': 'Mes', 'Count': 'Número de Alertas'},
+            labels={'Month_str': 'Mes', 'Count': 'Número de Alertas', '_system_display': 'Sistema'},
             template='plotly_white',
             height=500,
             color_discrete_map=SISTEMA_COLORS
@@ -200,6 +370,41 @@ def create_alerts_per_month_chart(alerts_df: pd.DataFrame) -> go.Figure:
             xref="paper", yref="paper",
             x=0.5, y=0.5, showarrow=False
         )
+
+
+def create_alerts_per_week_chart(alerts_df: pd.DataFrame) -> go.Figure:
+    """Create a weekly stacked alert evolution chart."""
+    if alerts_df is None or alerts_df.empty:
+        return go.Figure().add_annotation(text="No hay alertas para el período", x=0.5, y=0.5, showarrow=False)
+    frame = alerts_df.copy()
+    timestamp = pd.to_datetime(frame.get('Timestamp'), errors='coerce')
+    frame = frame.loc[timestamp.notna()].copy()
+    frame['_week_start'] = timestamp.loc[frame.index].dt.to_period('W-SUN').dt.start_time
+    frame['_system_display'] = frame.get('sistema', '').map(translate_system_label)
+    grouped = frame.groupby(['_week_start', '_system_display']).size().reset_index(name='Count')
+    weeks = pd.date_range(frame['_week_start'].min(), frame['_week_start'].max(), freq='7D')
+    systems = sorted(frame['_system_display'].dropna().unique())
+    full = pd.MultiIndex.from_product([weeks, systems], names=['_week_start', '_system_display']).to_frame(index=False)
+    grouped = full.merge(grouped, how='left', on=['_week_start', '_system_display']).fillna({'Count': 0})
+    grouped['Semana'] = grouped['_week_start'].dt.strftime('%d/%m')
+    fig = px.bar(
+        grouped,
+        x='Semana',
+        y='Count',
+        color='_system_display',
+        barmode='stack',
+        labels={'Semana': 'Semana iniciada', 'Count': 'Alertas', '_system_display': 'Sistema'},
+        color_discrete_map=SISTEMA_COLORS,
+        template='plotly_white',
+        height=360,
+    )
+    fig.update_traces(hovertemplate='<b>%{fullData.name}</b><br>Semana: %{x}<br>Alertas: %{y}<extra></extra>')
+    fig.update_layout(
+        margin=dict(l=45, r=15, t=18, b=55),
+        legend=dict(orientation='h', y=1.08, x=1, xanchor='right', yanchor='bottom', font=dict(size=10)),
+        hovermode='x unified',
+    )
+    return fig
 
 
 def create_trigger_distribution_treemap(alerts_df: pd.DataFrame) -> go.Figure:
@@ -359,7 +564,7 @@ def create_sensor_trends_chart(
                         legendgroup=estado,
                         showlegend=(idx == 1),  # Only show legend for first subplot
                         marker=dict(
-                            color=STATE_COLORS.get(estado, '#95a5a6'),
+                            color=_state_color(estado),
                             size=6
                         ),
                         hovertemplate=(
@@ -703,21 +908,23 @@ def create_system_distribution_pie_chart(alerts_df: pd.DataFrame) -> go.Figure:
         )
     
     try:
-        # Count alerts by system
-        system_counts = alerts_df['sistema'].value_counts().reset_index()
-        system_counts.columns = ['sistema', 'Count']
+        # Count alerts by translated display system.
+        system_counts = alerts_df.copy()
+        system_counts['_system_display'] = system_counts['sistema'].map(translate_system_label)
+        system_counts = system_counts['_system_display'].value_counts().reset_index()
+        system_counts.columns = ['_system_display', 'Count']
         
         # Sort systems in reverse alphabetical order
-        system_counts = system_counts.sort_values('sistema', ascending=False)
+        system_counts = system_counts.sort_values('_system_display', ascending=False)
         
         # Create pie chart with standard color mapping
         fig = px.pie(
             system_counts,
             values='Count',
-            names='sistema',
+            names='_system_display',
             title=None,  # Remove title
             hole=0.3,  # Makes it a donut chart
-            color='sistema',
+            color='_system_display',
             color_discrete_map=SISTEMA_COLORS
         )
         fig.update_traces(
@@ -750,7 +957,8 @@ def create_sensor_trends_chart_golden(
     feature_names: List[str],
     unit_id: str,
     alert_time: datetime,
-    feature_name_map: Optional[Dict[str, str]] = None
+    feature_name_map: Optional[Dict[str, str]] = None,
+    client: Optional[str] = None
 ) -> go.Figure:
     """
     Create multi-panel time series chart using pre-processed golden layer data.
@@ -773,6 +981,7 @@ def create_sensor_trends_chart_golden(
             x=0.5, y=0.5, showarrow=False
         )
     try:
+        is_capstone = str(client or '').strip().upper() == 'CAPSTONE'
         # Filter data to M1 minutes before and M2 minutes after alert
         M1 = 90  # minutes before alert
         M2 = 10   # minutes after alert
@@ -798,77 +1007,146 @@ def create_sensor_trends_chart_golden(
         # Use Spanish names if mapping provided
         subplot_titles = [feature_name_map.get(f, f) if feature_name_map else f for f in feature_names]
         
-        # Increase spacing for better chart separation
+        # Plotly limits vertical_spacing to 1 / (rows - 1). Capstone can
+        # expose many mapped signals, so reduce spacing for tall charts.
+        panel_count = len(feature_names)
+        vertical_spacing = (
+            (0.12 if panel_count <= 1 else min(0.05, 0.9 / (panel_count - 1)))
+            if is_capstone else 0.12
+        )
         fig = make_subplots(
-            rows=len(feature_names),
+            rows=panel_count,
             cols=1,
             shared_xaxes=True,
             subplot_titles=subplot_titles,
-            vertical_spacing=0.12  # Increased from 0.08 for better separation
+            vertical_spacing=vertical_spacing
         )
+        limit_legend_shown = False
         # Plot each feature
         for idx, feature in enumerate(feature_names, 1):
             value_col = f'{feature}_Value'
             upper_col = f'{feature}_Upper_Limit'
             lower_col = f'{feature}_Lower_Limit'
             display_name = feature_name_map.get(feature, feature) if feature_name_map else feature
-            # Plot values colored by state (if available) - SIGNAL DATA (HIGHEST PRIORITY)
-            if 'State' in alert_data.columns and alert_data['State'].notna().any():
-                for state in alert_data['State'].dropna().unique():
-                    state_data = alert_data[alert_data['State'] == state]
-                    fig.add_trace(
-                        go.Scatter(
-                            x=state_data['TimeStart'],
-                            y=state_data[value_col],
-                            mode='markers',  # Added lines for better continuity
-                            name=state,
-                            legendgroup=state,
-                            showlegend=(idx == 1),
-                            marker=dict(
-                                color=STATE_COLORS.get(state, '#95a5a6'),
-                                size=8,  # Increased from 6 for better visibility
-                                line=dict(width=1, color='white')  # White border for prominence
-                            ),
-                            line=dict(
-                                color=STATE_COLORS.get(state, '#95a5a6'),
-                                width=2  # Thicker line for visual dominance
-                            ),
-                            hovertemplate=(
-                                f'<b>{display_name}</b><br>' +
-                                'Hora: %{x}<br>' +
-                                'Valor: %{y:.2f}<br>' +
-                                f'Estado: {state}<br>' +
-                                '<extra></extra>'
-                            )
-                        ),
-                        row=idx,
-                        col=1
+            if is_capstone:
+                # Capstone may expose the same context signal under the
+                # legacy CDA aliases. Prefer the canonical ETL column, but
+                # fall back to the alias when the canonical series is empty.
+                alias = {'engine_speed_rpm': 'EngSpd', 'engine_load_pct': 'EngLoad'}.get(feature)
+                if alias:
+                    canonical_has_values = (
+                        value_col in alert_data.columns
+                        and pd.to_numeric(alert_data[value_col], errors='coerce').notna().any()
                     )
-            else:
-                # Plot without state coloring
+                    if not canonical_has_values and f'{alias}_Value' in alert_data.columns:
+                        value_col = f'{alias}_Value'
+                        upper_col = f'{alias}_Upper_Limit'
+                        lower_col = f'{alias}_Lower_Limit'
+            if is_capstone:
+                if value_col not in alert_data.columns:
+                    logger.warning("Skipping feature without value column: %s", feature)
+                    continue
+                # Keep one continuous trace per variable. State is retained
+                # in hover metadata and represented by explicit swatches.
+                value_columns = ['TimeStart', value_col]
+                if 'State' in alert_data.columns:
+                    value_columns.append('State')
+                value_data = alert_data[value_columns].copy()
+                value_data[value_col] = pd.to_numeric(value_data[value_col], errors='coerce')
+                value_data = value_data.dropna(subset=['TimeStart', value_col]).sort_values('TimeStart')
+                if value_data.empty:
+                    continue
+                if 'State' not in value_data.columns:
+                    value_data['State'] = ''
+                state_labels = value_data['State'].map(
+                    lambda state: _state_label(state) if str(state).strip() else ''
+                )
+                state_colors = value_data['State'].map(
+                    lambda state: _state_color(state) if str(state).strip() else '#2ecc71'
+                )
                 fig.add_trace(
                     go.Scatter(
-                        x=alert_data['TimeStart'],
-                        y=alert_data[value_col],
-                        mode='markers',
+                        x=value_data['TimeStart'],
+                        y=value_data[value_col],
+                        mode='lines+markers',
+                        connectgaps=True,
                         name=display_name,
-                        showlegend=(idx == 1),
+                        showlegend=False,
+                        customdata=state_labels.to_numpy(),
                         marker=dict(
-                            size=8, 
-                            color='#3498db',
+                            size=6,
+                            color=state_colors.to_numpy(),
                             line=dict(width=1, color='white')
                         ),
-                        line=dict(color='#3498db', width=2),
+                        line=dict(color='#2ecc71', width=2),
                         hovertemplate=(
                             f'<b>{display_name}</b><br>' +
                             'Hora: %{x}<br>' +
                             'Valor: %{y:.2f}<br>' +
+                            'Estado: %{customdata}<br>' +
                             '<extra></extra>'
                         )
                     ),
                     row=idx,
                     col=1
                 )
+            else:
+                # Preserve CDA's established state-split marker rendering.
+                if 'State' in alert_data.columns and alert_data['State'].notna().any():
+                    for state in alert_data['State'].dropna().unique():
+                        state_data = alert_data[alert_data['State'] == state]
+                        fig.add_trace(
+                            go.Scatter(
+                                x=state_data['TimeStart'],
+                                y=state_data[value_col],
+                                mode='markers',
+                                name=state,
+                                legendgroup=state,
+                                showlegend=(idx == 1),
+                                marker=dict(
+                                    color=_state_color(state),
+                                    size=8,
+                                    line=dict(width=1, color='white')
+                                ),
+                                line=dict(
+                                    color=_state_color(state),
+                                    width=2
+                                ),
+                                hovertemplate=(
+                                    f'<b>{display_name}</b><br>' +
+                                    'Hora: %{x}<br>' +
+                                    'Valor: %{y:.2f}<br>' +
+                                    f'Estado: {state}<br>' +
+                                    '<extra></extra>'
+                                )
+                            ),
+                            row=idx,
+                            col=1
+                        )
+                else:
+                    fig.add_trace(
+                        go.Scatter(
+                            x=alert_data['TimeStart'],
+                            y=alert_data[value_col],
+                            mode='markers',
+                            name=display_name,
+                            showlegend=(idx == 1),
+                            marker=dict(
+                                size=8,
+                                color='#3498db',
+                                line=dict(width=1, color='white')
+                            ),
+                            line=dict(color='#3498db', width=2),
+                            hovertemplate=(
+                                f'<b>{display_name}</b><br>' +
+                                'Hora: %{x}<br>' +
+                                'Valor: %{y:.2f}<br>' +
+                                '<extra></extra>'
+                            )
+                        ),
+                        row=idx,
+                        col=1
+                    )
             # Plot limits (SECONDARY PRIORITY - Visually lighter)
             # Lower limit - Use lighter color and thinner line
             if lower_col in alert_data.columns and alert_data[lower_col].notna().any():
@@ -879,9 +1157,9 @@ def create_sensor_trends_chart_golden(
                         x=alert_low['TimeStart'],
                         y=alert_low[lower_col],
                         mode='lines',
-                        name='Límite Inferior',
-                        legendgroup='lower_limit',
-                        showlegend=(idx == 1),
+                        name='L\u00edmite',
+                        legendgroup='limits',
+                        showlegend=not limit_legend_shown,
                         line=dict(
                             color='rgba(231, 76, 60, 0.4)',  # Lighter red with transparency
                             width=1.5,  # Thinner than signal
@@ -892,6 +1170,7 @@ def create_sensor_trends_chart_golden(
                     row=idx,
                     col=1
                 )
+                limit_legend_shown = True
             
             # Upper limit - Use different style to distinguish from lower
             if upper_col in alert_data.columns and alert_data[upper_col].notna().any():
@@ -902,9 +1181,9 @@ def create_sensor_trends_chart_golden(
                         x=alert_high['TimeStart'],
                         y=alert_high[upper_col],
                         mode='lines',
-                        name='Límite Superior',
-                        legendgroup='upper_limit',
-                        showlegend=(idx == 1),
+                        name='L\u00edmite',
+                        legendgroup='limits',
+                        showlegend=not limit_legend_shown,
                         line=dict(
                             color='rgba(231, 76, 60, 0.4)',  # Lighter red with transparency
                             width=1.5,  # Thinner than signal
@@ -915,8 +1194,40 @@ def create_sensor_trends_chart_golden(
                     row=idx,
                     col=1
                 )
+                limit_legend_shown = True
             
         
+        if is_capstone:
+            # Add state swatches after the real sensor traces so they cannot
+            # interfere with the first subplot's data rendering.
+            state_values = alert_data.get(
+                'State', pd.Series(index=alert_data.index, dtype='object')
+            ).fillna('').astype(str)
+            seen_states = []
+            for raw_state in state_values.tolist():
+                if raw_state and raw_state not in seen_states:
+                    seen_states.append(raw_state)
+            for raw_state in reversed(seen_states):
+                state_label = _state_label(raw_state)
+                fig.add_trace(
+                    go.Scatter(
+                        x=[None],
+                        y=[None],
+                        mode='markers',
+                        name=state_label,
+                        legendgroup=raw_state,
+                        marker=dict(
+                            size=8,
+                            color=_state_color(raw_state),
+                            line=dict(width=1, color='white')
+                        ),
+                        hoverinfo='skip',
+                        showlegend=True
+                    ),
+                    row=1,
+                    col=1
+                )
+
         # Update layout with proper spacing and horizontal legend at top
         fig.update_layout(
             height=280 + 200 * len(feature_names),  # Increased height per chart for better spacing
@@ -924,16 +1235,19 @@ def create_sensor_trends_chart_golden(
             showlegend=True,  # Show legend for state colors and limits
             legend=dict(
                 orientation='h',  # Horizontal orientation
+                traceorder='reversed' if is_capstone else 'normal',
                 yanchor='bottom',
-                y=1.02,  # Position above the charts
+                y=1.02,  # Same legend position as CDA
                 xanchor='center',
                 x=0.5,
+                entrywidth=90,
+                entrywidthmode='pixels',
                 font=dict(size=11),
                 bgcolor='rgba(255, 255, 255, 0.9)',
                 bordercolor='#e0e0e0',
                 borderwidth=1
             ),
-            margin=dict(l=60, r=40, t=80, b=50),  # Increased top margin for legend
+            margin=dict(l=60, r=40, t=80, b=50),
             hovermode='x unified',
             title=dict(
                 text=f'<b>Análisis de Tendencias - {unit_id}</b>',
@@ -944,6 +1258,11 @@ def create_sensor_trends_chart_golden(
                 font=dict(size=16, color='#2c3e50', family='Arial, sans-serif')
             )
         )
+
+        if is_capstone:
+            # The card heading and subplot titles identify the chart; avoid a
+            # second global title covering the first panel or the legend.
+            fig.layout.title = None
         
         # Add alert time vertical lines as shapes (full height in each subplot)
         for idx in range(1, len(feature_names) + 1):
@@ -1168,6 +1487,33 @@ def create_gps_route_map_golden(
         )
 
 
+def _first_numeric_context_value(alert_point: pd.Series, column_names: List[str]) -> Optional[float]:
+    """Return the first non-null numeric context value from candidate columns."""
+    for column_name in column_names:
+        if column_name not in alert_point.index:
+            continue
+
+        raw_value = alert_point[column_name]
+        if pd.isna(raw_value):
+            continue
+
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            logger.warning(
+                "Ignoring non-numeric context value in %s: %r",
+                column_name,
+                raw_value,
+            )
+            continue
+
+        if pd.notna(value):
+            logger.info("Found context value in column: %s with value: %s", column_name, value)
+            return value
+
+    return None
+
+
 def create_context_kpis_cards_golden(
     alert_data: pd.DataFrame,
     alert_time: pd.Timestamp,
@@ -1239,15 +1585,18 @@ def create_context_kpis_cards_golden(
         # Log available columns for debugging
         logger.info(f"Available columns for KPI: {list(alert_point.index)[:10]}...")  # First 10 columns
         
-        # Check multiple possible column names for EngLoad
-        engload_cols = ['EngLoad_Value', 'EngLoad', 'Engine Load', 'EngineLoad']
-        engload_value = None
-        
-        for col in engload_cols:
-            if col in alert_point.index and pd.notna(alert_point[col]):
-                engload_value = alert_point[col]
-                logger.info(f"Found EngLoad in column: {col} with value: {engload_value}")
-                break
+        # Capstone publishes canonical snake_case signals and may also carry
+        # the legacy aliases. Prefer the canonical contract, while retaining
+        # the aliases used by the CDA golden layer.
+        engload_cols = [
+            'engine_load_pct_Value',
+            'EngLoad_Value',
+            'engine_load_pct',
+            'EngLoad',
+            'Engine Load',
+            'EngineLoad',
+        ]
+        engload_value = _first_numeric_context_value(alert_point, engload_cols)
         
         if engload_value is not None:
             engine_load = f"⚙️ {engload_value:.0f}%"
@@ -1266,8 +1615,16 @@ def create_context_kpis_cards_golden(
         engine_rpm = "N/A"
         rpm_color = "success"
         
-        if 'EngSpd_Value' in alert_point and pd.notna(alert_point['EngSpd_Value']):
-            rpm_value = alert_point['EngSpd_Value']
+        rpm_value = _first_numeric_context_value(
+            alert_point,
+            [
+                'engine_speed_rpm_Value',
+                'EngSpd_Value',
+                'engine_speed_rpm',
+                'EngSpd',
+            ],
+        )
+        if rpm_value is not None:
             engine_rpm = f"🏎️ {rpm_value:.0f} RPM"
         
         # Create 4 KPI cards in vertical layout (1 column x 4 rows)

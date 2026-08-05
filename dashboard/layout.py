@@ -9,22 +9,13 @@ Custom CSS for navigation and layout styling is automatically loaded from:
 
 from dash import dcc, html
 import dash_bootstrap_components as dbc
+import dash
 import os
 from pathlib import Path
-# Commented tabs - not currently active in navigation
-# from dashboard.tabs.tab_limits import create_limits_tab
-# from dashboard.tabs.tab_machines import create_machines_tab
-# from dashboard.tabs.tab_reports import create_reports_tab
-from dashboard.tabs.tab_alerts import create_layout as create_alerts_tab
-# from dashboard.tabs.tab_mantenciones_general import layout_mantenciones_general
-from dashboard.tabs.tab_telemetry import create_layout as create_telemetry_tab
-from dashboard.tabs.tab_overview_general import create_layout as create_overview_general_tab
-from dashboard.tabs.tab_data_freshness import create_layout as create_data_freshness_tab
-from dashboard.tabs.tab_oil import create_layout as create_oil_tab
-# from dashboard.tabs.tab_health_index import create_layout as create_health_index_tab
-# from dashboard.tabs.tab_menace_control import create_layout as create_menace_control_tab
-# from dashboard.tabs.tab_hot_sheet import create_layout as create_hot_sheet_tab
 from config.settings import get_settings
+from config.client_services import is_service_enabled
+from dashboard.auth import is_admin
+from dashboard.services_registry import SERVICE_SECTIONS, SERVICE_LABELS, nav_path as _nav_path
 
 
 # Component icon map for predictive nav sections
@@ -190,7 +181,7 @@ def create_login_page() -> dbc.Container:
             ], width=12, lg=5, xl=4, className='mx-auto')
         ], className="align-items-center min-vh-100")
     ], fluid=True, style={
-        "background": "linear-gradient(135deg, #667eea 0%, #764ba2 100%)",
+        "background": "#00173b",
         "minHeight": "100vh"
     })
 
@@ -216,6 +207,7 @@ def create_navbar(user_data: dict, available_clients: list[str] = None) -> html.
                     # Logo and brand section
                     dbc.Col([
                         html.Div([
+                            # CODDI Logo
                             html.Img(
                                 src='https://raw.githubusercontent.com/coddi-ai/tds_alerts_dashboard/refs/heads/dev/dashboard/assets/logo.svg',
                                 style={
@@ -227,6 +219,21 @@ def create_navbar(user_data: dict, available_clients: list[str] = None) -> html.
                                     "boxShadow": "0 2px 4px rgba(0,0,0,0.1)"
                                 }
                             ),
+                            # Client Logo (dynamically loaded)
+                            html.Img(
+                                id='client-logo-img',
+                                src='',
+                                alt='',  # Empty alt to prevent text showing on error
+                                style={
+                                    "height": "48px",
+                                    "width": "auto",
+                                    "maxWidth": "120px",
+                                    "padding": "4px 12px",
+                                    "marginLeft": "12px",
+                                    "display": "none"  # Hidden by default, shown when logo loads successfully
+                                }
+                            ),
+                            # Platform title
                             html.Div([
                                 html.H5(
                                     "Plataforma de Monitoreo Multi-Técnica",
@@ -342,99 +349,74 @@ def create_placeholder_content(section_name: str) -> html.Div:
     ], className="mt-4")
 
 
-def create_main_dashboard(user_data: dict) -> html.Div:
+def build_navigation_items(selected_client: str, user_data: dict) -> list:
     """
-    Create main dashboard layout with redesigned navigation and unified shell.
-    
-    Args:
-        user_data: User information dictionary
-    
-    Returns:
-        Professional dashboard layout with full-height sidebar and integrated header
+    Build the nav-section/subsection data for the CURRENTLY SELECTED client.
+
+    Visibility is keyed on the active client (not "any client the user has"),
+    so it always matches exactly what dashboard/callbacks/access_control_callbacks.py
+    will actually let the user reach - a disabled service is never shown, and
+    switching clients in the navbar updates this immediately (see
+    dashboard/callbacks/sidebar_callbacks.py, which re-renders on
+    client-selector change).
     """
-    # Get clients user has access to
-    available_clients = user_data.get('clients', [])
-    
-    # Get client for discovering predictive components
-    # Predictive is restricted to specific clients (CDA for now)
-    settings = get_settings()
-    predictive_allowed = [c.upper() for c in settings.predictive_allowed_clients]
-    user_has_predictive_access = any(
-        c.upper() in predictive_allowed for c in available_clients
-    )
+    def _enabled(service_id: str) -> bool:
+        return is_service_enabled(selected_client, service_id)
+
+    user_has_predictive_access = _enabled('predictive')
 
     # Use statically-known component list for navigation (data availability checked at runtime)
     predictive_nav_components = list(PREDICTIVE_COMPONENT_ICONS.keys()) if user_has_predictive_access else []
 
-    # Define navigation structure
-    navigation_items = [
-        {
-            'section': 'overview',
-            'label': 'Resumen',
-            'icon': 'fas fa-tachometer-alt',
-            'subsections': [
-                {'id': 'overview-general', 'label': 'General', 'tab': create_overview_general_tab},
-                {'id': 'overview-data-freshness', 'label': 'Estado de Datos', 'tab': create_data_freshness_tab}
-            ]
-        },
-        {
-            'section': 'monitoring',
-            'label': 'Monitoreo',
-            'icon': 'fas fa-chart-line',
-            'subsections': [
-                # {'id': 'monitoring-hot-sheet', 'label': 'Hot Sheet', 'tab': create_hot_sheet_tab},
-                {'id': 'monitoring-alerts', 'label': 'Alertas', 'tab': create_alerts_tab},
-                # {'id': 'monitoring-menace-control', 'label': 'Control de Amenazas', 'tab': create_menace_control_tab},
-                {'id': 'monitoring-telemetry', 'label': 'Telemetría', 'tab': create_telemetry_tab},
-                # {'id': 'monitoring-health-index', 'label': 'Índice de Salud', 'tab': create_health_index_tab},
-                # {'id': 'monitoring-mantentions', 'label': 'Mantenciones', 'tab': layout_mantenciones_general},
-                {'id': 'monitoring-oil', 'label': 'Aceite', 'tab': create_oil_tab}
-            ]
-        },
-    ]
+    # Build navigation from the central services registry, keeping only the
+    # services enabled for the selected client - a disabled service is
+    # omitted entirely, never shown as an inactive tab. A section with zero
+    # visible services is skipped. Predictive is spliced in after
+    # 'monitoring' (its historical position) since its subsections are
+    # discovered dynamically rather than listed in SERVICE_SECTIONS.
+    navigation_items = []
+    for section_def in SERVICE_SECTIONS:
+        subsections = [
+            {'id': service_id, 'label': SERVICE_LABELS[service_id]}
+            for service_id in section_def['services']
+            if _enabled(service_id)
+        ]
+        if subsections:
+            navigation_items.append({
+                'section': section_def['section'],
+                'label': section_def['label'],
+                'icon': section_def['icon'],
+                'subsections': subsections,
+            })
 
-    # Only add predictive section if user has access to a predictive-allowed client
-    # Show it even if no data exists (disclaimer will be shown in the content area)
-    if user_has_predictive_access:
+        if section_def['section'] == 'monitoring' and user_has_predictive_access:
+            navigation_items.append({
+                'section': 'predictive',
+                'label': 'Predictivo',
+                'icon': 'fas fa-brain',
+                'subsections': [
+                    {'id': f'predictive-{comp}', 'label': comp.title()}
+                    for comp in predictive_nav_components
+                ]
+            })
+
+    # Admin section: controlled by role, independent of client service availability.
+    if is_admin(user_data):
         navigation_items.append({
-            'section': 'predictive',
-            'label': 'Predictivo',
-            'icon': 'fas fa-brain',
-            'subsections': [
-                {'id': f'predictive-{comp}', 'label': comp.title()}
-                for comp in predictive_nav_components
-            ]
-        })
-
-    # Additional sections (always visible)
-    navigation_items.extend([
-        {
-            'section': 'integration',
-            'label': 'Integración',
-            'icon': 'fas fa-plug',
-            'subsections': [
-                {'id': 'integration-sap', 'label': 'SAP Connection', 'tab': lambda: create_placeholder_content('SAP Connection')}
-            ]
-        },
-        {
-            'section': 'reporting',
-            'label': 'Reportes',
-            'icon': 'fas fa-file-alt',
-            'subsections': [
-                {'id': 'reporting-main', 'label': 'Reportabilidad', 'tab': lambda: create_placeholder_content('Reportabilidad')}
-            ]
-        },
-        {
             'section': 'admin',
             'label': 'Administración',
             'icon': 'fas fa-cog',
             'subsections': [
-                {'id': 'admin-main', 'label': 'Administración', 'tab': lambda: create_placeholder_content('Administración')}
+                {'id': 'admin-main', 'label': 'Administración'},
+                {'id': 'admin-user-registry', 'label': 'Registro de usuarios'},
             ]
-        },
-    ])
-    
-    # Build left menu with improved styling
+        })
+
+    return navigation_items
+
+
+def build_menu_items(navigation_items: list) -> list:
+    """Render navigation_items (see build_navigation_items) into sidebar components."""
     menu_items = []
     for section in navigation_items:
         # Section header - improved typography and spacing
@@ -458,17 +440,17 @@ def create_main_dashboard(user_data: dict) -> html.Div:
             style={"borderBottom": "2px solid rgba(255,255,255,0.1)"}
             )
         )
-        
+
         # Subsections - improved interaction states
         for subsection in section['subsections']:
             menu_items.append(
-                dbc.Button(
+                dbc.NavLink(
                     [
                         html.I(className="fas fa-chevron-right me-2 nav-chevron", style={"fontSize": "0.7rem"}),
                         subsection['label']
                     ],
-                    id={'type': 'nav-button', 'index': subsection['id']},
-                    color="link",
+                    href=dash.get_relative_path(_nav_path(subsection['id'])),
+                    active="exact",
                     className="nav-menu-item text-start w-100 mb-1 px-3 py-2",
                     style={
                         "textDecoration": "none",
@@ -480,7 +462,29 @@ def create_main_dashboard(user_data: dict) -> html.Div:
                     }
                 )
             )
-    
+    return menu_items
+
+
+def create_main_dashboard(user_data: dict) -> html.Div:
+    """
+    Create main dashboard layout with redesigned navigation and unified shell.
+
+    Args:
+        user_data: User information dictionary
+
+    Returns:
+        Professional dashboard layout with full-height sidebar and integrated header
+    """
+    # Get clients user has access to
+    available_clients = user_data.get('clients', [])
+
+    # Initial render uses the client-selector's own default (its first
+    # option) - dashboard/callbacks/sidebar_callbacks.py takes over from
+    # here and re-renders #sidebar-nav-menu whenever the selector changes.
+    default_client = available_clients[0] if available_clients else None
+    navigation_items = build_navigation_items(default_client, user_data)
+    menu_items = build_menu_items(navigation_items)
+
     # Full-height sidebar with no gaps
     left_menu = html.Div([
         # Sidebar header
@@ -502,9 +506,12 @@ def create_main_dashboard(user_data: dict) -> html.Div:
             "borderBottom": "2px solid rgba(255,255,255,0.1)"
         }),
         
-        # Menu items container
+        # Menu items container - re-rendered by dashboard/callbacks/sidebar_callbacks.py
+        # whenever client-selector changes, so it always reflects the
+        # currently selected client's enabled services.
         html.Div(
-            menu_items,
+            id='sidebar-nav-menu',
+            children=menu_items,
             className="p-3 sidebar-menu",
             style={"overflowY": "auto", "height": "calc(100vh - 142px)"}
         )
@@ -521,8 +528,8 @@ def create_main_dashboard(user_data: dict) -> html.Div:
     
     # Content area with proper spacing from header and sidebar
     content_area = html.Div([
-        # Dynamic content
-        html.Div(id='section-content')
+        # Routed page content
+        dash.page_container
     ], style={
         "marginLeft": "260px",
         "marginTop": "80px",
@@ -530,14 +537,11 @@ def create_main_dashboard(user_data: dict) -> html.Div:
         "backgroundColor": "#f8f9fa",
         "minHeight": "calc(100vh - 80px)"
     })
-    
+
     return html.Div([
         create_navbar(user_data, available_clients),
         left_menu,
-        content_area,
-        
-        # Store for active section
-        dcc.Store(id='active-section-store', data='overview-general')
+        content_area
     ])
 
 
@@ -551,7 +555,10 @@ def create_app_layout() -> html.Div:
     return html.Div([
         # Store user info (initialized to None to trigger initial callback)
         dcc.Store(id='user-info-store', storage_type='session', data=None),
-        
+
+        # Session-scoped operator name for ERP notice validation (Validación de Avisos)
+        dcc.Store(id='erp-validator-operator-store', storage_type='session', data=None),
+
         # Store navigation state for cross-page navigation
         dcc.Store(id='navigation-state', storage_type='memory', data=None),
         

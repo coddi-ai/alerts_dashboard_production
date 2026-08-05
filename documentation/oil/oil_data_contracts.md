@@ -1,7 +1,7 @@
 # Data Contracts - Oil Analysis Data Product
 
-**Version**: 2.3  
-**Last Updated**: May 13, 2026  
+**Version**: 2.8  
+**Last Updated**: August 4, 2026  
 **Owner**: Oil Analysis Data Product Team
 
 ---
@@ -35,7 +35,25 @@ This document defines the data contracts for the Oil Analysis Data Product, spec
 1. **Historical**: One-time bulk processing with Stewart Limits calculation
 2. **Incremental**: Daily processing using existing Stewart Limits
 
-**Key Enhancements (v2.3)**:
+**Key Enhancements (v2.8)**:
+- **Four-Limit Stewart Output**: New `LIC`/`LIM`/`LSM`/`LSC` structure (P2/P5/P95/P98) for direct consumption by the main service, stored separately in `stewart_limits_four.parquet`. `LIC`/`LIM` are null when the minimum observed value is `<= 0` or `GroupElement` is `Desgaste`/`Aditivo`. Fully additive — `stewart_limits.parquet` and its schema are unchanged.
+
+**Key Enhancements (v2.7)**:
+- **Stewart Limits Inferior**: New lower ("too low") thresholds for essays in groups Aditivo, Conteo, and Fisico Quimico (e.g. additive depletion), stored separately in `stewart_limits_inferior.parquet` for retro-compatibility
+- **`limit_source_inferior` column**: New classified.parquet column tracking which lower-limit lookup was used
+- **`direction` field in breached_essays**: Each breach entry now records whether it came from the upper (`'upper'`) or lower (`'lower'`) limit
+
+**Key Enhancements (v2.6)**:
+- **Data Quality Fixes**: breached_essays serialized as JSON string for reliable Parquet storage
+- **Classification Transparency**: New `desgaste_essays_broken` and `classification_score` columns
+- **daysSincePrevious Nullable**: First samples use null instead of 0
+- **Data Contract Validation**: Pre-export validation catches field inconsistencies
+
+**Key Enhancements (v2.5)**:
+- **Three-Date Model**: sampleDate (withdrawal), labDate (arrival at lab), reportDate (diagnosis)
+- **Normal Report Defaults**: Default recommendation text for Normal samples and machines
+- **Site Field**: Location where the machine operates (per client source)
+- **Anomaly Type Classification**: ML-predicted anomaly reason for non-Normal reports
 - **Oil-Hour Stratification**: Separate limits for fresh (<1000h) vs aged (>=1000h) oil
 - **Evolution Ratio Limits**: Normalized concentration per oil hour for early trend detection
 - **Fallback Behavior**: Graceful degradation when stratified limits unavailable
@@ -64,13 +82,19 @@ data/
 │
 ├── golden/                       # Golden Layer (Analysis-ready outputs)
 │   ├── cda/
-│   │   ├── classified.parquet         # Classified oil analysis reports
-│   │   ├── machine_status.parquet     # Aggregated machine health status
-│   │   └── stewart_limits.parquet     # Statistical thresholds for CDA
+│   │   ├── classified.parquet              # Classified oil analysis reports
+│   │   ├── machine_status.parquet          # Aggregated machine health status
+│   │   ├── stewart_limits.parquet          # Statistical thresholds for CDA (upper)
+│   │   ├── stewart_limits_inferior.parquet # Statistical thresholds for CDA (lower)
+│   │   ├── stewart_limits_ratio.parquet    # Evolution ratio thresholds for CDA
+│   │   └── stewart_limits_four.parquet     # Four-limit output (LIC/LIM/LSM/LSC) for CDA
 │   └── emin/
 │       ├── classified.parquet
 │       ├── machine_status.parquet
-│       └── stewart_limits.parquet
+│       ├── stewart_limits.parquet
+│       ├── stewart_limits_inferior.parquet
+│       ├── stewart_limits_ratio.parquet
+│       └── stewart_limits_four.parquet
 │
 └── essays_elements.xlsx          # Auxiliary: Essay metadata and mappings
 ```
@@ -86,11 +110,17 @@ s3://{BUCKET_NAME}/MultiTechnique Alerts/oil/
     ├── cda/
     │   ├── classified.parquet
     │   ├── machine_status.parquet
-    │   └── stewart_limits.parquet
+    │   ├── stewart_limits.parquet
+    │   ├── stewart_limits_inferior.parquet
+    │   ├── stewart_limits_ratio.parquet
+    │   └── stewart_limits_four.parquet
     └── emin/
         ├── classified.parquet
         ├── machine_status.parquet
-        └── stewart_limits.parquet
+        ├── stewart_limits.parquet
+        ├── stewart_limits_inferior.parquet
+        ├── stewart_limits_ratio.parquet
+        └── stewart_limits_four.parquet
 ```
 
 ---
@@ -168,7 +198,10 @@ S3: s3://{BUCKET}/MultiTechnique Alerts/oil/silver/{CLIENT}.parquet
 |--------|------|-------------|---------|
 | `client` | string | Client identifier | 'CDA', 'EMIN' |
 | `sampleNumber` | string | Unique sample ID | 'CDA-2024-001' |
-| `sampleDate` | date | Sample collection date | '2024-01-15' |
+| `sampleDate` | date | Sample collection/withdrawal date | '2024-01-15' |
+| `labDate` | date | Date sample arrives at laboratory | '2024-01-16' |
+| `reportDate` | date | Date sample is diagnosed/reported | '2024-01-17' |
+| `site` | string | Location where the machine works | 'Área Mina' |
 | `unitId` | string | Equipment unit ID | 'CAT-001' |
 | `machineName` | string | Normalized machine type | 'camion', 'pala' |
 | `machineModel` | string | Machine model | 'CAT 797F' |
@@ -185,7 +218,7 @@ S3: s3://{BUCKET}/MultiTechnique Alerts/oil/silver/{CLIENT}.parquet
 | `oilWeight` | string | Oil weight | '15W-40' |
 | `previousSampleNumber` | string | Previous sample ID | 'CDA-2023-998' |
 | `previousSampleDate` | date | Previous sample date | '2023-12-20' |
-| `daysSincePrevious` | int | Days between samples | 26 |
+| `daysSincePrevious` | Int64 (nullable) | Days between samples (null for first sample) | 26, null |
 | `group_element` | string | Essay group | 'Desgaste', 'Contaminacion' |
 | **Oil-Hour Stratification (v2.3)** | | | |
 | `oilHourRange` | string | Oil age category | 'LT_1000', 'GE_1000', 'UNKNOWN' |
@@ -229,6 +262,37 @@ else:
 - `oilMeter` null or ≤ 0 → `evolution_ratio` = null
 - Do **not** replace null ratios with zero (distorts percentile calculations)
 
+### Site Field (v2.4)
+
+**Source per client**:
+| Client | Source | Default |
+|--------|--------|---------|
+| CDA | Static | "Área Mina" |
+| EMIN | Static | "Área Mina" |
+| ENEX | Bronze column "Site" | "Área Mina" (if null) |
+
+### Lab Date Field (v2.5)
+
+**Source per client** (date sample arrives at laboratory):
+| Client | Bronze Column | Notes |
+|--------|--------------|-------|
+| CDA | N/A | Uses "Fecha de laboratorio" (same as reportDate) |
+| EMIN | "dateOfEntryIntoLaboratory" | |
+| ENEX | "Date Received" | |
+
+**Format**: datetime (YYYY-MM-DD)
+
+### Report Date Field (v2.5)
+
+**Source per client** (date sample is diagnosed/reported):
+| Client | Bronze Column |
+|--------|--------------|
+| CDA | "Fecha de laboratorio" |
+| EMIN | "validResult_evaluationDate" |
+| ENEX | "Date Diagnosed" |
+
+**Format**: datetime (YYYY-MM-DD)
+
 ### Quality Rules
 
 ✅ Valid date formats (YYYY-MM-DD)  
@@ -271,21 +335,30 @@ S3: s3://{BUCKET}/MultiTechnique Alerts/oil/golden/{client}/
 |--------|------|-------------|---------|
 | **Base Columns** | | (All Silver layer columns including oilHourRange and evolution_ratio columns) | |
 | `essay_status_{essay}` | string | Essay classification | 'Normal', 'Marginal', 'Condenatorio', 'Critico' |
-| `breached_essays` | list[dict] | Essays exceeding thresholds with group info | [{'essay': 'Hierro', 'group': 'Desgaste', 'points': 5}] |
+| `essays_broken` | int | Total count of essays exceeding thresholds | 3 |
+| `desgaste_essays_broken` | int | Count of essays with UseForClassification=1 (v2.6) | 2 |
+| `breached_essays` | string (JSON) | JSON-serialized list of breached essay details, each entry includes `direction` (v2.7) | '[{"essay": "Hierro", "group": "Desgaste", "points": 5, "direction": "upper"}]' |
 | `severity_score` | int | Total points from ALL breached essays | 14 |
-| `desgaste_score` | int | Points from ONLY Desgaste essays (NEW) | 8 |
-| `report_status` | string | Overall report status (based on desgaste_score) | 'Normal', 'Alerta', 'Anormal' |
-| `ai_recommendation` | string | AI-generated maintenance advice | 'Se recomienda...' |
+| `classification_score` | int | Points from ONLY UseForClassification=1 essays (v2.6) | 8 |
+| `report_status` | string | Overall report status (based on classification_score) | 'Normal', 'Alerta', 'Anormal' |
+| `anomalyType` | string | Predicted anomaly reason | 'Normal', 'Desgaste de Componentes', 'Contaminación Lubricante' |
+| `ai_recommendation` | string | AI-generated maintenance advice (always present) | 'Se recomienda...' |
 | `ai_analysis` | string | AI analysis of breached essays | 'Niveles elevados de...' |
 | **Oil-Hour Stratification (v2.3)** | | | |
-| `limit_source` | string | Which limit was used for classification | 'oil_hour_stratified', 'fallback_global', 'missing' |
+| `limit_source` | string | Which upper limit was used for classification | 'oil_hour_stratified', 'fallback_global', 'missing' |
 | `ratio_limit_source` | string | Which ratio limit was used | 'oil_hour_stratified', 'fallback_global', 'not_implemented', 'missing' |
+| **Stewart Limits Inferior (v2.7)** | | | |
+| `limit_source_inferior` | string | Which lower limit was used for classification (only meaningful for Aditivo/Conteo/Fisico Quimico essays) | 'oil_hour_stratified', 'fallback_global', 'missing' |
 
 **Limit Source Values (v2.3)**:
 - `oil_hour_stratified`: Exact match for oilHourRange (preferred, v2.3+)
 - `backward_compatible`: Using old non-stratified limits (v2.2 format)
 - `fallback_global`: Averaged across all oil hour ranges (when stratified unavailable)
 - `missing`: No limits available for this machine/component/essay
+
+**Breach Direction Values (v2.7)**:
+- `upper`: Essay value exceeded a `stewart_limits.parquet` threshold ("too high")
+- `lower`: Essay value fell below a `stewart_limits_inferior.parquet` threshold ("too low") — only possible for essays in groups Aditivo, Conteo, or Fisico Quimico, and only recorded when the essay did NOT also breach its upper limit
 
 **Essay Status Values**:
 - `Normal`: Below 90th percentile
@@ -294,11 +367,17 @@ S3: s3://{BUCKET}/MultiTechnique Alerts/oil/golden/{client}/
 - `Critico`: Above 98th percentile (5 points)
 
 **Report Status Logic** ⚠️ **HIERARCHY RULE APPLIED**:
-- Only **Desgaste** (wear) essays affect report status
-- Contamination, additives, and physical-chemical essays are tracked but don't change status
-- `Normal`: desgaste_score < 3
-- `Alerta`: 3 <= desgaste_score < 9
-- `Anormal`: desgaste_score >= 9
+- Only essays with **UseForClassification=1** (primarily Desgaste/wear essays) affect report status
+- Other essays (Contaminante, Aditivo, Fisico Quimico) are tracked in `essays_broken` but don't change status
+- `classification_score` = sum of points from UseForClassification=1 essays only
+- `Normal`: classification_score < 3
+- `Alerta`: 3 <= classification_score < 9
+- `Anormal`: classification_score >= 9
+
+**Reading the classification columns**:
+- `essays_broken=3, desgaste_essays_broken=0` → 3 non-desgaste essays breached, status likely Normal
+- `essays_broken=3, desgaste_essays_broken=2` → 2 desgaste + 1 other essay breached
+- `breached_essays` contains full details: `json.loads(row['breached_essays'])` → list of dicts
 
 **Desgaste Essays** (affect report status):
 - Hierro, Cromo, Aluminio, Cobre, Plomo, Níquel, Plata, Estaño, Titanio, Vanadio, Manganeso
@@ -356,13 +435,14 @@ S3: s3://{BUCKET}/MultiTechnique Alerts/oil/golden/{client}/
   - Alerta: 6 <= machine_score < 10
   - Anormal: machine_score >= 10
 
-**Machine-Level AI Recommendations** 🤖 **NEW FEATURE**:
-- Generated automatically for machines with `overall_status` = 'Alerta' or 'Anormal'
+**Machine-Level AI Recommendations** 🤖:
+- Generated automatically for ALL machines regardless of status
+- For 'Alerta' or 'Anormal' machines: AI-generated holistic equipment assessment
+- For 'Normal' machines: Default message confirming normal operation
 - Provides holistic equipment assessment considering all components
 - Takes into account component criticality weights
 - Recommends prioritized maintenance actions
-- Skipped for machines with 'Normal' status (returns null)
-- Uses OpenAI GPT-4o-mini with specialized mechanical engineering prompt
+- Uses OpenAI GPT-4o-mini with specialized mechanical engineering prompt for non-Normal machines
 
 **Sample Count**: ~200-250 machines per client
 
@@ -411,6 +491,13 @@ GE_1000 (aged oil):
   threshold_alert: 65.0
   threshold_critic: 80.0
 ```
+
+**Oil-Age Constraint** 🆕:
+- **Rule**: `GE_1000 thresholds >= LT_1000 thresholds` for all essay/threshold combinations
+- **Rationale**: Aged oil naturally accumulates more wear particles and contaminants, so thresholds should be higher (more permissive)
+- **Enforcement**: Automatically applied during calculation - if calculated `GE_1000 < LT_1000`, the system adjusts `GE_1000` upward to equal `LT_1000`
+- **Example**: If calculated limits show `LT_1000: 50.0` and `GE_1000: 45.0`, the system adjusts to `GE_1000: 50.0`
+- **Verification**: Use `python verify_oil_age_constraint.py` to check compliance
 
 **Sample Count**: ~900-1500 limit combinations per client (3x previous due to stratification)
 
@@ -471,6 +558,90 @@ sample_count: 6910 (all oil ages combined)
 
 ---
 
+#### 5. Stewart Limits Inferior (`stewart_limits_inferior.parquet`) 🆕 v2.7
+
+**Purpose**: Statistical thresholds for lower ("too low") essay classification — e.g. additive depletion
+
+**Schema**: Identical to `stewart_limits.parquet` (same columns: `client`, `machine`, `component`, `essay`, `oilHourRange`, `threshold_normal`, `threshold_alert`, `threshold_critic`, `sample_count`, `calculation_date`). Stored in a **separate file** for retro-compatibility — consumers that only know about `stewart_limits.parquet` are unaffected.
+
+**Scope**: Only essays whose `GroupElement` (from `essays_elements.xlsx`) is `Aditivo`, `Conteo`, or `Fisico Quimico` get rows in this file. Desgaste and Contaminante essays never appear here — more wear/contamination is never a "too low" problem.
+
+**Calculation**:
+- Uses the **inverse** of the default upper percentiles: 10th percentile → `threshold_normal`, 5th → `threshold_alert`, 2nd → `threshold_critic`
+- Ordering is inverted vs. upper limits: `threshold_normal > threshold_alert > threshold_critic` (lower is worse)
+- Values must never tie — adjacent thresholds are forced apart by 1 unit if they compute equal or inverted
+- **Positivity rule**: if any of the three computed thresholds is `<= 0`, the essay/component/oilHourRange combination gets **no row at all** in this file (not a zero/negative floor)
+- **Stratified by oilHourRange**, same as `stewart_limits.parquet`
+
+**Oil-Age Constraint (inverted from upper limits)**:
+- **Rule**: `GE_1000 thresholds <= LT_1000 thresholds` for all essay/threshold combinations
+- **Rationale**: Additives deplete and physical/chemical properties drift as oil ages, so aged oil is expected to run lower on these essays — the "too low" floor should be more permissive (lower) for aged oil, the opposite of the upper-limit constraint
+- **Enforcement**: Automatically applied during calculation — if calculated `GE_1000 > LT_1000`, the system adjusts `GE_1000` downward to equal `LT_1000`
+
+**Example**:
+```
+Client: CDA
+Machine: camion
+Component: motor diesel
+Essay: Calcio (Aditivo group)
+
+LT_1000 (fresh oil):
+  threshold_normal: 1900.0
+  threshold_alert: 1800.0
+  threshold_critic: 1700.0
+
+GE_1000 (aged oil, additives depleted — lower/more permissive floor):
+  threshold_normal: 1200.0
+  threshold_alert: 1100.0
+  threshold_critic: 1000.0
+```
+
+**Capstone**: Does **not** have Stewart Limits Inferior — no lower-bound source data is provided by the Coddi Lab.
+
+---
+
+#### 6. Four-Limit Stewart Output (`stewart_limits_four.parquet`) 🆕 v2.8
+
+**Purpose**: Four-limit structure (LIC/LIM/LSM/LSC) shaped for direct consumption by the main service, using its native field names — no limit-name transformation required downstream.
+
+**Schema**:
+
+| Column | Type | Description | Example |
+|--------|------|-------------|---------|
+| `client` | string | Client identifier | 'CDA' |
+| `machine` | string | Normalized machine name | 'camion' |
+| `component` | string | Component name (normalized/grouped) | 'motor diesel' |
+| `essay` | string | Essay name | 'Hierro' |
+| `oilHourRange` | string | Oil age category | 'LT_1000', 'GE_1000', 'UNKNOWN' |
+| `GroupElement` | string \| null | Essay classification from `essays_elements.xlsx` | 'Desgaste' |
+| `min_value` | float \| null | Minimum observed (non-null) value for this essay/component/oilHourRange | 12.0 |
+| `LIC` | float \| null | Límite Inferior Condenatorio (2nd percentile) — null when lower limits don't apply | 8.0 |
+| `LIM` | float \| null | Límite Inferior Marginal (5th percentile) — null when lower limits don't apply | 10.0 |
+| `LSM` | float | Límite Superior Marginal (95th percentile) | 45.0 |
+| `LSC` | float | Límite Superior Condenatorio (98th percentile) | 58.0 |
+| `sample_count` | int | Number of samples used for calculation | 450 |
+| `calculation_date` | string | ISO timestamp of calculation | '2026-08-04T10:30:00' |
+
+**This is a fully additive, independent output** — it is generated in the same pipeline run as `stewart_limits.parquet` but does not read from, write to, or replace it (or `stewart_limits_inferior.parquet` / `stewart_limits_ratio.parquet`). It is primarily intended to feed the main service, but as of the dashboard's four-limit migration it is **also** the sole limits source for oil-technique dashboard views in this repo (Monitoring ▸ Aceite ▸ Detalle de Reporte, Alertas ▸ Detalle ▸ Evidencia de Aceite, the Stewart Limits tab, and — on an exact component-name match only — Predictivo ▸ {component} ▸ Evidencia ▸ Evidencia de Aceite) — see [dashboard_documentation.md](dashboard_documentation.md) for the dashboard-side classification rules (`LIC`/`LIM`/`LSM`/`LSC` → Inferior Condenatorio/Inferior Marginal/Normal/Superior Marginal/Superior Condenatorio).
+
+**Lower-limit applicability (`LIC`/`LIM` null when)**:
+- `min_value <= 0`, OR
+- `GroupElement` is `"Desgaste"` (case-insensitive, trimmed), OR
+- `GroupElement` is `"Aditivo"` (case-insensitive, trimmed)
+
+`LSM`/`LSC` are always calculated regardless of the above — only `LIC`/`LIM` are nulled.
+
+**Consistency rules enforced per row**:
+- `LSM < LSC` always; if the calculated values tie, `LSC = LSM + 1`
+- `LIC < LIM` always (when applicable); if the calculated values tie, `LIC = LIM - 1`
+- When all four are applicable: `LIC < LIM < LSM < LSC`
+
+**Calculation**: Same filtered dataset and per-client/machine/component/oilHourRange grouping as `stewart_limits.parquet`, at percentiles 2/5/95/98 instead of 90/95/98. See [docs/STEWART_LIMITS.md](docs/STEWART_LIMITS.md#four-limit-stewart-output-liclimlsmlsc) for full detail.
+
+**Capstone**: Not computed — no source data to compute percentiles from (same as Stewart Limits Inferior).
+
+---
+
 ## ☁️ S3 Storage
 
 ### Upload Behavior
@@ -481,13 +652,14 @@ sample_count: 6910 (all oil ages combined)
 
 ### Upload Scope
 
-✅ **Uploaded**:
+✅ **Uploaded** (see `S3Uploader.upload_golden_layer()` in [src/data/s3_uploader.py](src/data/s3_uploader.py)):
 - Silver layer: `{CLIENT}.parquet`
-- Golden layer: All 3 files per client
+- Golden layer: `classified.parquet`, `machine_status.parquet`, `stewart_limits.parquet`, `stewart_limits_inferior.parquet` (v2.7), `stewart_limits_four.parquet` (NEW v2.8), `cleaned_component_hours.parquet`
 
 ❌ **Not Uploaded**:
 - Bronze layer (raw data stays local)
 - Auxiliary files (`essays_elements.xlsx`)
+- `stewart_limits_ratio.parquet` (not currently wired into the S3 uploader, despite being a Golden layer file — local-only today)
 
 ### S3 Paths
 
@@ -496,7 +668,9 @@ s3://{BUCKET_NAME}/MultiTechnique Alerts/oil/silver/{CLIENT}.parquet
 s3://{BUCKET_NAME}/MultiTechnique Alerts/oil/golden/{client}/classified.parquet
 s3://{BUCKET_NAME}/MultiTechnique Alerts/oil/golden/{client}/machine_status.parquet
 s3://{BUCKET_NAME}/MultiTechnique Alerts/oil/golden/{client}/stewart_limits.parquet
-s3://{BUCKET_NAME}/MultiTechnique Alerts/oil/golden/{client}/stewart_limits_ratio.parquet  (NEW v2.3)
+s3://{BUCKET_NAME}/MultiTechnique Alerts/oil/golden/{client}/stewart_limits_inferior.parquet  (v2.7)
+s3://{BUCKET_NAME}/MultiTechnique Alerts/oil/golden/{client}/stewart_limits_four.parquet  (NEW v2.8)
+s3://{BUCKET_NAME}/MultiTechnique Alerts/oil/golden/{client}/cleaned_component_hours.parquet
 ```
 
 ### Configuration
@@ -528,12 +702,188 @@ AWS_S3_PREFIX=MultiTechnique Alerts/oil/
 - ✅ Every sample has essay_status for all essays
 - ✅ Every sample has report_status
 - ✅ essay_score matches essay classifications
-- ✅ AI recommendations present for Alerta/Anormal reports
+- ✅ AI recommendations present for ALL reports (default for Normal, AI-generated for others)
 - ✅ Machine status aggregations match classified reports
 
 ---
 
 ## 📝 Change Log
+
+### Version 2.7 (July 29, 2026) - STEWART LIMITS INFERIOR (LOWER LIMITS)
+**Major Feature**: Statistical lower ("too low") thresholds for essays where depletion/low readings indicate a problem
+
+#### New Golden Layer File
+- **`stewart_limits_inferior.parquet`**: Same schema as `stewart_limits.parquet` (retro-compatible, separate file)
+  - Only computed for essays whose `GroupElement` (from `essays_elements.xlsx`) is `Aditivo`, `Conteo`, or `Fisico Quimico`
+  - Percentiles are the inverse of the upper-limit defaults: 10th/5th/2nd (vs. 90th/95th/98th), so `threshold_normal > threshold_alert > threshold_critic`
+  - Adjacent thresholds are forced apart by 1 unit if a tie/inversion is computed
+  - **Positivity rule**: if any computed threshold is `<= 0`, the essay/component/oilHourRange gets no row at all (no lower limit)
+  - Stratified by `oilHourRange`, with an **inverted** oil-age constraint vs. upper limits: `GE_1000 <= LT_1000` (aged oil is expected to run lower on additives/particle counts, so the floor is more permissive for aged oil)
+  - Not computed for Capstone (no lower-bound source data)
+  - Not uploaded to S3 for evolution ratio limits (unaffected — this is a separate, new file)
+
+#### Golden Layer Changes (`classified.parquet`)
+- **`limit_source_inferior`**: **NEW COLUMN** (string) — tracks which lower-limit lookup was used (`oil_hour_stratified`, `fallback_global`, `missing`), mirroring `limit_source`
+- **`breached_essays`**: entries now include a **`direction`** field (`'upper'` or `'lower'`) indicating which limit table produced the breach
+  - An essay is only checked against its lower limit if it did NOT already breach its upper limit
+  - `UseForClassification` hierarchy rule applies identically regardless of direction
+
+#### Pipeline Changes
+- `src/processing/stewart_limits.py`: new `calculate_stewart_limits_inferior()` and `calculate_all_limits_inferior()`
+- `src/processing/classification.py`: new `identify_threshold_inferior()`; `classify_essays()` and `classify_all_samples()` accept an optional `limits_inferior` parameter
+- `src/processing/essay_metadata.py`: **NEW MODULE** — `load_essay_groups()` (moved from `classification.py`) and `LOWER_LIMIT_GROUPS` constant, shared by `stewart_limits.py` and `classification.py` to avoid a circular import
+- `src/pipeline/silver_to_gold.py`: computes/loads/saves `stewart_limits_inferior.parquet` alongside the existing upper limits and ratio limits
+- `src/data/s3_uploader.py`: uploads `stewart_limits_inferior.parquet` as part of the Golden layer
+
+#### Migration Notes
+- Fully additive and backward compatible: `stewart_limits.parquet` schema and existing consumers are unaffected
+- `limit_source_inferior` on old (pre-v2.7) classified rows will be absent until the pipeline is re-run
+- Existing `breached_essays` entries from before v2.7 will lack the `direction` field — treat a missing `direction` as `'upper'` (the only kind of breach that existed before this version)
+
+---
+
+### Version 2.8 (August 4, 2026) - FOUR-LIMIT STEWART OUTPUT (LIC/LIM/LSM/LSC)
+**Major Feature**: A four-limit structure using the main service's own field names, so it can be consumed without any limit-name transformation
+
+#### New Golden Layer File
+- **`stewart_limits_four.parquet`**: New schema (`client`, `machine`, `component`, `essay`, `oilHourRange`, `GroupElement`, `min_value`, `LIC`, `LIM`, `LSM`, `LSC`, `sample_count`, `calculation_date`)
+  - `LSM` (95th percentile) and `LSC` (98th percentile) are always calculated
+  - `LIC` (2nd percentile) and `LIM` (5th percentile) are null when the minimum observed value for the essay/component is `<= 0`, or `GroupElement` is `Desgaste` or `Aditivo` (case-insensitive, whitespace-trimmed)
+  - `LSM < LSC` enforced (tie corrected to `LSC = LSM + 1`); `LIC < LIM` enforced when applicable (tie corrected to `LIC = LIM - 1`)
+  - Stratified by `oilHourRange`, same grouping as `stewart_limits.parquet` — no cross-range consistency constraint applied
+  - Not computed for Capstone (no source data)
+  - Fully additive: does not read from, write to, or replace `stewart_limits.parquet`, `stewart_limits_inferior.parquet`, or `stewart_limits_ratio.parquet`
+  - As of the dashboard-side four-limit migration, this repo's own oil-technique dashboard views (previously built on `stewart_limits.parquet`/`stewart_limits_inferior.parquet`) now read from this file instead — see [dashboard_documentation.md](dashboard_documentation.md)
+
+#### Pipeline Changes
+- `src/processing/stewart_limits.py`: new `calculate_stewart_limits_four()` and `calculate_all_limits_four()`
+- `src/processing/essay_metadata.py`: new `FOUR_LIMIT_EXCLUDED_GROUPS` constant and `is_four_limit_lower_excluded()` helper
+- `src/data/exporters.py`: new `export_stewart_limits_four_parquet()`
+- `src/pipeline/silver_to_gold.py`: computes and saves `stewart_limits_four.parquet` alongside the existing limits outputs, in the same `recalculate_limits` run
+- `config/settings.py`: new `get_stewart_limits_four_path()`
+- `src/data/s3_uploader.py`: uploads `stewart_limits_four.parquet` as part of the Golden layer
+
+#### Migration Notes
+- Fully additive and backward compatible: no existing file's schema or content changes; `stewart_limits.parquet` in particular is untouched
+- `stewart_limits_four.parquet` only exists after the pipeline is run with `--recalculate-limits`, same as the other limits files
+
+---
+
+### Version 2.6 (July 17, 2026) - DATA QUALITY & CLASSIFICATION TRANSPARENCY
+**Major Feature**: Reliable serialization, nullable fields, and classification hierarchy transparency
+
+#### Silver Layer Changes
+- **`daysSincePrevious`**: **TYPE CHANGED** from `int` to nullable `Int64`
+  - First samples now have `null` instead of `0`
+  - Distinguishes "first sample" (null) from "same-day sample" (0)
+  - Timezone-naive enforcement prevents NaT from date arithmetic
+  - **Breaking**: Consumers checking `== 0` to detect first samples must now check `pd.isna()` / `IS NULL`
+
+#### Golden Layer Changes
+- **`breached_essays`**: **TYPE CHANGED** from `list[dict]` to `string` (JSON)
+  - Now serialized as a JSON string for reliable Parquet round-trip
+  - Consumers must call `json.loads()` to parse the list
+  - Empty value: `'[]'` (JSON empty array string)
+  - **Breaking**: Direct list access (e.g., `row['breached_essays'][0]`) no longer works
+
+- **`desgaste_essays_broken`**: **NEW COLUMN** (int)
+  - Count of breached essays that have `UseForClassification=1`
+  - Makes the hierarchy rule transparent: `essays_broken=3` with `desgaste_essays_broken=0` means 3 non-desgaste essays breached
+  - Always `<= essays_broken`
+
+- **`classification_score`**: **NEW COLUMN** (int)
+  - Severity points from ONLY essays with `UseForClassification=1`
+  - This is the score used for `report_status` determination
+  - Relationship: `classification_score <= severity_score`
+
+- **`essays_broken`**: **NOW DOCUMENTED** (int)
+  - Total count of ALL essays exceeding thresholds (regardless of UseForClassification flag)
+
+#### Data Contract Validation
+- New pre-export validation step catches inconsistencies before data reaches Golden layer
+- Validates: report_status vs classification_score, daysSincePrevious nullability, field relationships
+- Diagnostic warnings logged for breached_essays serialization issues
+
+#### Migration Notes
+- **Breaking change**: `breached_essays` is now a JSON string. Use `json.loads(row['breached_essays'])` to parse
+- **Breaking change**: `daysSincePrevious` is now nullable. Use `pd.isna()` instead of `== 0` for first sample detection
+- New columns (`desgaste_essays_broken`, `classification_score`) are additive — old consumers can ignore them
+
+---
+
+### Version 2.5 (July 7, 2026) - DATE REFACTORING & NORMAL REPORT DEFAULTS
+**Major Feature**: Three-date model and default recommendations for Normal samples/machines
+
+#### Silver Layer Changes
+- **`labDate`**: **MEANING CHANGED** — Now represents date sample arrives at laboratory (previously was date diagnosed)
+  - CDA: No separate field available, uses reportDate value
+  - EMIN: From bronze "dateOfEntryIntoLaboratory" (unchanged source)
+  - ENEX: From bronze "Date Received" (previously used "Date Diagnosed")
+
+- **`reportDate`**: **NEW FIELD** — Date sample is diagnosed/reported
+  - CDA: From bronze "Fecha de laboratorio"
+  - EMIN: From bronze "validResult_evaluationDate"
+  - ENEX: From bronze "Date Diagnosed"
+
+#### Golden Layer Changes
+- **`ai_recommendation`**: Now always populated for all samples
+  - Normal samples: Default text about permissible wear/contamination levels
+  - Alerta/Anormal samples: AI-generated recommendation (unchanged)
+
+- **`anomalyType`**: Unchanged — 'Normal' for Normal reports, predicted for non-Normal
+
+- **`machine_ai_recommendation`**: Now always populated for all machines
+  - Normal machines: Default text confirming normal operation
+  - Alerta/Anormal machines: AI-generated recommendation (unchanged)
+
+#### Migration Notes
+- **Breaking change**: `labDate` meaning has changed. Consumers that previously used `labDate` as "diagnosis date" should now use `reportDate`
+- `reportDate` is a new required column in Silver layer
+- Normal samples/machines now have non-null `ai_recommendation`/`machine_ai_recommendation`
+
+---
+
+### Version 2.4 (July 1, 2026) - SITE, LAB DATE & ANOMALY TYPE CLASSIFICATION
+**Major Feature**: New metadata fields and ML-based anomaly reason classification
+
+#### Silver Layer Additions
+- **`site`**: Location where the machine operates
+  - CDA/EMIN: Default value "Área Mina"
+  - ENEX: Extracted from bronze "Site" column, fallback to "Área Mina"
+  
+- **`labDate`**: Date the sample was processed at the laboratory
+  - CDA: From bronze "Fecha de laboratorio"
+  - EMIN: From bronze "dateOfEntryIntoLaboratory"
+  - ENEX: From bronze "Date Diagnosed"
+
+#### Golden Layer Additions
+- **`anomalyType`**: Predicted anomaly reason for non-Normal reports
+  - Values: 'Normal' (default for Normal reports), or one of:
+    - 'Desgaste de Componentes'
+    - 'Contaminación Lubricante'
+    - 'Código ISO 4406 - Sílice'
+    - 'Contaminación Sílice - Desgaste'
+    - 'Contaminación Agua'
+    - 'Combustión Deficiente - Desgaste'
+    - 'Dilución Combustible'
+  - Only predicted when `report_status` != 'Normal'
+  - Uses DecisionTreeClassifier trained on external lab data
+  - Model artifact: `models/anomaly_type_tree.joblib`
+  - Training columns: `models/anomaly_type_columns.joblib`
+  - Training script: `scripts/train_anomaly_model.py`
+
+#### New Files
+- `src/ai/anomaly_model.py`: Training and inference for anomaly type model
+- `scripts/train_anomaly_model.py`: CLI script to train/retrain the model
+- `models/anomaly_type_tree.joblib`: Trained model artifact
+- `models/anomaly_type_columns.joblib`: Feature column alignment artifact
+
+#### Migration Notes
+- Backward compatible: Old tools can ignore new columns
+- Model must be trained before running pipeline: `python scripts/train_anomaly_model.py`
+- If model not found, `anomalyType` defaults to 'Normal' for all samples
+
+---
 
 ### Version 2.3 (May 13, 2026) - OIL-HOUR STRATIFIED STEWART LIMITS + EVOLUTION RATIO LIMITS
 **Major Feature**: Oil-Hour Stratification and Evolution Ratio Analysis

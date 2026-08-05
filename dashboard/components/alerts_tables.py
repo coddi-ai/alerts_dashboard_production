@@ -6,47 +6,91 @@ Functions to create Dash DataTables for alerts listings.
 
 import pandas as pd
 import re
+import ast
+import json
 from dash import dash_table, html
 import dash_bootstrap_components as dbc
 from typing import List, Optional, Dict
 
 from src.utils.logger import get_logger
+from dashboard.components.alerts_charts import FEATURE_NAMES_ES
+from dashboard.components.labels import translate_component_label
 
 logger = get_logger(__name__)
 
 
+def _translate_signal_text(value: object) -> str:
+    """Translate canonical Capstone signal keys in client-facing text."""
+    text = "" if value is None else str(value)
+    for key in sorted(FEATURE_NAMES_ES, key=len, reverse=True):
+        label = FEATURE_NAMES_ES[key]
+        text = re.sub(
+            rf"(?<![A-Za-z0-9_]){re.escape(key)}(?![A-Za-z0-9_])",
+            label,
+            text,
+        )
+    return text
+
+
+def _translate_system(value: object) -> str:
+    mapping = {"motor": "Motor", "Motor": "Motor"}
+    key = str(value or "").strip()
+    return mapping.get(key, key or "Sin sistema")
+
+
+def _translate_component(value: object) -> str:
+    return translate_component_label(value)
+
+
 def parse_ia_message_sections(mensaje_ia: str) -> Dict[str, str]:
     """
-    Separa el mensaje de IA en 4 secciones principales usando regex.
+    Separa el mensaje de IA en las secciones útiles para el cliente usando regex.
     
     Args:
         mensaje_ia: Texto completo generado por la IA
         
     Returns:
-        dict con las secciones: {
-            'diagnostico': str,
-            'causa_probable': str,
-            'riesgo': str,
-            'nivel_riesgo': str,  # BAJO/MEDIO/ALTO
-            'acciones': str
-        }
+        dict con diagnóstico, causa probable y acciones.
+        El nivel de riesgo no se calcula ni se expone en Alertas.
     """
     sections = {
         'diagnostico': '',
         'causa_probable': '',
-        'riesgo': '',
-        'nivel_riesgo': 'MEDIO',  # Default
         'acciones': ''
     }
     
     if not mensaje_ia or pd.isna(mensaje_ia):
         return sections
+
+    # Capstone stores the structured IA contract as JSON. Decode it before
+    # applying the legacy CDA section regex so the cards show readable
+    # diagnosis and recommendation instead of raw JSON fragments.
+    try:
+        parsed = json.loads(str(mensaje_ia))
+        if isinstance(parsed, dict) and any(
+            key in parsed for key in ("diagnostic", "recommended_actions", "evidence")
+        ):
+            sections['diagnostico'] = _translate_signal_text(
+                str(parsed.get('diagnostic') or '').strip()
+            )
+            actions = parsed.get('recommended_actions') or parsed.get('actions') or []
+            if isinstance(actions, (list, tuple)):
+                sections['acciones'] = _translate_signal_text(
+                    '\n'.join(str(item).strip() for item in actions if str(item).strip())
+                )
+            else:
+                sections['acciones'] = _translate_signal_text(str(actions).strip())
+            sections['causa_probable'] = (
+                'No se infiere una causa probable con la evidencia disponible.'
+            )
+            return sections
+    except (TypeError, ValueError, json.JSONDecodeError):
+        pass
     
     # Patrones para identificar secciones (case insensitive)
     patterns = {
         'diagnostico': r'(?:DIAGNÓSTICO|DIAGNOSTICO)[:\s](.+?)(?=(?:CAUSA|RIESGO|ACCIONES|$))',
         'causa_probable': r'(?:CAUSA PROBABLE|CAUSA)[:\s](.+?)(?=(?:RIESGO|ACCIONES|$))',
-        'riesgo': r'(?:RIESGO OPERACIONAL|RIESGO)[:\s](.+?)(?=(?:ACCIONES|$))',
         'acciones': r'(?:ACCIONES CLARAS|ACCIONES RECOMENDADAS|ACCIONES)[:\s](.+?)$'
     }
     
@@ -61,28 +105,21 @@ def parse_ia_message_sections(mensaje_ia: str) -> Dict[str, str]:
                     text = text.replace('DIRECTO:', '').strip()
                     # Clean up any extra spaces
                     text = re.sub(r'\s+', ' ', text)
-                sections[key] = text
-        
-        # Extraer nivel de riesgo (BAJO/MEDIO/ALTO)
-        riesgo_match = re.search(r'(BAJO|MEDIO|ALTO)', sections['riesgo'], re.IGNORECASE)
-        if riesgo_match:
-            sections['nivel_riesgo'] = riesgo_match.group(1).upper()
+                sections[key] = _translate_signal_text(text)
         
         # Fallback: dividir por párrafos si no se encontraron secciones
         if not any([sections['diagnostico'], sections['causa_probable'], sections['acciones']]):
             paragraphs = [p.strip() for p in mensaje_ia.split('\n\n') if p.strip()]
             if len(paragraphs) >= 1:
-                sections['diagnostico'] = paragraphs[0]
+                sections['diagnostico'] = _translate_signal_text(paragraphs[0])
             if len(paragraphs) >= 2:
-                sections['causa_probable'] = paragraphs[1]
+                sections['causa_probable'] = _translate_signal_text(paragraphs[1])
             if len(paragraphs) >= 3:
-                sections['riesgo'] = paragraphs[2]
-            if len(paragraphs) >= 4:
-                sections['acciones'] = '\n'.join(paragraphs[3:])
+                sections['acciones'] = _translate_signal_text('\n'.join(paragraphs[2:]))
     
     except Exception as e:
         logger.warning(f"Error parseando mensaje IA: {e}")
-        sections['diagnostico'] = mensaje_ia
+        sections['diagnostico'] = _translate_signal_text(mensaje_ia)
     
     return sections
 
@@ -114,7 +151,14 @@ def create_alerts_datatable(alerts_df: pd.DataFrame) -> dash_table.DataTable:
         table_df = table_df.sort_values('Timestamp', ascending=False)
         
         # Truncate AI message for display
-        table_df['mensaje_ia_short'] = table_df['mensaje_ia'].str[:80] + '...'
+        table_df['mensaje_ia_short'] = table_df['mensaje_ia'].map(
+            lambda value: (parse_ia_message_sections(value).get('diagnostico') or _translate_signal_text(value))[:80] + '...'
+        )
+        table_df['sistema'] = table_df['sistema'].map(_translate_system)
+        table_df['componente'] = table_df['componente'].map(_translate_component)
+        table_df['Trigger_type'] = table_df['Trigger_type'].map(
+            {"Telemetria": "Telemetría", "Tribologia": "Tribología"}
+        ).fillna(table_df['Trigger_type'])
         
         # Convert booleans to symbols
         table_df['Telemetría'] = table_df['has_telemetry'].map({True: '✓', False: '✗'})
@@ -192,6 +236,96 @@ def create_alerts_datatable(alerts_df: pd.DataFrame) -> dash_table.DataTable:
         return html.Div([
             dbc.Alert(f"Error al crear tabla: {str(e)}", color="danger")
         ])
+
+
+def create_alerts_report_table(alerts_df: pd.DataFrame) -> dash_table.DataTable:
+    """Create the executive alerts table with client-facing fields only."""
+    if alerts_df is None or alerts_df.empty:
+        return html.Div([dbc.Alert("No hay alertas para los filtros seleccionados.", color="info")])
+    try:
+        rows = []
+        for _, row in alerts_df.sort_values("Timestamp", ascending=False).iterrows():
+            sections = parse_ia_message_sections(row.get("mensaje_ia", ""))
+            trigger_vars = row.get("Trigger_Var", "Sin señal registrada")
+            # Mixed alerts store Trigger_Var as a serialized list. Preserve
+            # that representation so each telemetry/oil variable is translated.
+            raw_signal_values = trigger_vars
+            if isinstance(raw_signal_values, str):
+                try:
+                    raw_signal_values = ast.literal_eval(raw_signal_values)
+                except (ValueError, SyntaxError):
+                    raw_signal_values = [raw_signal_values]
+            if not isinstance(raw_signal_values, (list, tuple, set)):
+                raw_signal_values = [raw_signal_values]
+            signal_labels = []
+            for signal in raw_signal_values:
+                signal_key = str(signal).strip()
+                if signal_key and signal_key not in signal_labels:
+                    signal_labels.append(FEATURE_NAMES_ES.get(signal_key, signal_key))
+            signal_label = ", ".join(signal_labels) or "Sin señal registrada"
+            source = {"Telemetria": "Telemetría", "Tribologia": "Tribología"}.get(
+                str(row.get("Trigger_type", "")), str(row.get("Trigger_type", "Sin fuente"))
+            )
+            if bool(row.get("has_telemetry")) and bool(row.get("has_tribology")):
+                evidence = "Telemetría + Tribología"
+            elif bool(row.get("has_telemetry")):
+                evidence = "Telemetría"
+            elif bool(row.get("has_tribology")):
+                evidence = "Tribología"
+            else:
+                evidence = "Sin evidencia"
+            rows.append({
+                "ID": row.get("FusionID", "-"),
+                "Fecha": pd.to_datetime(row.get("Timestamp"), errors="coerce").strftime("%d/%m/%Y %H:%M") if pd.notna(row.get("Timestamp")) else "-",
+                "Unidad": row.get("UnitId", "-"),
+                "Sistema": _translate_system(row.get("sistema", "-")),
+                "Componente": _translate_component(row.get("componente", "-")),
+                "Señal / variable": signal_label,
+                "Fuente": source,
+                "Diagnóstico": sections.get("diagnostico", "Sin diagnóstico IA disponible"),
+                "diagnostico_completo": sections.get("diagnostico", "Sin diagnóstico IA disponible"),
+                "causa_completa": sections.get("causa_probable", "Sin causa probable registrada"),
+                "accion_completa": sections.get("acciones", "Sin acción recomendada registrada"),
+                "Evidencia": evidence,
+                "Acción": sections.get("acciones", "Sin acción recomendada registrada"),
+            })
+        table = dash_table.DataTable(
+            id="alerts-datatable",
+            columns=[
+                {"name": name, "id": name}
+                for name in ["ID", "Fecha", "Unidad", "Sistema", "Componente", "Señal / variable", "Fuente", "Diagnóstico", "Evidencia", "Acción"]
+            ],
+            data=rows,
+            active_cell=None,
+            cell_selectable=True,
+            filter_action="native",
+            sort_action="native",
+            sort_mode="multi",
+            page_action="native",
+            page_size=15,
+            tooltip_data=[
+                {"Diagnóstico": {"value": row["Diagnóstico"], "type": "text"}, "Acción": {"value": row["Acción"], "type": "text"}}
+                for row in rows
+            ],
+            tooltip_duration=None,
+            style_table={"overflowX": "auto", "overflowY": "auto", "maxHeight": "560px"},
+            style_cell={"textAlign": "left", "padding": "9px", "fontSize": "12px", "whiteSpace": "normal", "height": "auto", "minWidth": "90px"},
+            style_header={"backgroundColor": "#23384d", "color": "white", "fontWeight": "bold", "textAlign": "center", "whiteSpace": "normal"},
+            style_cell_conditional=[
+                {"if": {"column_id": "ID"}, "fontWeight": "600", "minWidth": "150px"},
+                {"if": {"column_id": "Diagnóstico"}, "minWidth": "260px", "maxWidth": "420px"},
+                {"if": {"column_id": "Acción"}, "display": "none"},
+                {"if": {"column_id": "Señal / variable"}, "minWidth": "150px"},
+            ],
+            style_data_conditional=[
+                {"if": {"filter_query": '{Fuente} = "Mixto"'}, "borderLeft": "4px solid #6f42c1"},
+                {"if": {"state": "active"}, "backgroundColor": "#dbeafe", "color": "#12344d", "border": "1px solid #4f8fc0"},
+            ],
+        )
+        return table
+    except Exception as exc:
+        logger.error(f"Error creando tabla ejecutiva de alertas: {exc}")
+        return dbc.Alert(f"Error al crear tabla: {exc}", color="danger")
 
 
 def create_alert_detail_card(alert_row: pd.Series) -> dbc.Card:

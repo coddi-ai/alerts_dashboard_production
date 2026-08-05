@@ -98,8 +98,8 @@ dataDev/*
 dataDev2/*
 dataDep/*
 
-ui_notes.md
 new_dashboard/*
+migration_dashboard/*
 ai_docs/*
 
 # PDF files (local reference docs)

@@ -430,3 +430,171 @@ def create_bar_chart(data: Dict[str, int], title: str, color: str = '#17a2b8') -
     )
     
     return fig
+
+
+def create_component_heatmap(
+    df: pd.DataFrame,
+    machine_type_filter: Optional[List[str]] = None,
+    site_filter: Optional[List[str]] = None,
+    status_filter: Optional[List[str]] = None
+) -> go.Figure:
+    """
+    Create a unit × component heatmap showing latest sample status.
+
+    Rows = units (sorted by worst status first), Columns = components.
+    Cells colored by report_status with hover showing anomaly type and sample date.
+
+    Args:
+        df: Classified reports DataFrame
+        machine_type_filter: Optional list of machine types to include
+        site_filter: Optional list of sites to include
+        status_filter: Optional list of statuses to include
+
+    Returns:
+        Plotly figure with clickData support for drill-down
+    """
+    if df.empty:
+        fig = go.Figure()
+        fig.add_annotation(text="Sin datos disponibles", x=0.5, y=0.5,
+                           showarrow=False, xref="paper", yref="paper",
+                           font=dict(size=16, color="#6c757d"))
+        fig.update_layout(height=200, xaxis=dict(visible=False), yaxis=dict(visible=False))
+        return fig
+
+    filtered = df.copy()
+
+    # Apply filters
+    if machine_type_filter:
+        filtered = filtered[filtered['machineName'].isin(machine_type_filter)]
+    if site_filter:
+        filtered = filtered[filtered['site'].isin(site_filter)]
+
+    if filtered.empty:
+        fig = go.Figure()
+        fig.add_annotation(text="Sin datos para los filtros seleccionados", x=0.5, y=0.5,
+                           showarrow=False, xref="paper", yref="paper",
+                           font=dict(size=14, color="#6c757d"))
+        fig.update_layout(height=200, xaxis=dict(visible=False), yaxis=dict(visible=False))
+        return fig
+
+    # Get latest sample per unit × component
+    filtered['sampleDate'] = pd.to_datetime(filtered['sampleDate'])
+    latest = filtered.loc[filtered.groupby(['unitId', 'componentNameNormalized'])['sampleDate'].idxmax()]
+
+    # Apply status filter after getting latest
+    if status_filter:
+        # Filter units that have at least one component with matching status
+        units_with_status = latest[latest['report_status'].isin(status_filter)]['unitId'].unique()
+        latest = latest[latest['unitId'].isin(units_with_status)]
+
+    if latest.empty:
+        fig = go.Figure()
+        fig.add_annotation(text="Sin datos para los filtros seleccionados", x=0.5, y=0.5,
+                           showarrow=False, xref="paper", yref="paper",
+                           font=dict(size=14, color="#6c757d"))
+        fig.update_layout(height=200, xaxis=dict(visible=False), yaxis=dict(visible=False))
+        return fig
+
+    # Encode status as numeric for heatmap
+    status_map = {'Normal': 0, 'Alerta': 1, 'Anormal': 2}
+
+    # Pivot: rows=unitId, columns=componentNameNormalized
+    pivot_status = latest.pivot_table(
+        index='unitId',
+        columns='componentNameNormalized',
+        values='report_status',
+        aggfunc='first'
+    )
+
+    # Sort units by worst status (most Anormal first)
+    unit_scores = latest.groupby('unitId')['report_status'].apply(
+        lambda x: (x == 'Anormal').sum() * 100 + (x == 'Alerta').sum() * 10
+    ).sort_values(ascending=False)
+    pivot_status = pivot_status.reindex(unit_scores.index)
+
+    # Sort columns by frequency of abnormal conditions
+    col_scores = latest.groupby('componentNameNormalized')['report_status'].apply(
+        lambda x: (x == 'Anormal').sum() * 100 + (x == 'Alerta').sum() * 10
+    ).sort_values(ascending=False)
+    pivot_status = pivot_status[col_scores.index.intersection(pivot_status.columns)]
+
+    # Create numeric matrix
+    z_values = pivot_status.map(lambda x: status_map.get(x, -1) if pd.notna(x) else -1)
+
+    # Create hover text with anomaly info
+    hover_pivot = latest.pivot_table(
+        index='unitId', columns='componentNameNormalized',
+        values='anomalyType', aggfunc='first'
+    ).reindex(index=pivot_status.index, columns=pivot_status.columns)
+
+    date_pivot = latest.pivot_table(
+        index='unitId', columns='componentNameNormalized',
+        values='sampleDate', aggfunc='first'
+    ).reindex(index=pivot_status.index, columns=pivot_status.columns)
+
+    hover_text = []
+    for unit in pivot_status.index:
+        row_text = []
+        for comp in pivot_status.columns:
+            status = pivot_status.loc[unit, comp] if pd.notna(pivot_status.loc[unit, comp]) else 'Sin dato'
+            anomaly = hover_pivot.loc[unit, comp] if pd.notna(hover_pivot.loc[unit, comp]) else ''
+            date_val = date_pivot.loc[unit, comp]
+            date_str = date_val.strftime('%Y-%m-%d') if pd.notna(date_val) else 'N/A'
+
+            text = f"<b>{unit}</b> — {comp.title()}<br>"
+            text += f"Estado: {status}<br>"
+            text += f"Fecha: {date_str}<br>"
+            if anomaly and anomaly != 'Normal':
+                text += f"Anomalía: {anomaly}"
+            row_text.append(text)
+        hover_text.append(row_text)
+
+    # Custom colorscale: gray(-1), green(0), yellow(1), red(2)
+    colorscale = [
+        [0, '#e9ecef'],       # -1 → no data (gray)
+        [0.33, '#28a745'],    # 0 → Normal (green)
+        [0.66, '#ffc107'],    # 1 → Alerta (yellow)
+        [1.0, '#dc3545'],     # 2 → Anormal (red)
+    ]
+
+    # Normalize z to 0-1 range for colorscale
+    z_norm = (z_values.values + 1) / 3  # maps -1→0, 0→0.33, 1→0.66, 2→1.0
+
+    fig = go.Figure(data=go.Heatmap(
+        z=z_norm,
+        x=[c.title() for c in pivot_status.columns],
+        y=list(pivot_status.index),
+        hovertext=hover_text,
+        hovertemplate='%{hovertext}<extra></extra>',
+        colorscale=colorscale,
+        showscale=False,
+        xgap=2,
+        ygap=2,
+        # Store original data for click handling
+        customdata=np.stack([
+            np.array([[unit for _ in pivot_status.columns] for unit in pivot_status.index]),
+            np.array([[comp for comp in pivot_status.columns] for _ in pivot_status.index])
+        ], axis=-1)
+    ))
+
+    n_units = len(pivot_status.index)
+    n_comps = len(pivot_status.columns)
+
+    fig.update_layout(
+        xaxis=dict(
+            title="Componente",
+            side="top",
+            tickangle=-45,
+            tickfont=dict(size=11)
+        ),
+        yaxis=dict(
+            title="Unidad",
+            autorange="reversed",
+            tickfont=dict(size=11)
+        ),
+        height=max(350, n_units * 28 + 120),
+        margin=dict(l=80, r=20, t=100, b=20),
+        plot_bgcolor='white'
+    )
+
+    return fig

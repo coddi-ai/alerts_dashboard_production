@@ -4,6 +4,22 @@ Componentes de gráficos para la página de evidencia.
 import plotly.graph_objects as go
 import pandas as pd
 
+from dashboard.components.oil_charts import (
+    get_essay_limits_four,
+    consolidate_limit_entries,
+    limit_line_color,
+)
+
+
+def _oil_date_col(df) -> str:
+    """
+    Nombre de la columna de fecha de las muestras de aceite.
+    CDA usa 'sampleDate'; Capstone no la tiene y usa 'Fecha' para todo.
+    """
+    if "sampleDate" in df.columns:
+        return "sampleDate"
+    return "Fecha"
+
 
 def create_fleet_scatter(df_latest, selected_unit, status_colors, p80_30d):
     """
@@ -127,15 +143,15 @@ def create_comparative_bars(unit_row, df_latest, failure_modes):
     fm_keys = list(failure_modes.keys())
     fm_labels = [failure_modes[k] for k in fm_keys]
     
-    # Valores del equipo seleccionado
+    # Valores del equipo seleccionado (use 30d averages for consistency)
     unit_vals = [
-        float(unit_row[k]) if k in unit_row.index and pd.notna(unit_row[k]) else 0.0
+        float(unit_row[f"{k}_30d"]) if f"{k}_30d" in unit_row.index and pd.notna(unit_row[f"{k}_30d"]) else 0.0
         for k in fm_keys
     ]
     
-    # Valores promedio de la flota
+    # Valores promedio de la flota (use 30d averages)
     fleet_vals = [
-        float(df_latest[k].mean()) if k in df_latest.columns else 0.0
+        float(df_latest[f"{k}_30d"].mean()) if f"{k}_30d" in df_latest.columns else 0.0
         for k in fm_keys
     ]
     
@@ -209,15 +225,15 @@ def create_radar_comparison(unit_row, df_latest, failure_modes):
     fm_labels = [failure_modes[k] for k in failure_modes.keys()]
     fm_keys = list(failure_modes.keys())
 
-    # Valores del equipo seleccionado
+    # Valores del equipo seleccionado (use 30d averages for consistency)
     fm_vals = [
-        float(unit_row[k]) if k in unit_row.index and pd.notna(unit_row[k]) else 0.0
+        float(unit_row[f"{k}_30d"]) if f"{k}_30d" in unit_row.index and pd.notna(unit_row[f"{k}_30d"]) else 0.0
         for k in fm_keys
     ]
 
-    # Valores promedio de la flota
+    # Valores promedio de la flota (use 30d averages)
     avg_vals = [
-        float(df_latest[k].mean()) if k in df_latest.columns else 0.0
+        float(df_latest[f"{k}_30d"].mean()) if f"{k}_30d" in df_latest.columns else 0.0
         for k in fm_keys
     ]
 
@@ -280,61 +296,63 @@ def create_radar_comparison(unit_row, df_latest, failure_modes):
     return fig
 
 
-def create_oil_timeseries_90d(df_unit, variables, oil_labels, oil_thresholds=None, oil_range=None):
+def create_oil_timeseries_90d(df_unit, variables, oil_labels, oil_limits_four=None, oil_range=None):
     """
     Crear serie temporal de variables de aceite.
     Ventana: max(últimos 90 días, últimas 3 muestras reales).
     Usa sampleDate como identificador de muestra real.
-    
-    Si hay 1 sola variable y existen umbrales, muestra líneas de límite.
+
+    Si hay 1 sola variable y existen límites, muestra líneas de límite
+    (fuente: stewart_limits_four.parquet, LIC/LIM/LSM/LSC - contrato v2.8).
     """
 
     if not variables:
         return None
-    
-    df_sorted = df_unit.sort_values("sampleDate")
+
+    date_col = _oil_date_col(df_unit)
+    df_sorted = df_unit.sort_values(date_col)
     if df_sorted.empty:
         return None
     
     # Calcular ventana de 90 días
-    fecha_fin = pd.to_datetime(df_sorted["sampleDate"].max())
+    fecha_fin = pd.to_datetime(df_sorted[date_col].max())
     fecha_inicio_90d = fecha_fin - pd.Timedelta(days=90)
     
-    # Identificar últimas 3 muestras REALES (deduplicar por sampleDate)
-    muestras_reales = df_sorted.drop_duplicates(subset=["sampleDate"], keep="last").sort_values("sampleDate")
+    # Identificar últimas 3 muestras REALES (deduplicar por fecha de muestra)
+    muestras_reales = df_sorted.drop_duplicates(subset=[date_col], keep="last").sort_values(date_col)
     
     if len(muestras_reales) >= 3:
         # Tomar las últimas 3 muestras reales
         ultimas_3_muestras = muestras_reales.tail(3)
-        fecha_inicio_3_muestras = pd.to_datetime(ultimas_3_muestras["sampleDate"].min())
+        fecha_inicio_3_muestras = pd.to_datetime(ultimas_3_muestras[date_col].min())
         
         # Ventana final: lo que cubra más hacia atrás
         fecha_inicio = min(fecha_inicio_90d, fecha_inicio_3_muestras)
     else:
         # Si hay menos de 3 muestras, usar todas las disponibles
-        fecha_inicio = pd.to_datetime(muestras_reales["sampleDate"].min()) if not muestras_reales.empty else fecha_inicio_90d
+        fecha_inicio = pd.to_datetime(muestras_reales[date_col].min()) if not muestras_reales.empty else fecha_inicio_90d
     
     # Filtrar datos con la ventana expandida
-    df_filtered = df_sorted[pd.to_datetime(df_sorted["sampleDate"]) >= fecha_inicio]
+    df_filtered = df_sorted[pd.to_datetime(df_sorted[date_col]) >= fecha_inicio]
     
     if df_filtered.empty:
         return None
     
     fig = go.Figure()
-    
-    show_limits = (len(variables) == 1 and oil_thresholds is not None and oil_range is not None)
-    
+
+    show_limits = (len(variables) == 1 and oil_limits_four and oil_range is not None)
+
     for var in variables:
         if var not in df_filtered.columns:
             continue
-        
-        series = df_filtered[["sampleDate", var]].dropna(subset=[var])
+
+        series = df_filtered[[date_col, var]].dropna(subset=[var])
         if series.empty:
             continue
-        
-        x_dates = pd.to_datetime(series["sampleDate"])
+
+        x_dates = pd.to_datetime(series[date_col])
         y_values = series[var].astype(float)
-        
+
         # Main trace: values
         fig.add_trace(go.Scatter(
             x=x_dates,
@@ -345,32 +363,33 @@ def create_oil_timeseries_90d(df_unit, variables, oil_labels, oil_thresholds=Non
             marker=dict(size=6),
             hovertemplate="%{x|%d %b %Y}<br><b>%{y:.2f}</b><extra></extra>",
         ))
-        
-        # Threshold lines (only for single variable mode)
-        if show_limits and oil_thresholds and var in oil_thresholds:
-            thresholds = oil_thresholds[var].get(oil_range)
-            if thresholds:
-                normal, alert, critic = thresholds
+
+        # Threshold lines (only for single variable mode) - four-limit Stewart
+        # output (LIC/LIM/LSM/LSC, v2.8). Equal/near-equal limits are
+        # consolidated into one line with a user-friendly label, null lower
+        # limits are never plotted, and lower-limit lines use the shared
+        # purple color - same helpers as every other oil chart in the app.
+        if show_limits:
+            essay_limits = get_essay_limits_four(oil_limits_four, var, oil_range)
+            if essay_limits:
+                feature_label = oil_labels.get(var, var)
+                tier_entries = [
+                    {'value': essay_limits.get('LIC'), 'tier': 'LIC', 'feature': feature_label},
+                    {'value': essay_limits.get('LIM'), 'tier': 'LIM', 'feature': feature_label},
+                    {'value': essay_limits.get('LSM'), 'tier': 'LSM', 'feature': feature_label},
+                    {'value': essay_limits.get('LSC'), 'tier': 'LSC', 'feature': feature_label},
+                ]
+                if essay_limits.get('LIC') is None or essay_limits.get('LIM') is None:
+                    tier_entries = [e for e in tier_entries if e['tier'] not in ('LIC', 'LIM')]
+
                 x_range = [x_dates.min(), x_dates.max()]
-                
-                fig.add_trace(go.Scatter(
-                    x=x_range, y=[normal, normal],
-                    mode="lines", name=f"Normal ({normal:.0f})",
-                    line=dict(width=1.5, dash="dot", color="#1d9e75"),
-                    hoverinfo="skip",
-                ))
-                fig.add_trace(go.Scatter(
-                    x=x_range, y=[alert, alert],
-                    mode="lines", name=f"Alerta ({alert:.0f})",
-                    line=dict(width=1.5, dash="dot", color="#ef9f27"),
-                    hoverinfo="skip",
-                ))
-                fig.add_trace(go.Scatter(
-                    x=x_range, y=[critic, critic],
-                    mode="lines", name=f"Crítico ({critic:.0f})",
-                    line=dict(width=1.5, dash="dot", color="#e24b4a"),
-                    hoverinfo="skip",
-                ))
+                for line in consolidate_limit_entries(tier_entries):
+                    fig.add_trace(go.Scatter(
+                        x=x_range, y=[line['value'], line['value']],
+                        mode="lines", name=line['label'],
+                        line=dict(width=1.5, dash="dot", color=limit_line_color(line['tiers'])),
+                        hoverinfo="skip",
+                    ))
     
     fig.update_layout(
         paper_bgcolor="rgba(0,0,0,0)",
@@ -413,18 +432,19 @@ def create_oil_timeseries(df_unit, variables, oil_labels):
     if not variables:
         return None
 
+    date_col = _oil_date_col(df_unit)
     fig = go.Figure()
 
     for var in variables:
         if var not in df_unit.columns:
             continue
 
-        series = df_unit[["sampleDate", var]].dropna(subset=[var])
+        series = df_unit[[date_col, var]].dropna(subset=[var])
         if series.empty:
             continue
 
         fig.add_trace(go.Scatter(
-            x=pd.to_datetime(series["sampleDate"]),
+            x=pd.to_datetime(series[date_col]),
             y=series[var].astype(float),
             mode="lines+markers",
             name=oil_labels.get(var, var),

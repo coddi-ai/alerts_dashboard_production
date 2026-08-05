@@ -68,12 +68,16 @@ class Settings(BaseSettings):
     report_threshold_anormal: int = Field(default=5, description="Report threshold for Anormal (>=)")
     
     # Clients
-    clients: List[str] = Field(default=["CDA", "EMIN", "ENEX"], description="List of client names")
+    clients: List[str] = Field(default=["CDA", "EMIN", "ENEX", "CAPSTONE"], description="List of client names")
     
     # Module access control - clients allowed to access specific modules
     predictive_allowed_clients: List[str] = Field(
-        default=["CDA"],
+        default=["CDA", "CAPSTONE"],
         description="Clients with access to the Predictive module"
+    )
+    component_hours_allowed_clients: List[str] = Field(
+        default=["CDA", "ENEX"],
+        description="Clients with access to the Component Hours (Horómetro) module"
     )
     
     @field_validator("logs_dir", mode="before")
@@ -146,6 +150,18 @@ class Settings(BaseSettings):
     def get_stewart_limits_path(self, client: str) -> Path:
         """Get Stewart limits path for oil technique."""
         return self.get_technique_file('oil', 'golden', client, 'stewart_limits.parquet')
+
+    def get_stewart_limits_inferior_path(self, client: str) -> Path:
+        """Get lower-bound Stewart limits path for oil technique (v2.7)."""
+        return self.get_technique_file('oil', 'golden', client, 'stewart_limits_inferior.parquet')
+
+    def get_stewart_limits_four_path(self, client: str) -> Path:
+        """Get four-limit (LIC/LIM/LSM/LSC) Stewart limits path for oil technique (v2.8)."""
+        return self.get_technique_file('oil', 'golden', client, 'stewart_limits_four.parquet')
+
+    def get_component_hours_path(self, client: str) -> Path:
+        """Get cleaned component hours path for oil technique."""
+        return self.get_technique_file('oil', 'golden', client, 'cleaned_component_hours.parquet')
     
     # Telemetry-specific convenience methods
     def get_telemetry_gps_path(self, client: str) -> Path:
@@ -182,6 +198,17 @@ class Settings(BaseSettings):
     def get_consolidated_alerts_path(self, client: str) -> Path:
         """Get consolidated alerts path."""
         return self.get_technique_file('alerts', 'golden', client, 'consolidated_alerts.csv')
+
+    # ERP (Conexión ERP) convenience methods
+    def get_erp_warning_path(self, client: str, state: str) -> Path:
+        """Get Parquet path for one client's warnings in a given lifecycle state.
+
+        Layout is `data/warnings/{client}/{state}.parquet` — client nested
+        under a top-level `warnings` folder (not the technique/layer/client
+        shape used by oil/telemetry/alerts), matching where the ERP pipeline
+        actually writes this data.
+        """
+        return self.data_root / 'warnings' / client.lower() / f'{state}.parquet'
     
     def create_directories(self) -> None:
         """Create necessary directories if they don't exist."""

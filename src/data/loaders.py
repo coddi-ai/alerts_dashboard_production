@@ -9,7 +9,9 @@ Load data from different layers:
 
 import pandas as pd
 import json
+import os
 import warnings
+from functools import lru_cache
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -17,6 +19,18 @@ from src.utils.logger import get_logger
 from src.utils.file_utils import list_excel_files, safe_read_excel, safe_read_parquet
 
 logger = get_logger(__name__)
+
+
+def _data_path(*parts: str) -> Path:
+    """Resolve dashboard data below the mounted/configured data root."""
+    return Path(os.getenv("DASHBOARD_DATA_ROOT", "data")).expanduser().joinpath(*parts)
+
+
+# These files are read by several Dash callbacks during a single interaction
+# (filters, tables, charts and detail cards).  Keep one process-local parsed
+# copy and return defensive copies from the public loaders.  The cache is
+# cleared when the dashboard process restarts, which is also the normal data
+# refresh boundary for the mounted data directory.
 
 
 def load_essays_mapping(file_path: str | Path = "essays_elements.xlsx") -> pd.DataFrame:
@@ -107,6 +121,64 @@ def load_emin_data(file_path: str | Path) -> pd.DataFrame:
     return df
 
 
+def load_component_hours(file_path: str | Path) -> pd.DataFrame:
+    """
+    Load cleaned component hours (horómetro) from Parquet file.
+    
+    The file contains component-level usage hours per sample, with cleaned values
+    that interpolate missing readings.
+    
+    Args:
+        file_path: Path to cleaned_component_hours.parquet
+    
+    Returns:
+        DataFrame with columns: client, unitId, componentName, sampleDate,
+        componentHours, componentHours_cleaned
+    """
+    file_path = Path(file_path)
+    logger.info(f"Loading component hours from {file_path}")
+    
+    if not file_path.exists():
+        logger.warning(f"Component hours file not found: {file_path}")
+        return pd.DataFrame()
+    
+    df = safe_read_parquet(file_path)
+    
+    if df.empty:
+        logger.warning("Component hours dataframe is empty")
+        return pd.DataFrame()
+    
+    # Ensure sampleDate is datetime
+    if 'sampleDate' in df.columns:
+        df['sampleDate'] = pd.to_datetime(df['sampleDate'])
+    
+    logger.info(f"Loaded {len(df)} component hours records ({df['unitId'].nunique()} units, {df['componentName'].nunique()} components)")
+    return df
+
+
+def get_latest_component_hours(file_path: str | Path) -> pd.DataFrame:
+    """
+    Get the most recent component hours for each unit+component combination.
+    
+    Args:
+        file_path: Path to cleaned_component_hours.parquet
+    
+    Returns:
+        DataFrame with the latest horómetro reading per unit+component
+    """
+    df = load_component_hours(file_path)
+    
+    if df.empty:
+        return pd.DataFrame()
+    
+    # Get latest sample per unit+component
+    idx = df.groupby(['unitId', 'componentName'])['sampleDate'].idxmax()
+    latest = df.loc[idx].copy()
+    
+    logger.info(f"Got latest component hours: {len(latest)} records")
+    return latest
+
+
 def load_stewart_limits(file_path: str | Path) -> Dict:
     """
     Load pre-computed Stewart Limits from Parquet file.
@@ -168,6 +240,62 @@ def load_stewart_limits(file_path: str | Path) -> Dict:
         }
     
     logger.info(f"Loaded Stewart Limits for {len(limits)} clients")
+    return limits
+
+
+def load_stewart_limits_four(file_path: str | Path) -> Dict:
+    """
+    Load pre-computed four-limit Stewart Limits (LIC/LIM/LSM/LSC) from Parquet file (v2.8).
+
+    Args:
+        file_path: Path to stewart_limits_four.parquet
+
+    Returns:
+        Dictionary with limits structure:
+        {client: {machine: {component: {essay: {oilHourRange: {LIC, LIM, LSM, LSC, min_value,
+        GroupElement, sample_count, calculation_date}}}}}}
+
+        LIC/LIM are None (not 0) whenever the source column is null - a missing lower limit
+        must never be treated as a lower limit of zero.
+    """
+    file_path = Path(file_path)
+    logger.info(f"Loading four-limit Stewart Limits from {file_path}")
+
+    if not file_path.exists():
+        logger.warning(f"Four-limit Stewart Limits file not found: {file_path}")
+        return {}
+
+    df = safe_read_parquet(file_path)
+
+    if df.empty:
+        logger.warning("Four-limit Stewart Limits dataframe is empty")
+        return {}
+
+    def _nullable_float(value) -> Optional[float]:
+        return None if pd.isna(value) else float(value)
+
+    limits: Dict = {}
+    for _, row in df.iterrows():
+        client = row['client']
+        machine = row['machine']
+        component = row['component']
+        essay = row['essay']
+        oil_hour_range = row.get('oilHourRange', 'ALL')
+
+        limits.setdefault(client, {}).setdefault(machine, {}).setdefault(component, {}).setdefault(essay, {})
+
+        limits[client][machine][component][essay][oil_hour_range] = {
+            'LIC': _nullable_float(row.get('LIC')),
+            'LIM': _nullable_float(row.get('LIM')),
+            'LSM': _nullable_float(row.get('LSM')),
+            'LSC': _nullable_float(row.get('LSC')),
+            'min_value': _nullable_float(row.get('min_value')),
+            'GroupElement': row.get('GroupElement'),
+            'sample_count': row.get('sample_count', 0),
+            'calculation_date': row.get('calculation_date'),
+        }
+
+    logger.info(f"Loaded four-limit Stewart Limits for {len(limits)} clients")
     return limits
 
 
@@ -326,25 +454,18 @@ def load_silver_data(file_path: str | Path) -> pd.DataFrame:
 # ALERTS DASHBOARD LOADERS (CDA ONLY)
 # ========================================
 
-def load_alerts_data(client: str) -> pd.DataFrame:
+@lru_cache(maxsize=8)
+def _load_alerts_data_cached(client: str) -> pd.DataFrame:
     """
     Load consolidated alerts data for a specific client.
     
     Args:
-        client: Client identifier (e.g., 'cda')
+        client: Client identifier (e.g., 'cda', 'emin')
     
     Returns:
         DataFrame with alerts data including derived columns (has_telemetry, has_tribology, Month)
-    
-    Note:
-        This feature is currently only available for CDA client.
     """
-    # CDA-only check
-    if client.lower() != 'cda':
-        logger.warning(f"Alerts dashboard is only available for CDA client. Requested: {client}")
-        return pd.DataFrame()
-    
-    file_path = Path(f"data/alerts/golden/{client.lower()}/consolidated_alerts.csv")
+    file_path = _data_path("alerts", "golden", client.lower(), "consolidated_alerts.csv")
     logger.info(f"Loading alerts data from {file_path}")
     
     if not file_path.exists():
@@ -354,13 +475,22 @@ def load_alerts_data(client: str) -> pd.DataFrame:
     try:
         df = pd.read_csv(file_path)
         
-        # Parse timestamp
-        df['Timestamp'] = pd.to_datetime(df['Timestamp'])
+        # Normalize event timestamps to timezone-naive UTC. Capstone emits
+        # ISO timestamps with offsets while the Dash date picker emits naive
+        # calendar dates; one representation avoids aware/naive comparisons.
+        df['Timestamp'] = pd.to_datetime(df['Timestamp'], utc=True).dt.tz_convert(None)
         
         # Fill sistema, subsistema and componente missing values
         df['sistema'] = df['sistema'].fillna('Desconocido')
         df['subsistema'] = df['subsistema'].fillna('Desconocido')
         df['componente'] = df['componente'].fillna('Desconocido')
+        if 'TribologyID' in df.columns:
+            df['TribologyID'] = (
+                df['TribologyID']
+                .fillna('')
+                .astype(str)
+                .str.replace(r'\.0$', '', regex=True)
+            )
         
         # Derive additional columns
         df['has_telemetry'] = df['Trigger_type'].isin(['Telemetria', 'Mixto'])
@@ -375,6 +505,11 @@ def load_alerts_data(client: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def load_alerts_data(client: str) -> pd.DataFrame:
+    """Return alerts data without re-reading the CSV for every callback."""
+    return _load_alerts_data_cached((client or '').lower()).copy(deep=True)
+
+
 def load_telemetry_values(client: str) -> pd.DataFrame:
     """
     Load telemetry values in wide format (one column per sensor).
@@ -385,11 +520,7 @@ def load_telemetry_values(client: str) -> pd.DataFrame:
     Returns:
         DataFrame with telemetry values (Fecha, Unit, sensor columns)
     """
-    if client.lower() != 'cda':
-        logger.warning(f"Telemetry data is only available for CDA client. Requested: {client}")
-        return pd.DataFrame()
-    
-    file_path = Path(f"data/telemetry/silver/{client.lower()}/telemetry_values_wide.parquet")
+    file_path = _data_path("telemetry", "silver", client.lower(), "telemetry_values_wide.parquet")
     logger.info(f"Loading telemetry values from {file_path}")
     
     if not file_path.exists():
@@ -417,11 +548,7 @@ def load_telemetry_states(client: str) -> pd.DataFrame:
     Returns:
         DataFrame with telemetry states (Fecha, Unit, Estado, EstadoCarga)
     """
-    if client.lower() != 'cda':
-        logger.warning(f"Telemetry states is only available for CDA client. Requested: {client}")
-        return pd.DataFrame()
-    
-    file_path = Path(f"data/telemetry/silver/{client.lower()}/telemetry_states.parquet")
+    file_path = _data_path("telemetry", "silver", client.lower(), "telemetry_states.parquet")
     logger.info(f"Loading telemetry states from {file_path}")
     
     if not file_path.exists():
@@ -449,11 +576,7 @@ def load_telemetry_limits(client: str) -> pd.DataFrame:
     Returns:
         DataFrame with limits (Unit, Feature, Estado, EstadoCarga, Limit_Lower, Limit_Upper)
     """
-    if client.lower() != 'cda':
-        logger.warning(f"Telemetry limits is only available for CDA client. Requested: {client}")
-        return pd.DataFrame()
-    
-    file_path = Path(f"data/telemetry/silver/{client.upper()}/limits_config.parquet")
+    file_path = _data_path("telemetry", "silver", client.upper(), "limits_config.parquet")
     logger.info(f"Loading telemetry limits from {file_path}")
     
     if not file_path.exists():
@@ -480,11 +603,7 @@ def load_telemetry_alerts_metadata(client: str) -> pd.DataFrame:
     Returns:
         DataFrame with alerts metadata (AlertID, Trigger, etc.)
     """
-    if client.lower() != 'cda':
-        logger.warning(f"Telemetry alerts metadata is only available for CDA client. Requested: {client}")
-        return pd.DataFrame()
-    
-    file_path = Path(f"data/telemetry/golden/{client.lower()}/alerts_data.csv")
+    file_path = _data_path("telemetry", "golden", client.lower(), "alerts_data.csv")
     logger.info(f"Loading telemetry alerts metadata from {file_path}")
     
     if not file_path.exists():
@@ -512,11 +631,7 @@ def load_component_mapping(client: str) -> pd.DataFrame:
     Returns:
         DataFrame with Component, PrimaryFeature, System, SubSystem, Meaning, RelatedFeatures
     """
-    if client.lower() != 'cda':
-        logger.warning(f"Component mapping is only available for CDA client. Requested: {client}")
-        return pd.DataFrame()
-    
-    file_path = Path(f"data/telemetry/golden/{client.lower()}/component_mapping.parquet")
+    file_path = _data_path("telemetry", "golden", client.lower(), "component_mapping.parquet")
     logger.info(f"Loading component mapping from {file_path}")
     
     if not file_path.exists():
@@ -543,11 +658,7 @@ def load_feature_names(client: str) -> Dict[str, str]:
     Returns:
         Dictionary mapping feature codes to Spanish names
     """
-    if client.lower() != 'cda':
-        logger.warning(f"Feature names is only available for CDA client. Requested: {client}")
-        return {}
-    
-    file_path = Path("data/telemetry/features_mapping_name.json")
+    file_path = _data_path("telemetry", "features_mapping_name.json")
     logger.info(f"Loading feature names from {file_path}")
     
     if not file_path.exists():
@@ -566,7 +677,8 @@ def load_feature_names(client: str) -> Dict[str, str]:
         return {}
 
 
-def load_telemetry_alerts_detail_golden(client: str) -> pd.DataFrame:
+@lru_cache(maxsize=8)
+def _load_telemetry_alerts_detail_golden_cached(client: str) -> pd.DataFrame:
     """
     Load pre-processed telemetry alert details from golden layer.
     This file contains all signals, limits, and GPS data for alerts in wide format.
@@ -582,11 +694,7 @@ def load_telemetry_alerts_detail_golden(client: str) -> pd.DataFrame:
         - {Feature}_Value: Sensor values
         - {Feature}_{Kind}_Limit: Limit values (Upper/Lower)
     """
-    if client.lower() != 'cda':
-        logger.warning(f"Telemetry alerts detail is only available for CDA client. Requested: {client}")
-        return pd.DataFrame()
-    
-    file_path = Path(f"data/telemetry/golden/{client.lower()}/alerts_detail_wide_with_gps.csv")
+    file_path = _data_path("telemetry", "golden", client.lower(), "alerts_detail_wide_with_gps.csv")
     logger.info(f"Loading telemetry alerts detail from golden layer: {file_path}")
     
     if not file_path.exists():
@@ -595,7 +703,7 @@ def load_telemetry_alerts_detail_golden(client: str) -> pd.DataFrame:
     
     try:
         df = pd.read_csv(file_path)
-        df['TimeStart'] = pd.to_datetime(df['TimeStart'])
+        df['TimeStart'] = pd.to_datetime(df['TimeStart'], utc=True).dt.tz_convert(None)
         logger.info(f"Loaded {len(df)} telemetry alert detail records from golden layer")
         return df
     
@@ -604,7 +712,13 @@ def load_telemetry_alerts_detail_golden(client: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def load_oil_classified(client: str) -> pd.DataFrame:
+def load_telemetry_alerts_detail_golden(client: str) -> pd.DataFrame:
+    """Return cached golden alert evidence as a defensive copy."""
+    return _load_telemetry_alerts_detail_golden_cached((client or '').lower()).copy(deep=True)
+
+
+@lru_cache(maxsize=8)
+def _load_oil_classified_cached(client: str) -> pd.DataFrame:
     """
     Load classified oil reports for alerts dashboard.
     
@@ -614,11 +728,7 @@ def load_oil_classified(client: str) -> pd.DataFrame:
     Returns:
         DataFrame with classified oil samples (sampleNumber, essay columns, report_status, etc.)
     """
-    if client.lower() != 'cda':
-        logger.warning(f"Oil classified data is only available for CDA client. Requested: {client}")
-        return pd.DataFrame()
-    
-    file_path = Path(f"data/oil/golden/{client.lower()}/classified.parquet")
+    file_path = _data_path("oil", "golden", client.lower(), "classified.parquet")
     logger.info(f"Loading oil classified data from {file_path}")
     
     if not file_path.exists():
@@ -635,10 +745,117 @@ def load_oil_classified(client: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def load_oil_classified(client: str) -> pd.DataFrame:
+    """Return cached classified oil data as a defensive copy."""
+    return _load_oil_classified_cached((client or '').lower()).copy(deep=True)
+
+
 
 # ========================================
 # TELEMETRY HEALTH DASHBOARD LOADERS
 # ========================================
+
+def _filter_latest_week(df: pd.DataFrame) -> pd.DataFrame:
+    """Filter DataFrame to only the latest year/week partition."""
+    if df.empty:
+        return df
+    if 'year' in df.columns and 'week' in df.columns:
+        # Convert categorical to numeric if needed (from Hive partitioning)
+        year_col = df['year'].astype(int)
+        week_col = df['week'].astype(int)
+        latest_year = year_col.max()
+        latest_week = week_col[year_col == latest_year].max()
+        df = df[(year_col == latest_year) & (week_col == latest_week)]
+    return df
+
+
+def _latest_telemetry_partition(base: Path) -> Path:
+    """Select one materialized year/week partition before reading parquet.
+
+    The S3 export can contain an older flat parquet tree alongside the newer
+    Spark-style ``year=YYYY/week=WW`` output.  Reading both trees at once can
+    fail when schemas evolved (for example, a list column becoming a string),
+    so the dashboard must select the latest partition first.
+    """
+    if not base.is_dir():
+        return base
+    partitions = []
+    for year_dir in base.glob("year=*"):
+        if not year_dir.is_dir():
+            continue
+        try:
+            year = int(year_dir.name.split("=", 1)[1])
+        except (IndexError, ValueError):
+            continue
+        for week_dir in year_dir.glob("week=*"):
+            if not week_dir.is_dir():
+                continue
+            try:
+                week = int(week_dir.name.split("=", 1)[1])
+            except (IndexError, ValueError):
+                continue
+            partitions.append((year, week, week_dir))
+    if not partitions:
+        return base
+    return max(partitions, key=lambda item: (item[0], item[1]))[2]
+
+
+def _keep_latest_execution(df: pd.DataFrame, keys: list[str]) -> pd.DataFrame:
+    """Keep one row per entity when a partition contains repeated runs."""
+    if df.empty or not keys:
+        return df
+    timestamp_col = next(
+        (column for column in ("execution_timestamp", "evaluation_timestamp") if column in df.columns),
+        None,
+    )
+    available_keys = [key for key in keys if key in df.columns]
+    if not timestamp_col or not available_keys:
+        return df
+    result = df.copy()
+    result["__telemetry_execution_ts"] = pd.to_datetime(result[timestamp_col], errors="coerce")
+    if result["__telemetry_execution_ts"].notna().any():
+        result = result.sort_values("__telemetry_execution_ts")
+        result = result.drop_duplicates(subset=available_keys, keep="last")
+    return result.drop(columns=["__telemetry_execution_ts"], errors="ignore")
+
+
+def _load_latest_telemetry_output(
+    paths: list[Path],
+    label: str,
+    dedupe_keys: list[str] | None = None,
+    columns: list[str] | None = None,
+) -> pd.DataFrame:
+    """Read the newest partition from the first available output location."""
+    base = next((path for path in paths if path.exists()), None)
+    if base is None:
+        logger.warning("%s path not found: %s", label, paths[0])
+        return pd.DataFrame()
+    target = _latest_telemetry_partition(base)
+    try:
+        # Event output can contain millions of rows.  Read only the fields
+        # consumed by the report and chart layer when a projection is given.
+        read_columns = columns
+        if columns:
+            try:
+                import pyarrow.parquet as pq
+                schema_path = target
+                if schema_path.is_dir():
+                    schema_path = next(schema_path.rglob("*.parquet"), schema_path)
+                available = set(pq.ParquetFile(schema_path).schema.names)
+                read_columns = [column for column in columns if column in available]
+            except Exception:
+                # Let pandas perform the read if schema inspection is not
+                # available (legacy parquet engines may not expose it).
+                read_columns = columns
+        df = safe_read_parquet(target, columns=read_columns) if read_columns else safe_read_parquet(target)
+        df = _filter_latest_week(df)
+        df = _keep_latest_execution(df, dedupe_keys or [])
+        logger.info("Loaded %s %s records from %s", len(df), label, target)
+        return df
+    except Exception as e:
+        logger.error("Error loading %s: %s", label, e)
+        return pd.DataFrame()
+
 
 def load_telemetry_unit_health(client: str) -> pd.DataFrame:
     """
@@ -650,10 +867,6 @@ def load_telemetry_unit_health(client: str) -> pd.DataFrame:
     Returns:
         DataFrame with unit-level health (overall_status, priority_score, executive_summary, etc.)
     """
-    if client.lower() != 'cda':
-        logger.warning(f"Telemetry unit health only available for CDA client. Requested: {client}")
-        return pd.DataFrame()
-
     base = Path(f"data/telemetry/golden/{client.lower()}/unit_health")
     logger.info(f"Loading telemetry unit health from {base}")
 
@@ -662,7 +875,9 @@ def load_telemetry_unit_health(client: str) -> pd.DataFrame:
         return pd.DataFrame()
 
     try:
-        df = safe_read_parquet(base)
+        df = safe_read_parquet(_latest_telemetry_partition(base))
+        df = _filter_latest_week(df)
+        df = _keep_latest_execution(df, ["unit"])
         logger.info(f"Loaded {len(df)} unit health records")
         return df
     except Exception as e:
@@ -680,10 +895,6 @@ def load_telemetry_system_health(client: str) -> pd.DataFrame:
     Returns:
         DataFrame with system-level health (system_score, system_status, explanation, etc.)
     """
-    if client.lower() != 'cda':
-        logger.warning(f"Telemetry system health only available for CDA client. Requested: {client}")
-        return pd.DataFrame()
-
     base = Path(f"data/telemetry/golden/{client.lower()}/system_health")
     logger.info(f"Loading telemetry system health from {base}")
 
@@ -692,7 +903,9 @@ def load_telemetry_system_health(client: str) -> pd.DataFrame:
         return pd.DataFrame()
 
     try:
-        df = safe_read_parquet(base)
+        df = safe_read_parquet(_latest_telemetry_partition(base))
+        df = _filter_latest_week(df)
+        df = _keep_latest_execution(df, ["unit", "system"])
         logger.info(f"Loaded {len(df)} system health records")
         return df
     except Exception as e:
@@ -710,21 +923,12 @@ def load_telemetry_deviation_results(client: str) -> pd.DataFrame:
     Returns:
         DataFrame with per-signal deviation risk scores and abnormal percentages
     """
-    if client.lower() != 'cda':
-        return pd.DataFrame()
-
-    base = Path(f"data/telemetry/golden/{client.lower()}/technique_results/deviation")
-    if not base.exists():
-        logger.warning(f"Deviation results path not found: {base}")
-        return pd.DataFrame()
-
-    try:
-        df = safe_read_parquet(base)
-        logger.info(f"Loaded {len(df)} deviation results")
-        return df
-    except Exception as e:
-        logger.error(f"Error loading deviation results: {e}")
-        return pd.DataFrame()
+    root = Path(f"data/telemetry/golden/{client.lower()}")
+    return _load_latest_telemetry_output(
+        [root / "deviation_summary", root / "technique_results" / "deviation"],
+        "deviation results",
+        ["unit", "system", "signal"],
+    )
 
 
 def load_telemetry_events(client: str) -> pd.DataFrame:
@@ -737,21 +941,16 @@ def load_telemetry_events(client: str) -> pd.DataFrame:
     Returns:
         DataFrame with abnormal episodes (duration, severity, classification)
     """
-    if client.lower() != 'cda':
-        return pd.DataFrame()
-
-    base = Path(f"data/telemetry/golden/{client.lower()}/technique_results/events")
-    if not base.exists():
-        logger.warning(f"Events path not found: {base}")
-        return pd.DataFrame()
-
-    try:
-        df = safe_read_parquet(base)
-        logger.info(f"Loaded {len(df)} event records")
-        return df
-    except Exception as e:
-        logger.error(f"Error loading events: {e}")
-        return pd.DataFrame()
+    root = Path(f"data/telemetry/golden/{client.lower()}")
+    return _load_latest_telemetry_output(
+        [root / "event_results", root / "technique_results" / "events"],
+        "event records",
+        columns=[
+            "unit", "feature", "signal", "event_id", "event_group",
+            "start_time", "end_time", "duration_minutes",
+            "event_type_binary", "event_type_weighted", "execution_timestamp",
+        ],
+    )
 
 
 def load_telemetry_trends(client: str) -> pd.DataFrame:
@@ -764,21 +963,12 @@ def load_telemetry_trends(client: str) -> pd.DataFrame:
     Returns:
         DataFrame with trend significance, slopes, and interpretations
     """
-    if client.lower() != 'cda':
-        return pd.DataFrame()
-
-    base = Path(f"data/telemetry/golden/{client.lower()}/technique_results/trend")
-    if not base.exists():
-        logger.warning(f"Trend results path not found: {base}")
-        return pd.DataFrame()
-
-    try:
-        df = safe_read_parquet(base)
-        logger.info(f"Loaded {len(df)} trend results")
-        return df
-    except Exception as e:
-        logger.error(f"Error loading trend results: {e}")
-        return pd.DataFrame()
+    root = Path(f"data/telemetry/golden/{client.lower()}")
+    return _load_latest_telemetry_output(
+        [root / "trend_results", root / "technique_results" / "trend"],
+        "trend results",
+        ["unit", "system", "signal", "window_weeks"],
+    )
 
 
 def load_telemetry_baselines(client: str) -> pd.DataFrame:
@@ -791,9 +981,6 @@ def load_telemetry_baselines(client: str) -> pd.DataFrame:
     Returns:
         DataFrame with percentile thresholds per model_specification/signal/state
     """
-    if client.lower() != 'cda':
-        return pd.DataFrame()
-
     baselines_dir = Path(f"data/telemetry/silver/{client.lower()}/baselines")
     if not baselines_dir.exists():
         logger.warning(f"Baselines directory not found: {baselines_dir}")
@@ -813,6 +1000,29 @@ def load_telemetry_baselines(client: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def load_telemetry_manifest(client: str) -> dict:
+    """
+    Load pipeline manifest (latest.json) indicating the most recent evaluation.
+
+    Returns dict with keys: evaluation_week, evaluation_year, execution_timestamp,
+    silver_weeks_available, baseline_version. Returns empty dict if not found.
+    """
+    manifest_path = Path(f"data/telemetry/golden/{client.lower()}/latest.json")
+    if not manifest_path.exists():
+        logger.warning(f"Telemetry manifest not found: {manifest_path}")
+        return {}
+
+    try:
+        import json
+        with open(manifest_path, 'r', encoding='utf-8') as f:
+            manifest = json.load(f)
+        logger.info(f"Loaded manifest: week {manifest.get('evaluation_week')}/{manifest.get('evaluation_year')}")
+        return manifest
+    except Exception as e:
+        logger.error(f"Error loading telemetry manifest: {e}")
+        return {}
+
+
 def load_telemetry_limits(client: str) -> pd.DataFrame:
     """
     Load computed limits from silver layer, falling back to baselines.
@@ -823,9 +1033,6 @@ def load_telemetry_limits(client: str) -> pd.DataFrame:
     Returns:
         DataFrame with percentile thresholds (P2, P5, P95, P98 at minimum)
     """
-    if client.lower() != 'cda':
-        return pd.DataFrame()
-
     # Try limits directory first (new schema)
     limits_dir = Path(f"data/telemetry/silver/{client.lower()}/limits")
     if limits_dir.exists():
@@ -842,7 +1049,12 @@ def load_telemetry_limits(client: str) -> pd.DataFrame:
     return load_telemetry_baselines(client)
 
 
-def load_silver_telemetry_week(client: str, week: int, year: int) -> pd.DataFrame:
+def load_silver_telemetry_week(
+    client: str,
+    week: int,
+    year: int,
+    columns: Optional[List[str]] = None,
+) -> pd.DataFrame:
     """
     Load silver layer telemetry data for a specific week.
     
@@ -854,16 +1066,25 @@ def load_silver_telemetry_week(client: str, week: int, year: int) -> pd.DataFram
     Returns:
         DataFrame with raw sensor data (wide format with states)
     """
-    if client.lower() != 'cda':
-        return pd.DataFrame()
-
     file_path = Path(f"data/telemetry/silver/{client.lower()}/Telemetry_Wide_With_States/Week{week:02d}Year{year}.parquet")
 
     if not file_path.exists():
         return pd.DataFrame()
 
     try:
-        df = safe_read_parquet(file_path)
+        read_columns = columns
+        if columns:
+            # Avoid loading the complete wide table for a single signal.  The
+            # schema check also handles weeks where a legacy signal is absent.
+            try:
+                import pyarrow.parquet as pq
+                available = set(pq.ParquetFile(file_path).schema.names)
+                read_columns = [column for column in columns if column in available]
+                if not {"Unit", "Fecha"}.issubset(read_columns):
+                    return pd.DataFrame()
+            except Exception:
+                read_columns = columns
+        df = safe_read_parquet(file_path, columns=read_columns) if read_columns else safe_read_parquet(file_path)
         if 'Fecha' in df.columns:
             df['Fecha'] = pd.to_datetime(df['Fecha'])
         return df
@@ -884,32 +1105,47 @@ def load_telemetry_ai_comments(client: str, level: str) -> pd.DataFrame:
         DataFrame with AI comments for the specified level.
         Returns empty DataFrame if data not available.
     """
-    if client.lower() != 'cda':
+    root = Path(f"data/telemetry/golden/{client.lower()}")
+    if level not in {"unit", "system", "signal"}:
+        logger.warning("Unknown telemetry AI comment level: %s", level)
         return pd.DataFrame()
 
-    base = Path(f"data/telemetry/golden/{client.lower()}/ai_comments")
-    if not base.exists():
-        return pd.DataFrame()
+    # The current pipeline writes one directory per level.  The legacy
+    # ``ai_comments/{level}_comments.parquet`` tree is kept only as fallback;
+    # otherwise a stale week-26 comment can be joined to a week-30 health row.
+    candidate_bases = [
+        root / f"ai_{level}_comments",
+        root / "ai_comments",
+    ]
+    dedupe_keys = {
+        "unit": ["unit"],
+        "system": ["unit", "system"],
+        "signal": ["unit", "system", "signal"],
+    }[level]
 
-    filename = f"{level}_comments.parquet"
-
-    # Search in partitioned structure (year=YYYY/week=WW/) or flat
     try:
-        # Try partitioned read first
-        parquet_files = sorted(base.rglob(filename))
-        if parquet_files:
-            # Load latest partition
-            df = safe_read_parquet(parquet_files[-1])
-            logger.info(f"Loaded {len(df)} {level} AI comments")
-            return df
+        for base in candidate_bases:
+            if not base.exists():
+                continue
+            target = _latest_telemetry_partition(base)
+            if target.is_file():
+                parquet_target = target
+            else:
+                parquet_files = sorted(target.rglob("*.parquet"))
+                parquet_target = target if parquet_files else None
+            if parquet_target is None:
+                continue
 
-        # Fallback: try as directory of parquet files
-        level_dir = base / f"{level}_comments"
-        if level_dir.exists():
-            df = safe_read_parquet(level_dir)
-            logger.info(f"Loaded {len(df)} {level} AI comments from directory")
+            df = safe_read_parquet(parquet_target)
+            if df.empty:
+                continue
+            df = _filter_latest_week(df)
+            df = _keep_latest_execution(df, dedupe_keys)
+            logger.info(
+                "Loaded %s %s AI comments from %s",
+                len(df), level, target,
+            )
             return df
-
         return pd.DataFrame()
     except Exception as e:
         logger.error(f"Error loading {level} AI comments: {e}")
@@ -927,11 +1163,7 @@ def load_maintenance_week(client: str, week: str) -> pd.DataFrame:
     Returns:
         DataFrame with maintenance records for the week
     """
-    if client.lower() != 'cda':
-        logger.warning(f"Maintenance data is only available for CDA client. Requested: {client}")
-        return pd.DataFrame()
-    
-    file_path = Path(f"data/mantentions/golden/{client.lower()}/{week}.csv")
+    file_path = _data_path("mantentions", "golden", client.lower(), f"{week}.csv")
     logger.info(f"Loading maintenance data from {file_path}")
     
     if not file_path.exists():

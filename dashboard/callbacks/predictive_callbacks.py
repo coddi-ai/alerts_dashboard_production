@@ -5,6 +5,8 @@ Predictive callbacks - handles internal tab switching and evidence interactivity
 from dash import html, dcc, Input, Output, State, no_update
 import pandas as pd
 from src.utils.logger import get_logger
+from config.settings import get_settings
+from src.data.loaders import get_latest_component_hours
 from dashboard.components.predictive_config import (
     get_failure_modes_dict,
     get_failure_mode_options,
@@ -48,11 +50,11 @@ def register_callbacks(app):
             if not filepath:
                 return html.P(f"No hay datos para {component}.", className="text-muted text-center")
 
-            df, df_latest, prev_ranking = _load_overview_component(filepath, component)
+            df, df_latest, prev_ranking = _load_overview_component(filepath, component, client)
             if df_latest is None or df_latest.empty:
                 return html.P(f"No hay datos disponibles para {component}.", className="text-muted text-center")
 
-            return _render_component_overview(df_latest, prev_ranking, component)
+            return _render_component_overview(df_latest, prev_ranking, component, client, df=df)
 
         else:
             # Render evidence shell (interactive parts handled by other callbacks)
@@ -61,9 +63,9 @@ def register_callbacks(app):
             if not filepath:
                 return html.P(f"No hay datos para {component}.", className="text-muted text-center")
 
-            df, df_latest = _load_evidence_component(filepath, component)
+            df, df_latest = _load_evidence_component(filepath, component, client)
             units = sorted(df["Unit"].unique()) if df is not None else []
-            failure_mode_options = get_failure_mode_options(component)
+            failure_mode_options = get_failure_mode_options(component, client)
 
             return html.Div([
                 # Unit selector
@@ -107,6 +109,22 @@ def register_callbacks(app):
             ])
 
     # ══════════════════════════════════════════════════════════════════════════
+    # OVERVIEW: Análisis de Riesgo view switch (Riesgo Acumulado / Prioridad Actual)
+    # ══════════════════════════════════════════════════════════════════════════
+
+    @app.callback(
+        Output("predictive-risk-curve-container", "style"),
+        Output("predictive-risk-priority-container", "style"),
+        Input("predictive-risk-view-selector", "value"),
+        prevent_initial_call=True,
+    )
+    def toggle_risk_view(view):
+        """Switch between the accumulated-risk curve and the priority cards without re-rendering either."""
+        if view == "acumulado":
+            return {"display": "block"}, {"display": "none"}
+        return {"display": "none"}, {"display": "block"}
+
+    # ══════════════════════════════════════════════════════════════════════════
     # OVERVIEW: Sort failure mode table by selected period
     # ══════════════════════════════════════════════════════════════════════════
 
@@ -127,25 +145,32 @@ def register_callbacks(app):
         if not filepath:
             return no_update
 
-        df, df_latest, _ = _load_overview_component(filepath, component)
+        df, df_latest, _ = _load_overview_component(filepath, component, client)
         if df_latest is None or df_latest.empty:
             return no_update
 
-        failure_modes = get_failure_modes_dict(component)
+        failure_modes = get_failure_modes_dict(component, client)
 
         # Classify status (same logic as _render_component_overview)
+        # Saludable: avg_ranking_30d < 30 AND max_fm_30d < 50
+        # Alerta: 30 <= avg_ranking_30d < 60 OR 50 <= max_fm_30d < 80
+        # Crítico: avg_ranking_30d >= 60 OR max_fm_30d >= 80
         latest = df_latest.copy()
-        p80_30d = float(latest["avg_ranking_30d"].quantile(0.80))
         latest["status"] = "Saludable"
-        latest.loc[latest["avg_ranking_30d"] >= p80_30d, "status"] = "Alerta"
         latest.loc[
-            (latest["ranking"] > 80) & (latest["avg_ranking_30d"] >= p80_30d),
+            (latest["avg_ranking_30d"] >= 30) | (latest["max_fm_30d"] >= 50),
+            "status",
+        ] = "Alerta"
+        latest.loc[
+            (latest["avg_ranking_30d"] >= 60) | (latest["max_fm_30d"] >= 80),
             "status",
         ] = "Crítica"
 
-        # Sort by selected column descending
-        if sort_col in latest.columns:
-            sorted_df = latest.sort_values(sort_col, ascending=False)
+        # Sort by selected column descending (use 30d version for failure modes)
+        fm_keys = list(failure_modes.keys())
+        actual_sort_col = f"{sort_col}_30d" if sort_col in fm_keys and f"{sort_col}_30d" in latest.columns else sort_col
+        if actual_sort_col in latest.columns:
+            sorted_df = latest.sort_values(actual_sort_col, ascending=False)
         else:
             sorted_df = latest.sort_values("avg_ranking_30d", ascending=False)
 
@@ -173,17 +198,21 @@ def register_callbacks(app):
             components = _discover_components(client)
             filepath = components.get(component)
             if filepath:
-                _, df_latest = _load_evidence_component(filepath, component)
+                _, df_latest = _load_evidence_component(filepath, component, client)
                 if df_latest is not None and not df_latest.empty:
                     row = df_latest[df_latest["Unit"] == selected_unit]
                     if not row.empty:
                         row = row.iloc[0]
                         ranking_val = float(row.get("ranking", 0))
+                        avg_30d = float(row.get("avg_ranking_30d", ranking_val))
+                        max_fm = float(row.get("max_fm_30d", 0))
                         ranking_text = f"{ranking_val:.0f}/100"
-                        if ranking_val >= 70:
+                        # Status: Crítico >= 60 OR max_fm >= 80
+                        #         Alerta >= 30 OR max_fm >= 50
+                        if avg_30d >= 60 or max_fm >= 80:
                             status_text = "Crítica"
                             status_color = "#e24b4a"
-                        elif ranking_val >= 40:
+                        elif avg_30d >= 30 or max_fm >= 50:
                             status_text = "Alerta"
                             status_color = "#ef9f27"
                         else:
@@ -191,6 +220,61 @@ def register_callbacks(app):
                             status_color = "#1d9e75"
 
         component_label = (component or "").title()
+
+        # ── Load component horómetro (at last evidence date) ──
+        horometro_text = "—"
+        horometro_date = ""
+        if client and component:
+            settings = get_settings()
+            allowed = [c.upper() for c in settings.component_hours_allowed_clients]
+            if client.upper() in allowed:
+                comp_hours_file = settings.get_component_hours_path(client.lower())
+                if comp_hours_file.exists():
+                    try:
+                        from src.data.loaders import load_component_hours
+                        import re as _re
+                        all_hours = load_component_hours(comp_hours_file)
+                        if not all_hours.empty:
+                            # Normalize unit IDs (T_09 vs T_9)
+                            def _norm_uid(uid):
+                                m = _re.match(r'^([A-Za-z]+_)0*(\d+)$', str(uid))
+                                return f"{m.group(1)}{m.group(2)}" if m else str(uid)
+
+                            unit_norm = _norm_uid(selected_unit)
+                            all_hours['_uid_norm'] = all_hours['unitId'].apply(_norm_uid)
+
+                            # Get last evidence date
+                            components_map = _discover_components(client)
+                            filepath = components_map.get(component)
+                            last_ev_date = None
+                            if filepath:
+                                df_ev, _ = _load_evidence_component(filepath, component, client)
+                                if df_ev is not None:
+                                    df_ev_unit = df_ev[df_ev["Unit"] == selected_unit]
+                                    if not df_ev_unit.empty:
+                                        last_ev_date = df_ev_unit["Fecha"].max()
+
+                            unit_hours = all_hours[
+                                (all_hours['_uid_norm'] == unit_norm) &
+                                (all_hours['componentName'] == component)
+                            ].copy()
+
+                            if not unit_hours.empty and last_ev_date is not None:
+                                unit_hours['date_diff'] = abs(unit_hours['sampleDate'] - last_ev_date)
+                                closest = unit_hours.sort_values('date_diff').iloc[0]
+                                hrs = closest['componentHours_cleaned']
+                                date_val = closest['sampleDate']
+                                if pd.notna(hrs):
+                                    horometro_text = f"{hrs:,.0f} hrs"
+                                if pd.notna(date_val):
+                                    horometro_date = pd.to_datetime(date_val).strftime('%d %b %Y')
+                            elif not unit_hours.empty:
+                                latest_row = unit_hours.sort_values('sampleDate').iloc[-1]
+                                hrs = latest_row['componentHours_cleaned']
+                                if pd.notna(hrs):
+                                    horometro_text = f"{hrs:,.0f} hrs"
+                    except Exception as e:
+                        logger.warning(f"Could not load component hours for banner: {e}")
 
         return html.Div([
             html.Div([
@@ -214,8 +298,22 @@ def register_callbacks(app):
                         }),
                     ]),
                 ], style={"display": "flex", "alignItems": "center"}),
-                # Status badge on the right
+                # Status badges on the right (ranking + horómetro + estado)
                 html.Div([
+                    # Horómetro badge
+                    html.Div([
+                        html.Div("Horómetro", style={
+                            "fontSize": "10px", "textTransform": "uppercase",
+                            "letterSpacing": "0.5px", "opacity": "0.8", "marginBottom": "4px"
+                        }),
+                        html.Div(horometro_text, style={
+                            "fontSize": "20px", "fontWeight": "700"
+                        }),
+                        html.Div(horometro_date, style={
+                            "fontSize": "9px", "opacity": "0.7", "marginTop": "2px"
+                        }) if horometro_date else None,
+                    ], style={"textAlign": "center", "marginRight": "20px"}),
+                    # Ranking badge
                     html.Div([
                         html.Div("Ranking Actual", style={
                             "fontSize": "10px", "textTransform": "uppercase",
@@ -266,11 +364,11 @@ def register_callbacks(app):
         if not filepath:
             return html.Div(html.P("No hay datos disponibles.", className="text-muted text-center", style={"padding": "40px"}))
 
-        df, df_latest = _load_evidence_component(filepath, component)
+        df, df_latest = _load_evidence_component(filepath, component, client)
         if df is None:
             return html.Div(html.P("No hay datos disponibles.", className="text-muted text-center", style={"padding": "40px"}))
 
-        return render_initial_content(selected_unit, df, df_latest, component)
+        return render_initial_content(selected_unit, df, df_latest, component, client)
 
     # ══════════════════════════════════════════════════════════════════════════
     # EVIDENCE: Set default failure mode when unit changes
@@ -291,18 +389,18 @@ def register_callbacks(app):
         if not filepath:
             return no_update
 
-        df, df_latest = _load_evidence_component(filepath, component)
+        df, df_latest = _load_evidence_component(filepath, component, client)
         if df is None or df_latest is None:
             return no_update
 
-        failure_modes = get_failure_modes_dict(component)
+        failure_modes = get_failure_modes_dict(component, client)
         row = df_latest[df_latest["Unit"] == selected_unit]
         if row.empty:
             return list(failure_modes.keys())[0] if failure_modes else None
 
         row = row.iloc[0]
         fm_keys = list(failure_modes.keys())
-        fm_scores = {k: float(row[k]) if k in row.index and pd.notna(row[k]) else 0.0 for k in fm_keys}
+        fm_scores = {k: float(row[f"{k}_30d"]) if f"{k}_30d" in row.index and pd.notna(row[f"{k}_30d"]) else 0.0 for k in fm_keys}
         return max(fm_scores, key=fm_scores.get) if fm_scores else (fm_keys[0] if fm_keys else None)
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -326,8 +424,61 @@ def register_callbacks(app):
         if not filepath:
             return html.Div(html.P("No hay datos disponibles.", className="text-muted text-center", style={"padding": "40px"}))
 
-        df, df_latest = _load_evidence_component(filepath, component)
+        df, df_latest = _load_evidence_component(filepath, component, client)
         if df is None:
             return html.Div(html.P("No hay datos disponibles.", className="text-muted text-center", style={"padding": "40px"}))
 
-        return render_detailed_evidence(selected_unit, df, df_latest, selected_failure_mode, component)
+        return render_detailed_evidence(selected_unit, df, df_latest, selected_failure_mode, component, client)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # EVIDENCE: Oil chart update (when user changes variable selection)
+    # ══════════════════════════════════════════════════════════════════════════
+
+    @app.callback(
+        Output("predictive-oil-chart-container", "children"),
+        Input("predictive-oil-var-selector", "value"),
+        State("predictive-oil-range-store", "data"),
+        State("predictive-ev-unit", "value"),
+        State("predictive-ev-client-store", "data"),
+        State("predictive-ev-component-store", "data"),
+        prevent_initial_call=False,
+    )
+    def update_oil_chart(selected_vars, oil_range, selected_unit, client, component):
+        """Update oil timeseries chart based on user-selected variables."""
+        from dashboard.components.predictive_charts import create_oil_timeseries_90d
+        from dashboard.components.predictive_config import OIL_LABELS, load_predictive_oil_limits_four
+
+        if not selected_vars or not selected_unit or not client or not component:
+            return html.P("Seleccione al menos una variable de aceite.",
+                         className="text-muted", style={"fontSize": "13px", "padding": "20px", "textAlign": "center"})
+
+        # Resolve per-client labels (fallback to cda if missing) and the
+        # four-limit Stewart dict (LIC/LIM/LSM/LSC, v2.8) for this component -
+        # never the legacy three-limit OIL_THRESHOLDS table.
+        _ckey = (client or "cda").lower()
+        oil_labels = OIL_LABELS.get(_ckey, OIL_LABELS["cda"])
+        oil_limits_four = load_predictive_oil_limits_four(_ckey, component)
+
+        components = _discover_components(client)
+        filepath = components.get(component)
+        if not filepath:
+            return html.P("No hay datos disponibles.", className="text-muted")
+
+        df, _ = _load_evidence_component(filepath, component, client)
+        if df is None:
+            return html.P("No hay datos disponibles.", className="text-muted")
+
+        df_unit = df[df["Unit"] == selected_unit].sort_values("Fecha")
+        if df_unit.empty:
+            return html.P("No hay datos para esta unidad.", className="text-muted")
+
+        # Always pass limits — the chart function shows limit lines when len(vars)==1
+        fig = create_oil_timeseries_90d(
+            df_unit, selected_vars, oil_labels,
+            oil_limits_four=oil_limits_four,
+            oil_range=oil_range,
+        )
+
+        if fig:
+            return dcc.Graph(figure=fig, config={"displayModeBar": False})
+        return html.P("No hay suficientes datos históricos.", className="text-muted", style={"fontSize": "13px"})

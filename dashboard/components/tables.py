@@ -12,33 +12,38 @@ from typing import List, Dict, Optional
 
 def create_limits_table(df: pd.DataFrame) -> dash_table.DataTable:
     """
-    Create Stewart Limits table with color coding.
-    
+    Create four-limit Stewart Limits table (LIC/LIM/LSM/LSC, data contract v2.8)
+    with color coding.
+
     Args:
-        df: DataFrame with limits (machine, component, essay, thresholds)
-    
+        df: DataFrame with limits (machine, component, essay, oilHourRange,
+            LIC, LIM, LSM, LSC). LIC/LIM may be null (no lower limit applies
+            for that essay/component) - rendered as a blank cell, never as 0.
+
     Returns:
         Dash DataTable
     """
     if df.empty:
         return html.Div("No limits data available", className="text-muted p-3")
-    
+
     # Apply title() to machine and component names
     df = df.copy()
     if 'machine' in df.columns:
         df['machine'] = df['machine'].str.title()
     if 'component' in df.columns:
         df['component'] = df['component'].str.title()
-    
+
     return dash_table.DataTable(
         id='limits-table',
         columns=[
             {'name': 'Machine', 'id': 'machine'},
             {'name': 'Component', 'id': 'component'},
             {'name': 'Essay', 'id': 'essay'},
-            {'name': 'Marginal (90%)', 'id': 'threshold_normal', 'type': 'numeric', 'format': {'specifier': '.2f'}},
-            {'name': 'Condenatorio (95%)', 'id': 'threshold_alert', 'type': 'numeric', 'format': {'specifier': '.2f'}},
-            {'name': 'Crítico (98%)', 'id': 'threshold_critic', 'type': 'numeric', 'format': {'specifier': '.2f'}}
+            {'name': 'Oil Hour Range', 'id': 'oilHourRange'},
+            {'name': 'LIC (Inferior Condenatorio)', 'id': 'LIC', 'type': 'numeric', 'format': {'specifier': '.2f'}},
+            {'name': 'LIM (Inferior Marginal)', 'id': 'LIM', 'type': 'numeric', 'format': {'specifier': '.2f'}},
+            {'name': 'LSM (Superior Marginal)', 'id': 'LSM', 'type': 'numeric', 'format': {'specifier': '.2f'}},
+            {'name': 'LSC (Superior Condenatorio)', 'id': 'LSC', 'type': 'numeric', 'format': {'specifier': '.2f'}}
         ],
         data=df.to_dict('records'),
         style_table={'overflowX': 'auto'},
@@ -55,15 +60,19 @@ def create_limits_table(df: pd.DataFrame) -> dash_table.DataTable:
         },
         style_data_conditional=[
             {
-                'if': {'column_id': 'threshold_normal'},
-                'backgroundColor': '#d4edda'
+                'if': {'column_id': 'LIC'},
+                'backgroundColor': '#f8d7da'
             },
             {
-                'if': {'column_id': 'threshold_alert'},
+                'if': {'column_id': 'LIM'},
                 'backgroundColor': '#fff3cd'
             },
             {
-                'if': {'column_id': 'threshold_critic'},
+                'if': {'column_id': 'LSM'},
+                'backgroundColor': '#fff3cd'
+            },
+            {
+                'if': {'column_id': 'LSC'},
                 'backgroundColor': '#f8d7da'
             }
         ],
@@ -216,6 +225,14 @@ def create_machine_detail_table(df: pd.DataFrame) -> dash_table.DataTable:
     if 'componentName' in df.columns:
         df['componentName'] = df['componentName'].str.title()
     
+    # Format component hours (horómetro) if available
+    if 'componentHours_cleaned' in df.columns:
+        df['horometro_display'] = df['componentHours_cleaned'].apply(
+            lambda x: f"{x:,.0f} hrs" if pd.notna(x) else 'N/A'
+        )
+    else:
+        df['horometro_display'] = 'N/A'
+    
     # Parse breached_essays to extract essay names from list of dictionaries
     if 'breached_essays' in df.columns:
         def extract_essay_names(x):
@@ -261,15 +278,32 @@ def create_machine_detail_table(df: pd.DataFrame) -> dash_table.DataTable:
         df['ai_text'] = df['ai_recommendation'].apply(format_ai_recommendation)
     else:
         df['ai_text'] = 'N/A'
+
+    # Format anomaly type (July 2026)
+    if 'anomalyType' in df.columns:
+        df['anomaly_display'] = df['anomalyType'].apply(
+            lambda x: str(x) if pd.notna(x) and x != 'Normal' else '—'
+        )
+    else:
+        df['anomaly_display'] = '—'
     
-    # Define columns: Component, Status, Sample Date, Essays Broken, AI Recommendation
+    # Define columns: Component, Status, Anomaly, Horómetro, Sample Date, Essays Broken, AI Recommendation
+    has_horometro = 'componentHours_cleaned' in df.columns
+    
     columns = [
         {'name': 'Componente', 'id': 'componentName'},
         {'name': 'Estado', 'id': 'report_status'},
+        {'name': 'Anomalía', 'id': 'anomaly_display'},
+    ]
+    
+    if has_horometro:
+        columns.append({'name': 'Horómetro', 'id': 'horometro_display'})
+    
+    columns.extend([
         {'name': 'Fecha Muestra', 'id': 'sampleDate'},
         {'name': 'Ensayos Anormales', 'id': 'essays_broken_names'},
         {'name': 'Recomendación IA', 'id': 'ai_text'}
-    ]
+    ])
     
     return dash_table.DataTable(
         id='machine-detail-table',
@@ -328,9 +362,10 @@ def create_machine_detail_table(df: pd.DataFrame) -> dash_table.DataTable:
             }
         ],
         style_cell_conditional=[
-            {'if': {'column_id': 'ai_summary'}, 'width': '25%', 'minWidth': '180px'},
-            {'if': {'column_id': 'breached_essays_text'}, 'width': '20%', 'minWidth': '150px'},
-            {'if': {'column_id': 'componentName'}, 'width': '15%'}
+            {'if': {'column_id': 'ai_text'}, 'width': '25%', 'minWidth': '180px'},
+            {'if': {'column_id': 'essays_broken_names'}, 'width': '18%', 'minWidth': '130px'},
+            {'if': {'column_id': 'componentName'}, 'width': '14%'},
+            {'if': {'column_id': 'anomaly_display'}, 'width': '15%', 'minWidth': '120px'}
         ],
         sort_action='native',
         page_size=20

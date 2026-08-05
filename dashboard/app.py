@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 
 import dash
 import dash_bootstrap_components as dbc
+from flask import send_from_directory
 from dashboard.layout import create_app_layout
 from dashboard.callbacks.auth_callbacks import register_auth_callbacks
 from dashboard.callbacks.navigation_callbacks import register_navigation_callbacks
@@ -45,11 +46,17 @@ import dashboard.callbacks.telemetry_callbacks
 # Import oil callbacks (uses @callback decorator, auto-registered on import)
 import dashboard.callbacks.oil_callbacks
 
+# Import lab compliance callbacks (uses @callback decorator, auto-registered on import)
+import dashboard.callbacks.lab_compliance_callbacks
+
 # Import menace control callbacks (uses @callback decorator, auto-registered on import)
 import dashboard.callbacks.menace_control_callbacks
 
 # Import hot sheet callbacks (uses @callback decorator, auto-registered on import)
 import dashboard.callbacks.hot_sheet_callbacks
+
+# Import Conexión ERP callbacks (uses @callback decorator, auto-registered on import)
+import dashboard.callbacks.integration_avisos_callbacks
 
 # Import health index callbacks module
 from dashboard.callbacks.health_index_callbacks import register_health_index_callbacks
@@ -59,6 +66,26 @@ import dashboard.callbacks.data_freshness_callbacks
 
 # Import predictive callbacks
 from dashboard.callbacks.predictive_callbacks import register_callbacks as register_predictive_callbacks
+
+# Import component hours callbacks
+from dashboard.callbacks.component_hours_callbacks import register_component_hours_callbacks
+
+# Import predictive pages callbacks (reactive content for /predictive/* pages)
+from dashboard.callbacks.predictive_pages_callbacks import register_predictive_pages_callbacks
+
+# Import admin callbacks (login events chart)
+from dashboard.callbacks.admin_callbacks import register_admin_callbacks
+
+# Import the centralized route guard (role + client-service route protection)
+from dashboard.callbacks.access_control_callbacks import register_access_control_callbacks
+
+# Import the reactive sidebar (re-renders nav when the selected client changes)
+from dashboard.callbacks.sidebar_callbacks import register_sidebar_callbacks
+
+# Validate the client service register at startup - critical structural
+# errors raise (fail fast); field-level issues are logged, not fatal.
+from config.client_services import validate_startup_config
+validate_startup_config()
 
 
 def normalize_prefix(prefix: str | None) -> str:
@@ -85,12 +112,32 @@ PATH_PREFIX = normalize_prefix(os.getenv("DASH_PATH_PREFIX"))
 # Initialize Dash app with Bootstrap theme
 app = dash.Dash(
     __name__,
+    use_pages=True,
+    pages_folder="",  # Pages are registered explicitly below, no folder auto-discovery
     external_stylesheets=[dbc.themes.BOOTSTRAP, dbc.icons.FONT_AWESOME],
     suppress_callback_exceptions=True,
     title="Multi-Technical Alerts",
     url_base_pathname=PATH_PREFIX,
     serve_locally=True
 )
+
+# Import page modules so their dash.register_page() calls run (must happen
+# after the app is created since register_page() looks up the active app).
+import dashboard.pages.index
+import dashboard.pages.overview_general
+import dashboard.pages.overview_data_freshness
+import dashboard.pages.monitoring_alerts
+import dashboard.pages.monitoring_telemetry
+import dashboard.pages.monitoring_oil
+import dashboard.pages.predictive_motor
+import dashboard.pages.predictive_transmision
+import dashboard.pages.agents_campbell_ai
+import dashboard.pages.integration_validacion_avisos
+import dashboard.pages.integration_seguimiento_avisos
+import dashboard.pages.reporting_main
+import dashboard.pages.admin_main
+import dashboard.pages.admin_user_registry
+import dashboard.pages.no_services
 
 # Set app layout
 app.layout = create_app_layout()
@@ -99,6 +146,28 @@ app.layout = create_app_layout()
 @app.server.route('/alerts-dashboard/health')
 def health_check():
     return {'status': 'healthy'}, 200
+
+# Add route to serve client logos from dashboard/logos/
+@app.server.route('/logos/<path:filename>')
+def serve_logo(filename):
+    """
+    Serve client logo files from dashboard/logos/ directory.
+    
+    Args:
+        filename: Logo filename (e.g., 'enex.png')
+    
+    Returns:
+        Logo file or 404 if not found
+    """
+    logos_dir = Path(__file__).parent / 'logos'
+    logger.info(f"Serving logo file: {filename} from {logos_dir}")
+    
+    try:
+        return send_from_directory(logos_dir, filename)
+    except FileNotFoundError:
+        logger.warning(f"Logo file not found: {filename}")
+        # Return 404 - the callback will handle hiding the logo
+        return "Logo not found", 404
 
 # Register all callbacks
 register_auth_callbacks(app)
@@ -110,6 +179,11 @@ register_mantenciones_general_callbacks(app)
 register_overview_general_callbacks(app)
 register_health_index_callbacks(app)
 register_predictive_callbacks(app)
+register_component_hours_callbacks(app)
+register_predictive_pages_callbacks(app)
+register_admin_callbacks(app)
+register_access_control_callbacks(app)
+register_sidebar_callbacks(app)
 
 
 if __name__ == '__main__':
