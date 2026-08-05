@@ -455,7 +455,10 @@ def populate_detail_filter_options(client: str):
         unit_options = [{'label': unit, 'value': unit} for unit in sorted(alerts_df['UnitId'].unique())]
         
         # Sistema filter options
-        sistema_options = [{'label': sistema, 'value': sistema} for sistema in sorted(alerts_df['sistema'].unique())]
+        sistema_options = [
+            {'label': translate_alert_system(sistema), 'value': sistema}
+            for sistema in sorted(alerts_df['sistema'].unique())
+        ]
         
         logger.info(f"Filter options populated: {len(unit_options)} units, {len(sistema_options)} sistemas")
         return unit_options, sistema_options
