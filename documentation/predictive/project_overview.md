@@ -176,6 +176,75 @@ updated together.**
 > P80 quantile of `avg_ranking_30d`. That is no longer how the shipped code works — the fixed
 > thresholds above are current as of this writing. Trust this file (and the code) over older notes.
 
+### Curva Acumulada de Riesgo
+
+Implemented entirely in `dashboard/components/accumulated_curve.py` and inserted into the Resumen
+tab by `tab_predictive_overview.py::_render_component_overview` (between the hero KPIs and the
+priority cards, only when it can be built — see below). It has **no dedicated Dash `id` or
+callback**: the `dcc.Graph` it returns (`config={"displayModeBar": False, "responsive": True}`) has
+no `id`, so it is entirely rebuilt every time the parent Resumen content re-renders — i.e. on
+`client-selector`/`user-info-store` change (`predictive_pages_callbacks.py::render_predictive_component`)
+or when switching back to the Resumen internal tab (`predictive_callbacks.py::switch_internal_tab`).
+
+**Data sources**:
+- `data/predictive/golden/{client}/{component}.csv` — same file as the rest of Resumen, loaded via
+  `_load_component_data()`; only `Unit`, `Fecha`, `ranking` are used here.
+- `data/oil/golden/{client}/cleaned_component_hours.parquet` — loaded directly from disk by
+  `_load_component_hours_if_available()` (`tab_predictive_overview.py`), **bypassing the
+  `settings.get_component_hours_path()` helper** used elsewhere in this module (its own docstring
+  notes this is "igual que el dashboard antiguo"). Required columns: `sampleDate`, `unitId`,
+  `componentName`, `componentHours_cleaned`. If this parquet doesn't exist for the client, the
+  curve is silently skipped (`_load_component_hours_if_available` returns `None`) and the classic
+  KPI hero renders instead — this is the only client gate the curve itself has (see below).
+
+**Calculation** (`build_accumulated_data`, `accumulated_curve.py`):
+1. Coerce `ranking` to numeric and drop non-finite values (`np.isfinite`) — an explicit patch for
+   upstream `-inf` values, noted in the code as a TODO on the upstream side, not fixed here.
+2. Normalize unit ids (e.g. `T_09` → `T_9`) and merge `ranking` with hours on `(unit, Fecha)`.
+3. `fill_hours_progressive()` fills missing hours per unit and detects lifecycle resets ("ciclo"):
+   an hour value that drops more than 50% from the previous reading starts a new cycle; a smaller
+   drop is treated as noise and held at the previous value.
+4. `ranking_acumulado = groupby(["Unit", "ciclo"])["ranking"].cumsum()` — a **cumulative sum of the
+   raw daily `ranking`** per unit/cycle. This is not the 30/60/90-day rolling average used
+   elsewhere in Resumen/Evidencia — it is a separate, unrelated metric.
+
+**Reference band** (`build_reference_band`): for each unit/cycle curve, computes the rate of
+accumulation per component-hour, interpolates onto a 200-point grid over the component's
+95th-percentile max hours, then takes the fleet mean ± `K_SIGMA = 2` standard deviations of that
+rate (integrated back into a cumulative band). Requires `MIN_SUPPORT = 3` contributing curves per
+grid point, else returns `None` (the curve build aborts and the classic hero is shown instead).
+Units listed in the hardcoded `EXCLUDE_FROM_REFERENCE` dict (currently
+`{"motor": ["T_11"], "transmision": ["T_09"]}`) are excluded only from the band statistics
+("fallas conocidas… inflan sigma" per the code comment), not from the plotted curves themselves.
+
+**Zone classification** (`classify_curves`): for each unit's most recent cycle, the last plotted
+point is compared to the reference band and labeled `zona_final` = `Normal` (below the mean),
+`Alerta` (between the mean and mean + 2σ), or `Anormal` (above mean + 2σ). When the curve builds
+successfully, these three counts replace the classic hero with a "Estado de Flota" KPI row
+(`zone_hero` in `_render_component_overview`) — **a second, independently-labeled classification
+that can disagree with the classic hero's Crítica/Alerta/Saludable status** (see Fleet Status
+Classification above), since one is derived from the accumulated-curve band and the other from
+fixed thresholds on `avg_ranking_30d`/`max_fm_30d`.
+
+**Time window**: none — the full available history per unit/cycle is used; the x-axis is component
+hours, not calendar time.
+
+**Empty/error handling**: `render_accumulated_section()` wraps the whole build in try/except and
+renders `_empty_state(message)` for any exception, an empty result (no crossable hours), or
+`fig is None` (insufficient curve support for the band). `_render_component_overview` additionally
+wraps this whole block in its own try/except, so a curve failure "nunca rompe el overview" — it
+just falls back to the classic hero and omits the curve section entirely.
+
+**Relationship to the priority cards**: both read from the same `df`/`df_latest` loaded once by
+`_load_component_data()`, but are computed and ordered independently — the curve groups by
+unit/cycle over component hours, the cards sort by `avg_ranking_30d` descending (see below). There
+is no shared calculation between them.
+
+**Client access restrictions**: gated the same as the rest of the Predictive module by
+`predictive_allowed_clients` (`config/settings.py`). `component_hours_allowed_clients` gates
+*only* the horómetro text shown on priority cards/unit banner — it does not gate the curve, which
+depends solely on whether `cleaned_component_hours.parquet` exists for the client.
+
 ---
 
 ## 📊 Pages and Visualizations
@@ -184,7 +253,8 @@ updated together.**
 
 | Element | Description |
 |---------|--------------|
-| **Hero KPIs** | Fleet avg ranking, count Crítica/Alerta/Saludable |
+| **Hero KPIs** | Fleet avg ranking, count Crítica/Alerta/Saludable (or, when the accumulated curve builds successfully, replaced by zone counts Normal/Alerta/Anormal — see [Curva Acumulada de Riesgo](#curva-acumulada-de-riesgo) above) |
+| **Curva Acumulada** | Cumulative-risk curve per unit/cycle vs. a fleet reference band; see [Curva Acumulada de Riesgo](#curva-acumulada-de-riesgo) above |
 | **Priority cards** | One per unit, sorted by `avg_ranking_30d` desc; shows score, delta vs. previous date, top-3 failure-mode drivers as bars, and horómetro (if enabled for the client) |
 | **Failure-mode table** | Unit × (Hoy/30d/60d/90d ranking + one column per failure mode), sortable via a period dropdown (`predictive-fm-sort-selector`) |
 
@@ -263,6 +333,7 @@ is rendered, and read as `State` by every downstream callback.
 | `dashboard/components/predictive_charts.py` | Plotly figures |
 | `dashboard/components/predictive_tables.py` | Oil variables HTML table |
 | `dashboard/components/predictive_kpis.py` | KPI card components |
+| `dashboard/components/accumulated_curve.py` | Curva Acumulada de Riesgo: build, reference band, zone classification |
 | `dashboard/tabs/tab_predictive_component.py` | Unified per-component layout with internal tabs |
 | `dashboard/tabs/tab_predictive_overview.py` | Resumen tab: load/classify/render |
 | `dashboard/tabs/tab_predictive_evidence.py` | Evidencia tab: load/render + insight engine |

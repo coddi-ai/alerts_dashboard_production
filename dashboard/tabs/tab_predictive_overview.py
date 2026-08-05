@@ -14,6 +14,12 @@ from dashboard.components.predictive_config import (
     get_failure_modes_dict,
 )
 from dashboard.components.predictive_kpis import create_kpi_card, create_kpi_row
+from dashboard.components.accumulated_curve import (
+    render_accumulated_section,
+    build_accumulated_data,
+    build_accumulated_figure,
+    _empty_state as _accumulated_empty_state,
+)
 
 logger = get_logger(__name__)
 
@@ -37,7 +43,7 @@ def _discover_components(client: str) -> dict:
     return components
 
 
-def _load_component_data(filepath: Path, component: str):
+def _load_component_data(filepath: Path, component: str, client: str = "cda"):
     """Load and precompute predictive data for a single component."""
     if not filepath.exists():
         logger.warning(f"Predictive data not found: {filepath}")
@@ -48,7 +54,7 @@ def _load_component_data(filepath: Path, component: str):
     df = df.copy()  # defragment after column assignment
 
     # Get component-specific failure modes
-    failure_modes = get_failure_modes_dict(component)
+    failure_modes = get_failure_modes_dict(component, client)
     fm_keys = list(failure_modes.keys())
     score_cols = [c for c in fm_keys if c in df.columns] + ["ranking"]
 
@@ -190,15 +196,12 @@ def _failure_table(sorted_df, sort_col, failure_modes):
     fm_keys = list(failure_modes.keys())
     fm_labels = list(failure_modes.values())
 
-    # Determine which FM suffix to use based on selected period
-    # "ranking" (Hoy) → raw values, "avg_ranking_30d" → _30d, etc.
     _fm_suffix_map = {
-        "ranking": "",              # Hoy → raw values
+        "ranking": "",
         "avg_ranking_30d": "_30d",
         "avg_ranking_60d": "_60d",
         "ranking_acum_90d": "_90d",
     }
-    # If sort_col is a FM key, keep current period (default 30d)
     fm_suffix = _fm_suffix_map.get(sort_col, "_30d")
 
     def _th(label, col_id):
@@ -256,7 +259,6 @@ def _failure_table(sorted_df, sort_col, failure_modes):
         ]
 
         for key in fm_keys:
-            # Use the column matching the selected period
             col_name = f"{key}{fm_suffix}" if fm_suffix else key
             val = float(r[col_name]) if col_name in r.index and pd.notna(r[col_name]) else 0.0
             style = _score_cell_style(val)
@@ -277,17 +279,62 @@ def _failure_table(sorted_df, sort_col, failure_modes):
 
 # ── Component Overview Renderer ───────────────────────────────────────────────
 
-def _render_component_overview(df_latest, prev_ranking, component: str, client: str = None):
-    """Render overview content for a specific component."""
-    failure_modes = get_failure_modes_dict(component)
+def _load_component_hours_if_available(client: str):
+    """
+    Carga el parquet de horas de componente SOLO si el archivo existe para
+    este cliente, leyéndolo DIRECTAMENTE del disco (igual que el dashboard
+    antiguo) para garantizar que la curva reciba exactamente los mismos datos.
+
+    Ruta: data/oil/golden/<client>/cleaned_component_hours.parquet
+
+    Devuelve el DataFrame de horas, o None si el archivo no existe / no se puede
+    leer. None significa "este cliente no tiene datos de horas" → el overview
+    usa el hero clásico y omite la curva acumulada.
+    """
+    if not client:
+        return None
+    try:
+        settings = get_settings()
+        # Ruta directa al parquet, misma que usaba el dashboard antiguo.
+        hours_path = Path(settings.data_root) / "oil" / "golden" / client.lower() / "cleaned_component_hours.parquet"
+        if not hours_path.exists():
+            return None
+
+        df_hours = pd.read_parquet(hours_path)
+        if df_hours is None or df_hours.empty:
+            return None
+
+        # La curva cruza por fecha; asegurar tipo datetime como en el antiguo.
+        if "sampleDate" in df_hours.columns:
+            df_hours["sampleDate"] = pd.to_datetime(df_hours["sampleDate"])
+
+        return df_hours
+    except Exception as exc:  # noqa: BLE001 - ante cualquier problema, sin curva
+        logger.warning(f"No se pudieron cargar horas de componente para {client}: {exc}")
+        return None
+
+
+def _render_component_overview(df_latest, prev_ranking, component: str,
+                              client: str = None, df=None):
+    """
+    Render overview content for a specific component.
+
+    Si el cliente tiene datos de horas de componente disponibles (archivo
+    parquet presente) y la curva acumulada se puede construir, el hero de KPIs
+    se reemplaza por el "Estado de Flota" clasificado según la curva acumulada
+    (Anormal / Alerta / Normal) y se inserta la curva acumulada entre el hero y
+    las priority cards. Si no hay datos de horas, se usa el hero clásico.
+
+    Args:
+        df: histórico completo del componente (Unit, Fecha, ranking, ...),
+            necesario para construir la curva acumulada. Si es None, se omite.
+    """
+    failure_modes = get_failure_modes_dict(component, client)
 
     # Status classification (fixed thresholds)
     latest = df_latest.copy()
     avg_ranking = float(latest["ranking"].mean())
 
-    # Saludable: avg_ranking_30d < 30 AND max_fm_30d < 50
-    # Alerta: 30 <= avg_ranking_30d < 60 OR 50 <= max_fm_30d < 80
-    # Crítico: avg_ranking_30d >= 60 OR max_fm_30d >= 80
     latest["status"] = "Saludable"
     latest.loc[
         (latest["avg_ranking_30d"] >= 30) | (latest["max_fm_30d"] >= 50),
@@ -303,8 +350,51 @@ def _render_component_overview(df_latest, prev_ranking, component: str, client: 
     n_alert = counts.get("Alerta", 0)
     n_healthy = counts.get("Saludable", 0)
 
-    # Hero KPIs
-    hero = html.Div([
+    # ── Intentar curva acumulada + hero por zonas (solo si hay horas) ──
+    # Requiere el histórico completo (df) y que exista el parquet de horas para
+    # este cliente. Si algo falta, se usa el hero clásico de más abajo.
+    df_component_hours = _load_component_hours_if_available(client)
+    accumulated = None
+    zone_hero = None
+
+    if df is not None and not df.empty and df_component_hours is not None:
+        try:
+            df_acum = build_accumulated_data(df, df_component_hours, component)
+            if not df_acum.empty:
+                _fig, resumen = build_accumulated_figure(df_acum, component=component)
+                if _fig is not None:
+                    # Conteos por zona desde la clasificación de la curva
+                    n_anormal = n_zone_alert = n_zone_normal = 0
+                    if resumen is not None and not resumen.empty and "zona_final" in resumen.columns:
+                        zc = resumen["zona_final"].value_counts()
+                        n_anormal = int(zc.get("Anormal", 0))
+                        n_zone_alert = int(zc.get("Alerta", 0))
+                        n_zone_normal = int(zc.get("Normal", 0))
+
+                    zone_hero = html.Div([
+                        html.Div([
+                            html.Div([
+                                html.I(className="fas fa-chart-bar me-2"),
+                                f"Estado de Flota — {component.title()}"
+                            ], className="page-title", style={"display": "flex", "alignItems": "center"}),
+                            html.Div("Clasificación según curva acumulada de riesgo", className="page-subtitle"),
+                        ], style={"marginBottom": "16px"}),
+                        create_kpi_row([
+                            create_kpi_card(n_anormal, "Unidades Anormal", "fas fa-exclamation-triangle", "danger", "> media + 2σ"),
+                            create_kpi_card(n_zone_alert, "Unidades en Alerta", "fas fa-exclamation-circle", "warning", "entre media y media + 2σ"),
+                            create_kpi_card(n_zone_normal, "Unidades Normal", "fas fa-check-circle", "success", "bajo la media de flota"),
+                        ])
+                    ])
+
+                    # La sección de curva se inserta entre el hero y las cards
+                    accumulated = render_accumulated_section(df, df_component_hours, component)
+        except Exception as exc:  # noqa: BLE001 - la curva nunca rompe el overview
+            logger.warning(f"No se pudo construir la curva acumulada para {client}/{component}: {exc}")
+            accumulated = None
+            zone_hero = None
+
+    # ── Hero clásico (fallback cuando no hay horas / no hay curva) ──
+    classic_hero = html.Div([
         html.Div([
             html.Div([
                 html.I(className="fas fa-chart-bar me-2"),
@@ -320,9 +410,12 @@ def _render_component_overview(df_latest, prev_ranking, component: str, client: 
         ])
     ])
 
+    # Zone hero reemplaza al clásico solo si se pudo construir
+    hero = zone_hero if zone_hero is not None else classic_hero
+
     # Priority cards — load horómetro data
     import re as _re
-    horometro_map = {}  # {unit_normalized: hours_text}
+    horometro_map = {}
     if client:
         try:
             from src.data.loaders import load_component_hours
@@ -358,7 +451,6 @@ def _render_component_overview(df_latest, prev_ranking, component: str, client: 
     for _, r in latest.sort_values("avg_ranking_30d", ascending=False).iterrows():
         score = r["ranking"]
         delta = score - prev_ranking.get(r["Unit"], score)
-        # Use 30d averages for failure mode drivers (consistent with status classification)
         drivers = sorted(
             [(failure_modes[c], float(r[f"{c}_30d"])) for c in failure_modes
              if f"{c}_30d" in r.index and pd.notna(r[f"{c}_30d"])],
@@ -423,7 +515,34 @@ def _render_component_overview(df_latest, prev_ranking, component: str, client: 
         ),
     ], className="card", style={"marginTop": "16px"})
 
-    return html.Div([hero, priority, table_section])
+    curve_content = accumulated if accumulated is not None else _accumulated_empty_state(
+        "Curva acumulada no disponible: no hay datos de horómetro suficientes para este cliente/componente."
+    )
+
+    risk_section = html.Div([
+        html.H4([
+            html.I(className="fas fa-shield-alt me-2"),
+            "Análisis de Riesgo"
+        ], className="text-primary mb-3 mt-4"),
+        dcc.Tabs(
+            id='predictive-risk-view-selector',
+            value='prioridad',
+            children=[
+                dcc.Tab(label='  Riesgo Acumulado', value='acumulado',
+                        className='custom-tab', selected_className='custom-tab--selected'),
+                dcc.Tab(label='  Prioridad Actual', value='prioridad',
+                        className='custom-tab', selected_className='custom-tab--selected'),
+            ],
+            className='mb-3'
+        ),
+        html.Div(id='predictive-risk-curve-container', children=[curve_content],
+                 style={'display': 'none'}),
+        html.Div(id='predictive-risk-priority-container', children=[priority],
+                 style={'display': 'block'}),
+    ])
+
+    children = [hero, risk_section, table_section]
+    return html.Div(children)
 
 
 # ── Component Icon Map ────────────────────────────────────────────────────────
@@ -431,6 +550,7 @@ def _render_component_overview(df_latest, prev_ranking, component: str, client: 
 COMPONENT_ICONS = {
     "motor": "fas fa-cog",
     "transmision": "fas fa-exchange-alt",
+    "engine": "fas fa-cog",
 }
 
 
@@ -454,7 +574,7 @@ def layout(client: str, component: str):
                    className="text-muted", style={"padding": "40px", "textAlign": "center"})
         ])
 
-    df, df_latest, prev_ranking = _load_component_data(filepath, component)
+    df, df_latest, prev_ranking = _load_component_data(filepath, component, client)
 
     if df_latest is None or df_latest.empty:
         return html.Div([

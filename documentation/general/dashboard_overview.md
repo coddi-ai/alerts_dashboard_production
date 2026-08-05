@@ -305,7 +305,9 @@ for the full navigation tree):
   - **Detail**: Individual alert inspection with comprehensive evidence
     - Alert specifications with AI diagnosis
     - Telemetry evidence (sensor trends, GPS route, KPIs)
-    - Oil evidence (radar chart with essay levels)
+    - Oil evidence — "Análisis de Aceite" selector: **Tendencia** (default; the same time-series
+      chart grid used in Aceite → Detalle de Reporte, scoped to the alert's equipment/component)
+      or **Último Ensayo** (radar chart with essay levels for the alert's oil report)
     - Maintenance evidence (activity summaries)
 - **Data Sources**: 
   - `alerts/golden/{client}/consolidated_alerts.csv`
@@ -367,7 +369,9 @@ under `data/predictive/golden/{client}/*.csv`; each gets its own sidebar subsect
 KPI thresholds/failure-mode configuration (`dashboard/components/predictive_config.py`)
 
 **Tabs per component** (`tab_predictive_component.py`):
-- **Resumen**: fleet KPIs, priority cards, failure-mode table (`tab_predictive_overview.py`)
+- **Resumen**: fleet KPIs, an "Análisis de Riesgo" selector (**Prioridad Actual**, default — the
+  priority cards; or **Riesgo Acumulado** — the cumulative-risk curve vs. a fleet reference band),
+  and the failure-mode table (`tab_predictive_overview.py`)
 - **Evidencia**: per-unit oil/telemetry evidence with narrative insights (`tab_predictive_evidence.py`)
 
 **Data Sources**:
@@ -470,6 +474,19 @@ Alerts are generated through technique-specific logic:
 ---
 
 ## 🔄 Version History
+
+### Version 2.3.0 (August 2026)
+- **Root Redirect Verified**: Confirmed the base dashboard URL (with or without `DASH_PATH_PREFIX`)
+  redirects once to `/overview/general` via `dashboard/pages/index.py` — no code change needed
+- **Oil Evidence Selector**: Alerts → Detail → Oil Evidence now offers **Tendencia** (default —
+  the same time-series chart grid as Aceite → Detalle de Reporte, scoped to the alert's
+  equipment/component) and **Último Ensayo** (the existing radar chart, unchanged). The grid
+  builder was extracted to `dashboard/components/oil_charts.py` and is now shared by both views
+- **Predictivo "Análisis de Riesgo" Selector**: The Resumen tab's priority cards and the
+  previously-undocumented accumulated-risk curve are now presented under one selector —
+  **Prioridad Actual** (default) and **Riesgo Acumulado** — instead of always stacking both;
+  calculations for either are unchanged. See [Curva Acumulada de Riesgo](../predictive/project_overview.md#curva-acumulada-de-riesgo)
+  for the curve's full documented behavior
 
 ### Version 2.2.0 (July 2026)
 - **Predictivo Module**: New Predictive section with per-component (Motor, Transmisión) failure-mode

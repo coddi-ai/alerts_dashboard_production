@@ -36,6 +36,13 @@ USERS: Dict[str, Dict[str, any]] = {
         "clients": ["CDA"],  # Only CDA data
         "role": "client"
     },
+    # cda_user_test
+    'cda_tester': {
+        "password": hash_password("CdA.2026"),  # Change in production!
+        "name": "CDA Tester",
+        "clients": ["CDA"],  # Only CDA data
+        "role": "client"
+    },
     "emin_user": {
         "password": hash_password("Emin.2026"),  # Change in production!
         "name": "EMIN",

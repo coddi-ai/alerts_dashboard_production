@@ -63,7 +63,7 @@ venv\Scripts\activate  # Windows
 # source venv/bin/activate  # Linux/Mac
 
 # Instalar dependencias
-pip install -r requirements.txt
+
 
 # Ejecutar
 python -m dashboard.app

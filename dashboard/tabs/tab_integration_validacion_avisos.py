@@ -5,6 +5,17 @@ in the navbar). Right panel: read-only Coddi fields + editable ERP fields.
 Reactive logic lives in dashboard/callbacks/integration_avisos_callbacks.py —
 client comes from the global selector, not a page-local dropdown (this page's
 content is identical across clients, only the data feeding it changes).
+
+The rejection collapse (erp-validator-rejection-collapse + its textarea/button)
+and the two result alerts (erp-validator-success-alert / -error-alert) live in
+the STATIC part of create_layout() rather than inside create_detail_form()'s
+per-warning content, even though they're only meaningful once a warning is
+selected. _handle_action's Outputs are those two alerts; when they only came
+into existence dynamically (nested inside create_detail_form's returned tree),
+State reads inside that callback (client-selector, user-info-store) came back
+empty in practice — every other callback on this page has outputs that exist
+in the initial static layout and doesn't show this. Keeping these elements
+static (just visually inert until a warning is selected) sidesteps it.
 """
 from __future__ import annotations
 
@@ -193,11 +204,34 @@ def _erp_fields_section(warning: Warning) -> html.Div:
     )
 
 
+def _operator_section() -> html.Div:
+    """Who's performing the action — required for both approve and reject.
+    Anyone who can see this tab can act; there's no separate identity check
+    beyond typing a name here, since it's recorded as `validated_by`."""
+    return html.Div(
+        [
+            html.Label(
+                [html.I(className="fas fa-user me-1"), " Operador (obligatorio)"],
+                className="fw-bold mb-1 mt-4",
+            ),
+            dbc.Input(
+                id="erp-validator-field-operator",
+                type="text",
+                placeholder="Ingrese su nombre...",
+            ),
+        ]
+    )
+
+
 def create_detail_form(warning: Warning) -> html.Div:
+    """Per-warning content only. The rejection collapse and result alerts are
+    intentionally NOT here — they live in the static create_layout() tree
+    instead (see the module docstring note on _handle_action's outputs)."""
     return html.Div(
         [
             _context_section(warning),
             _erp_fields_section(warning),
+            _operator_section(),
             html.Div(
                 [
                     dbc.Button(
@@ -216,35 +250,6 @@ def create_detail_form(warning: Warning) -> html.Div:
                     ),
                 ],
                 className="d-flex mt-4 pt-3 border-top",
-            ),
-            dbc.Collapse(
-                [
-                    html.Label(
-                        [html.I(className="fas fa-comment-alt me-1"), " Motivo de rechazo"],
-                        className="fw-bold mb-1 mt-3 text-danger",
-                    ),
-                    dbc.Textarea(
-                        id="erp-validator-field-rejection",
-                        rows=2,
-                        placeholder="Indique por qué se rechaza este aviso...",
-                        className="border-danger",
-                    ),
-                    dbc.Button(
-                        "Confirmar Rechazo", id="erp-validator-btn-confirm-reject", color="danger", className="mt-2"
-                    ),
-                ],
-                id="erp-validator-rejection-collapse",
-                is_open=False,
-            ),
-            dbc.Alert(
-                id="erp-validator-success-alert",
-                color="success",
-                is_open=False,
-                dismissable=True,
-                className="mt-3",
-            ),
-            dbc.Alert(
-                id="erp-validator-error-alert", color="danger", is_open=False, dismissable=True, className="mt-3"
             ),
         ]
     )
@@ -305,13 +310,56 @@ def create_layout() -> dbc.Container:
                                     className="bg-light",
                                 ),
                                 dbc.CardBody(
-                                    dcc.Loading(
-                                        html.Div(
-                                            id="erp-validator-form-content",
-                                            children=create_detail_placeholder("Seleccione un aviso pendiente."),
+                                    [
+                                        dcc.Loading(
+                                            html.Div(
+                                                id="erp-validator-form-content",
+                                                children=create_detail_placeholder("Seleccione un aviso pendiente."),
+                                            ),
+                                            type="circle",
                                         ),
-                                        type="circle",
-                                    )
+                                        # Static (present from initial layout, not nested inside
+                                        # create_detail_form's dynamic children) — see module docstring.
+                                        dbc.Collapse(
+                                            [
+                                                html.Label(
+                                                    [
+                                                        html.I(className="fas fa-comment-alt me-1"),
+                                                        " Motivo de rechazo",
+                                                    ],
+                                                    className="fw-bold mb-1 mt-3 text-danger",
+                                                ),
+                                                dbc.Textarea(
+                                                    id="erp-validator-field-rejection",
+                                                    rows=2,
+                                                    placeholder="Indique por qué se rechaza este aviso...",
+                                                    className="border-danger",
+                                                ),
+                                                dbc.Button(
+                                                    "Confirmar Rechazo",
+                                                    id="erp-validator-btn-confirm-reject",
+                                                    color="danger",
+                                                    className="mt-2",
+                                                ),
+                                            ],
+                                            id="erp-validator-rejection-collapse",
+                                            is_open=False,
+                                        ),
+                                        dbc.Alert(
+                                            id="erp-validator-success-alert",
+                                            color="success",
+                                            is_open=False,
+                                            dismissable=True,
+                                            className="mt-3",
+                                        ),
+                                        dbc.Alert(
+                                            id="erp-validator-error-alert",
+                                            color="danger",
+                                            is_open=False,
+                                            dismissable=True,
+                                            className="mt-3",
+                                        ),
+                                    ]
                                 ),
                             ],
                             className="shadow-sm h-100",

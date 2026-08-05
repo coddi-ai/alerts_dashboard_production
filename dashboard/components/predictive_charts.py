@@ -5,6 +5,16 @@ import plotly.graph_objects as go
 import pandas as pd
 
 
+def _oil_date_col(df) -> str:
+    """
+    Nombre de la columna de fecha de las muestras de aceite.
+    CDA usa 'sampleDate'; Capstone no la tiene y usa 'Fecha' para todo.
+    """
+    if "sampleDate" in df.columns:
+        return "sampleDate"
+    return "Fecha"
+
+
 def create_fleet_scatter(df_latest, selected_unit, status_colors, p80_30d):
     """
     Crear scatter de ranking vs ranking_acum_90d con todos los equipos.
@@ -291,31 +301,32 @@ def create_oil_timeseries_90d(df_unit, variables, oil_labels, oil_thresholds=Non
 
     if not variables:
         return None
-    
-    df_sorted = df_unit.sort_values("sampleDate")
+
+    date_col = _oil_date_col(df_unit)
+    df_sorted = df_unit.sort_values(date_col)
     if df_sorted.empty:
         return None
     
     # Calcular ventana de 90 días
-    fecha_fin = pd.to_datetime(df_sorted["sampleDate"].max())
+    fecha_fin = pd.to_datetime(df_sorted[date_col].max())
     fecha_inicio_90d = fecha_fin - pd.Timedelta(days=90)
     
-    # Identificar últimas 3 muestras REALES (deduplicar por sampleDate)
-    muestras_reales = df_sorted.drop_duplicates(subset=["sampleDate"], keep="last").sort_values("sampleDate")
+    # Identificar últimas 3 muestras REALES (deduplicar por fecha de muestra)
+    muestras_reales = df_sorted.drop_duplicates(subset=[date_col], keep="last").sort_values(date_col)
     
     if len(muestras_reales) >= 3:
         # Tomar las últimas 3 muestras reales
         ultimas_3_muestras = muestras_reales.tail(3)
-        fecha_inicio_3_muestras = pd.to_datetime(ultimas_3_muestras["sampleDate"].min())
+        fecha_inicio_3_muestras = pd.to_datetime(ultimas_3_muestras[date_col].min())
         
         # Ventana final: lo que cubra más hacia atrás
         fecha_inicio = min(fecha_inicio_90d, fecha_inicio_3_muestras)
     else:
         # Si hay menos de 3 muestras, usar todas las disponibles
-        fecha_inicio = pd.to_datetime(muestras_reales["sampleDate"].min()) if not muestras_reales.empty else fecha_inicio_90d
+        fecha_inicio = pd.to_datetime(muestras_reales[date_col].min()) if not muestras_reales.empty else fecha_inicio_90d
     
     # Filtrar datos con la ventana expandida
-    df_filtered = df_sorted[pd.to_datetime(df_sorted["sampleDate"]) >= fecha_inicio]
+    df_filtered = df_sorted[pd.to_datetime(df_sorted[date_col]) >= fecha_inicio]
     
     if df_filtered.empty:
         return None
@@ -328,11 +339,11 @@ def create_oil_timeseries_90d(df_unit, variables, oil_labels, oil_thresholds=Non
         if var not in df_filtered.columns:
             continue
         
-        series = df_filtered[["sampleDate", var]].dropna(subset=[var])
+        series = df_filtered[[date_col, var]].dropna(subset=[var])
         if series.empty:
             continue
         
-        x_dates = pd.to_datetime(series["sampleDate"])
+        x_dates = pd.to_datetime(series[date_col])
         y_values = series[var].astype(float)
         
         # Main trace: values
@@ -413,18 +424,19 @@ def create_oil_timeseries(df_unit, variables, oil_labels):
     if not variables:
         return None
 
+    date_col = _oil_date_col(df_unit)
     fig = go.Figure()
 
     for var in variables:
         if var not in df_unit.columns:
             continue
 
-        series = df_unit[["sampleDate", var]].dropna(subset=[var])
+        series = df_unit[[date_col, var]].dropna(subset=[var])
         if series.empty:
             continue
 
         fig.add_trace(go.Scatter(
-            x=pd.to_datetime(series["sampleDate"]),
+            x=pd.to_datetime(series[date_col]),
             y=series[var].astype(float),
             mode="lines+markers",
             name=oil_labels.get(var, var),

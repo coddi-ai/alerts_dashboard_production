@@ -35,6 +35,7 @@ from dashboard.components.alerts_charts import (
     create_gps_route_map_golden,
     create_context_kpis_cards_golden
 )
+from dashboard.components.oil_charts import build_oil_time_series_grid
 from dashboard.components.alerts_tables import (
     create_alerts_datatable,
     create_alerts_report_table,
@@ -987,26 +988,47 @@ def create_oil_evidence_section(alert_row: pd.Series, client: str) -> html.Div:
         settings = get_settings()
         limits_file = settings.get_stewart_limits_path(client)
         limits = load_stewart_limits(limits_file) if limits_file.exists() else None
-        
+
         if not limits:
             return html.Div([
                 dbc.Alert("Límites Stewart no disponibles", color="warning")
             ])
-        
+
         # Get limits for this component
         machine = oil_report.get('machineName', '')
         component_normalized = oil_report.get('componentNameNormalized', oil_report.get('componentName', ''))
-        
+
         if client not in limits or machine not in limits[client] or component_normalized not in limits[client][machine]:
             return html.Div([
                 dbc.Alert(f"Límites no disponibles para {machine}/{component_normalized}", color="warning")
             ])
-        
+
         comp_limits = limits[client][machine][component_normalized]
-        
+
+        # Lower Stewart limits (used by the shared Tendencia grid for
+        # Viscocidad/Aditivos lower-bound lines, same as Monitoring > Oil > Details)
+        limits_inferior_file = settings.get_stewart_limits_inferior_path(client)
+        limits_inferior = load_stewart_limits(limits_inferior_file) if limits_inferior_file.exists() else None
+        comp_limits_inferior = {}
+        if limits_inferior:
+            comp_limits_inferior = limits_inferior.get(client, {}).get(machine, {}).get(component_normalized, {})
+
         # Get sample's oil hour range for v2.3 stratified limits
         sample_oil_hour_range = oil_report.get('oilHourRange', 'UNKNOWN')
         logger.info(f"Sample oilHourRange: {sample_oil_hour_range}")
+
+        # ── Tendencia: same equipment/component history, shared grid builder ──
+        unit_id = oil_report.get('unitId')
+        oil_component_name = oil_report.get('componentName')
+        tendencia_history = oil_classified[
+            (oil_classified['unitId'] == unit_id) & (oil_classified['componentName'] == oil_component_name)
+        ].copy()
+        if not tendencia_history.empty:
+            tendencia_history['sampleDate'] = pd.to_datetime(tendencia_history['sampleDate'])
+            tendencia_history = tendencia_history.sort_values('sampleDate')
+        tendencia_content = build_oil_time_series_grid(
+            tendencia_history, comp_limits, comp_limits_inferior, sample_oil_hour_range
+        )
         
         # Helper function to get stratified limits with fallback (v2.3)
         def get_essay_limits(essay_name, oil_hour_range):
@@ -1312,7 +1334,7 @@ def create_oil_evidence_section(alert_row: pd.Series, client: str) -> html.Div:
                 dbc.Col([
                     html.H4([
                         html.I(className="fas fa-flask me-2"),
-                        "Evidencia de Tribología"
+                        "Análisis de Aceite"
                     ], className="text-warning mb-2"),
                     html.Div([
                         dbc.Badge(
@@ -1343,7 +1365,20 @@ def create_oil_evidence_section(alert_row: pd.Series, client: str) -> html.Div:
                     ], className="mb-3")
                 ])
             ]),
-            html.Div(charts_and_tables)
+            dcc.Tabs(
+                id='alert-oil-view-selector',
+                value='tendencia',
+                children=[
+                    dcc.Tab(label='  Tendencia', value='tendencia',
+                            className='custom-tab', selected_className='custom-tab--selected'),
+                    dcc.Tab(label='  Último Ensayo', value='ultimo_ensayo',
+                            className='custom-tab', selected_className='custom-tab--selected'),
+                ],
+                className='mb-3'
+            ),
+            html.Div(id='alert-oil-tendencia-view', children=[tendencia_content]),
+            html.Div(id='alert-oil-radar-view', children=[html.Div(charts_and_tables)],
+                     style={'display': 'none'}),
         ], className="mb-5")
     
     except Exception as e:
@@ -1353,6 +1388,19 @@ def create_oil_evidence_section(alert_row: pd.Series, client: str) -> html.Div:
         return html.Div([
             dbc.Alert(f"Error al cargar evidencia de tribología: {str(e)}", color="danger")
         ])
+
+
+@callback(
+    Output('alert-oil-tendencia-view', 'style'),
+    Output('alert-oil-radar-view', 'style'),
+    Input('alert-oil-view-selector', 'value'),
+    prevent_initial_call=True,
+)
+def toggle_oil_evidence_view(view):
+    """Switch between the Tendencia grid and the Último Ensayo radar without re-rendering either."""
+    if view == 'ultimo_ensayo':
+        return {'display': 'none'}, {'display': 'block'}
+    return {'display': 'block'}, {'display': 'none'}
 
 
 def create_maintenance_evidence_section(alert_row: pd.Series, client: str) -> html.Div:
