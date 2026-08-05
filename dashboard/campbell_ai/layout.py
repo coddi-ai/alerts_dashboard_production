@@ -22,9 +22,17 @@ ACCENT_BORDER = "rgba(52, 152, 219, 0.22)"
 
 # Background of the user's own chat bubble. Change this one value to test other
 # colors — it defaults to the sidebar's blue-gray (dashboard/layout.py's left_menu).
-USER_BUBBLE_COLOR = "#2c3e50"
+USER_BUBBLE_COLOR = "#2290ff"
 
-CAMPBELL_AI_VERSION = "1.1.0"
+# How the "Conversaciones anteriores" panel renders. "inline" (default) is a
+# collapsible card above the chat, in the normal document flow. "sidebar" is a
+# collapsible off-canvas drawer (dbc.Offcanvas) that slides in from the edge of
+# the screen without pushing the chat down. Change this one value to switch —
+# dashboard/campbell_ai/callbacks.py's toggle_conversation_history reads it too,
+# so both stay in sync automatically.
+CONVERSATION_HISTORY_LAYOUT = "sidebar"  # "inline" | "sidebar"
+
+CAMPBELL_AI_VERSION = "1.1.3"
 
 ALERT_SUGGESTIONS = {
     "weekly-summary": (
@@ -236,6 +244,71 @@ def _conversation_history_panel() -> dbc.Card:
     )
 
 
+def _conversation_history_sidebar() -> list:
+    """Off-canvas (collapsible sidebar) variant of the conversation history panel.
+
+    Enabled by setting CONVERSATION_HISTORY_LAYOUT = "sidebar" above. Same New /
+    Refresh / list controls as _conversation_history_panel(), just in a drawer
+    that overlays the page instead of a card in the document flow.
+    """
+    trigger = dbc.Button(
+        [
+            html.I(className="fas fa-clock-rotate-left me-2"),
+            "Conversaciones anteriores",
+        ],
+        id="campbell-ai-history-toggle",
+        color="light",
+        size="sm",
+        n_clicks=0,
+        className="mb-3",
+        style={
+            "border": f"1px solid {ACCENT_BORDER}",
+            "fontWeight": "600",
+            "color": BRAND_TITLE,
+        },
+    )
+    offcanvas = dbc.Offcanvas(
+        [
+            html.Div(
+                [
+                    dbc.Button(
+                        [html.I(className="fas fa-plus me-2"), "Nueva"],
+                        id="campbell-ai-new-conversation",
+                        color="link",
+                        size="sm",
+                        n_clicks=0,
+                        className="text-decoration-none",
+                        title="Iniciar una conversación nueva",
+                    ),
+                    dbc.Button(
+                        html.I(className="fas fa-rotate-right me-2"),
+                        id="campbell-ai-refresh-conversations",
+                        color="link",
+                        size="sm",
+                        n_clicks=0,
+                        className="text-muted text-decoration-none",
+                        title="Actualizar la lista",
+                    ),
+                ],
+                className="d-flex align-items-center gap-1 mb-3",
+            ),
+            html.Div(id="campbell-ai-conversation-list"),
+        ],
+        id="campbell-ai-history-offcanvas",
+        title="Conversaciones anteriores",
+        is_open=False,
+        placement="end",
+    )
+    return [trigger, offcanvas]
+
+
+def _conversation_history_block() -> list:
+    """The conversation-history UI in whichever layout CONVERSATION_HISTORY_LAYOUT picks."""
+    if CONVERSATION_HISTORY_LAYOUT == "sidebar":
+        return _conversation_history_sidebar()
+    return [_conversation_history_panel()]
+
+
 def render_conversation_list(
     conversations: list[dict] | None, active_session_id: str | None = None
 ) -> list:
@@ -363,6 +436,9 @@ def create_campbell_ai_layout(user_data: dict | None = None) -> html.Div:
                 disabled=True,
                 n_intervals=0,
             ),
+            # Dummy clientside-callback target: scrolling the chat to its newest
+            # message is a pure DOM side effect with nothing meaningful to store.
+            dcc.Store(id="campbell-ai-scroll-trigger", storage_type="memory", data=0),
             dbc.Row(
                 dbc.Col(
                     [
@@ -405,7 +481,7 @@ def create_campbell_ai_layout(user_data: dict | None = None) -> html.Div:
                             dismissable=True,
                             className="mt-3 mb-0 campbell-ai-alert",
                         ),
-                        _conversation_history_panel(),
+                        *_conversation_history_block(),
                         dbc.Card(
                             [
                                 dbc.CardHeader(
@@ -469,6 +545,7 @@ def create_campbell_ai_layout(user_data: dict | None = None) -> html.Div:
                                                 ),
                                                 html.Div(id="campbell-ai-messages"),
                                             ],
+                                            id="campbell-ai-scroll-container",
                                             style={
                                                 "minHeight": "250px",
                                                 "maxHeight": "58vh",
@@ -539,6 +616,37 @@ def _render_visualizations(message: dict) -> list[html.Div]:
         figure = artifact.get("figure")
         if not isinstance(figure, dict):
             continue
+        description = str(artifact.get("description", ""))
+        # The backend archive downsamples each trace's point count once a
+        # conversation is persisted (see persistence.py's _downsample_figure) but
+        # keeps a real, interactive figure — so this stays the only branch needed.
+        # A figure can still arrive genuinely empty from an older archive entry
+        # written before that change (or any other legitimate failure upstream);
+        # say so plainly instead of rendering an empty box.
+        if not figure.get("data"):
+            charts.append(
+                html.Div(
+                    [
+                        html.I(
+                            className="fas fa-chart-simple me-2",
+                            style={"color": BRAND_MUTED},
+                        ),
+                        html.Span(
+                            "El gráfico de este mensaje no se conservó al archivar la "
+                            "conversación. Vuelve a pedirlo si lo necesitas.",
+                            style={"fontSize": "0.82rem", "color": BRAND_MUTED},
+                        ),
+                    ],
+                    className="mt-3 d-flex align-items-center",
+                    style={
+                        "background": "#f6f8fa",
+                        "border": f"1px solid {BRAND_GRID}",
+                        "borderRadius": "12px",
+                        "padding": "0.75rem 1rem",
+                    },
+                )
+            )
+            continue
         charts.append(
             html.Div(
                 [
@@ -548,7 +656,7 @@ def _render_visualizations(message: dict) -> list[html.Div]:
                         style={"width": "100%"},
                     ),
                     html.P(
-                        str(artifact.get("description", "")),
+                        description,
                         className="mb-0 px-2",
                         style={
                             "fontSize": "0.78rem",
@@ -749,10 +857,15 @@ def render_chat_history(
 
 
 def _streaming_placeholder() -> html.Div:
-    """Assistant bubble the stream script writes incoming text into.
+    """Assistant bubble shown while a message is pending, inside the chat window.
 
-    Rendered only while a message is pending. It shows plain text rather than
-    Markdown; the canonical Markdown render arrives with the final Dash update.
+    `campbell_ai_stream.js`'s setPlaceholderText() does `node.textContent = ...`,
+    which replaces whatever is here — including this default spinner — the
+    moment real streamed text (or a status update) arrives. When streaming is
+    disabled (or the request hasn't reached the backend yet), nothing ever calls
+    that function, so without a visible default here the bubble rendered but
+    stayed empty: present in the DOM, but indistinguishable from nothing to the
+    user. The spinner/label below is what fills that gap.
     """
     return html.Div(
         [
@@ -766,8 +879,19 @@ def _streaming_placeholder() -> html.Div:
                 },
             ),
             html.Div(
+                [
+                    html.I(
+                        className="fas fa-circle-notch fa-spin me-2",
+                        style={"color": ACCENT},
+                    ),
+                    html.Span("Pensando…"),
+                ],
                 id="campbell-ai-stream-placeholder",
-                style={"whiteSpace": "pre-wrap", "minHeight": "1.2rem"},
+                style={
+                    "whiteSpace": "pre-wrap",
+                    "minHeight": "1.2rem",
+                    "color": BRAND_MUTED,
+                },
             ),
         ],
         style={

@@ -33,6 +33,14 @@ Llama a `visualization_analysis`. Los gráficos en el chat están habilitados. S
 interpretación, utiliza el resumen que entregue ese agente y, cuando sea necesario, consulta
 `data_analysis` o `technical_analysis`. Nunca escribas código para construir la figura.
 
+**Varios gráficos en una misma respuesta están permitidos.** Si el usuario pide más de una figura
+distinta (equipos, dimensiones, periodos o tipos de gráfico distintos — "muéstrame el estado de la
+flota y también el ranking de alertas", "grafica X para T_15 y Y para T_18"), llama a
+`visualization_analysis` una vez por cada figura que haga falta, describiendo en cada llamada
+solo esa figura. No comprimas varias solicitudes distintas en una sola llamada esperando que el
+agente de visualización las separe, y no te limites a generar una sola figura cuando el usuario
+pidió explícitamente varias.
+
 Cuentan como solicitud de gráfico, no de datos: gráfico, figura, visualización, curva, tendencia
 visual, **radar**, **histograma**, **treemap**, **mapa de calor**, **box plot**, **dispersión**,
 **scatter**, **indicador**, **gauge**, **medidor**, **semáforo**, Pareto, torta, barras, área, y

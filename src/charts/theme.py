@@ -114,15 +114,16 @@ def apply_dashboard_theme(
     height: int = 410,
     show_legend: bool = False,
 ) -> go.Figure:
-    """Apply the shared dashboard look to a Campbell AI figure."""
-    heading = title
-    if subtitle:
-        heading = (
-            f"{title}<br><span style='font-size:11px;color:{BRAND_MUTED}'>{subtitle}</span>"
-        )
+    """Apply the shared dashboard look to a Campbell AI figure.
+
+    `subtitle` is accepted (many call sites still pass one, e.g. a resolved date
+    window) but deliberately not rendered — chart subtitles were removed from the
+    UI, and dropping the parameter would mean editing every call site instead of
+    this one place.
+    """
     figure.update_layout(
         title={
-            "text": heading,
+            "text": title,
             "font": {"size": 16, "color": BRAND_TITLE, "family": FONT_FAMILY},
             "x": 0.01,
             "xanchor": "left",
@@ -130,7 +131,7 @@ def apply_dashboard_theme(
         font={"family": FONT_FAMILY, "size": 12, "color": BRAND_TITLE},
         paper_bgcolor=BRAND_SURFACE,
         plot_bgcolor=BRAND_SURFACE,
-        margin={"l": 60, "r": 55, "t": 78 if subtitle else 62, "b": 80},
+        margin={"l": 60, "r": 55, "t": 62, "b": 80},
         height=height,
         showlegend=show_legend,
         legend={

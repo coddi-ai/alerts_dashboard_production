@@ -22,6 +22,7 @@ from dashboard.campbell_ai.callbacks import (
 from dashboard.campbell_ai.layout import (
     ALERT_SUGGESTIONS,
     CAMPBELL_AI_VERSION,
+    CONVERSATION_HISTORY_LAYOUT,
     _feedback_controls,
     _initial_company_state,
     create_campbell_ai_layout,
@@ -160,7 +161,8 @@ def test_the_view_reports_the_current_version():
     components = list(_walk(create_campbell_ai_layout()))
     visible_text = " ".join(item for item in components if isinstance(item, str))
 
-    assert CAMPBELL_AI_VERSION == "1.1.0"
+    # The exact version string isn't the point (it changes freely); what must
+    # hold is that whatever CAMPBELL_AI_VERSION says is what the view shows.
     assert f"Campbell AI v{CAMPBELL_AI_VERSION}" in visible_text
 
 
@@ -205,9 +207,16 @@ def test_the_history_panel_offers_listing_opening_and_starting_over():
         if isinstance(getattr(item, "id", None), str)
     }
 
+    # The panel's own container id depends on CONVERSATION_HISTORY_LAYOUT ("inline"
+    # -> dbc.Collapse, "sidebar" -> dbc.Offcanvas); the controls inside it do not.
+    panel_id = (
+        "campbell-ai-history-offcanvas"
+        if CONVERSATION_HISTORY_LAYOUT == "sidebar"
+        else "campbell-ai-history-collapse"
+    )
     assert {
         "campbell-ai-history-toggle",
-        "campbell-ai-history-collapse",
+        panel_id,
         "campbell-ai-conversation-list",
         "campbell-ai-new-conversation",
         "campbell-ai-refresh-conversations",

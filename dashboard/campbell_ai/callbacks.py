@@ -13,6 +13,7 @@ from dashboard.auth import resolve_authenticated_username
 from dashboard.campbell_ai.client import CampbellAPIClient, CampbellAPIClientError
 from dashboard.campbell_ai.layout import (
     ALERT_SUGGESTIONS,
+    CONVERSATION_HISTORY_LAYOUT,
     render_chat_history,
     render_conversation_list,
     service_error_content,
@@ -22,6 +23,15 @@ from dashboard.campbell_ai.stream import streaming_enabled
 
 
 logger = logging.getLogger(__name__)
+
+# Both dbc.Collapse (inline) and dbc.Offcanvas (sidebar) expose "is_open", so the
+# same toggle callback works for either — only the target id depends on which
+# layout.CONVERSATION_HISTORY_LAYOUT picked at import time.
+_HISTORY_PANEL_ID = (
+    "campbell-ai-history-offcanvas"
+    if CONVERSATION_HISTORY_LAYOUT == "sidebar"
+    else "campbell-ai-history-collapse"
+)
 
 
 def _company_id_from_state(company_state) -> str | None:
@@ -412,11 +422,6 @@ def register_campbell_ai_callbacks(app: dash.Dash) -> None:
         State("campbell-ai-history-store", "data"),
         State("campbell-ai-company-store", "data"),
         prevent_initial_call=True,
-        running=[
-            (Output("campbell-ai-send", "disabled"), True, False),
-            (Output("campbell-ai-input", "disabled"), True, False),
-            (Output("campbell-ai-clear", "disabled"), True, False),
-        ],
     )
     def process_pending_message(pending, session_id, history, session_company):
         if not isinstance(pending, dict) or not pending.get("message"):
@@ -558,16 +563,38 @@ def register_campbell_ai_callbacks(app: dash.Dash) -> None:
     @app.callback(
         Output("campbell-ai-send", "disabled", allow_duplicate=True),
         Output("campbell-ai-input", "disabled", allow_duplicate=True),
+        Output("campbell-ai-clear", "disabled", allow_duplicate=True),
         Output("campbell-ai-input", "placeholder"),
         Input("campbell-ai-failure-store", "data"),
+        Input("campbell-ai-pending-message-store", "data"),
         prevent_initial_call=True,
     )
-    def gate_composer(failure):
-        """Block composing while the service cannot answer, and say why."""
+    def gate_composer(failure, pending):
+        """Block composing while the service cannot answer, or a message is in flight.
+
+        This is the *only* place that disables the composer. It used to share the
+        job with process_pending_message's `running=[...]` clause, which disabled
+        the same Outputs for the duration of that one callback's execution — but
+        `running=` can't help while a message streams, since that callback exits
+        via PreventUpdate almost instantly for a streamed pending message, and
+        worse, its own "finished, re-enable" write (queued the instant it starts)
+        can land at the client *after* this callback's "disabled" write, silently
+        re-enabling the composer while the request is still running. Judging
+        campbell-ai-pending-message-store's own lifecycle here — set when a
+        message starts, cleared to None only once it truly resolves, in both the
+        streamed and blocking paths — is a single source of truth with nothing
+        left to race it.
+        """
         kind = failure.get("kind") if isinstance(failure, dict) else None
-        if kind in _BLOCKING_FAILURES:
-            return True, True, "Campbell AI no está disponible en este momento"
-        return False, False, "Pregúntame sobre mantenimiento o solicita un gráfico…"
+        blocked = kind in _BLOCKING_FAILURES
+        in_flight = isinstance(pending, dict) and bool(pending.get("message"))
+        disabled = blocked or in_flight
+        placeholder = (
+            "Campbell AI no está disponible en este momento"
+            if blocked
+            else "Pregúntame sobre mantenimiento o solicita un gráfico…"
+        )
+        return disabled, disabled, disabled, placeholder
 
     @app.callback(
         Output("campbell-ai-messages", "children"),
@@ -582,6 +609,23 @@ def register_campbell_ai_callbacks(app: dash.Dash) -> None:
         if not history and kind in _BLOCKING_FAILURES:
             return [unavailable_placeholder(str(failure.get("title", "")))]
         return render_chat_history(history, feedback)
+
+    # Auto-scroll to the newest message, both for a message just sent and for a
+    # conversation just loaded (open_archived_conversation goes through the same
+    # history-store -> display_history -> campbell-ai-messages.children path).
+    # A pure DOM side effect, so the Output is a throwaway store nothing reads.
+    app.clientside_callback(
+        """
+        function(_children) {
+            var el = document.getElementById("campbell-ai-scroll-container");
+            if (el) { el.scrollTop = el.scrollHeight; }
+            return window.dash_clientside.no_update;
+        }
+        """,
+        Output("campbell-ai-scroll-trigger", "data"),
+        Input("campbell-ai-messages", "children"),
+        prevent_initial_call=True,
+    )
 
     # --- Streaming -------------------------------------------------------------
     # The browser reads the SSE proxy so text appears while the agents work. Dash
@@ -598,10 +642,15 @@ def register_campbell_ai_callbacks(app: dash.Dash) -> None:
     @app.callback(
         Output("campbell-ai-stream-poll", "disabled"),
         Input("campbell-ai-pending-message-store", "data"),
+        prevent_initial_call=True,
     )
     def toggle_stream_poll(pending):
-        """Poll only while a streamed message is in flight."""
-        return not (isinstance(pending, dict) and pending.get("stream"))
+        """Poll only while a streamed message is in flight.
+
+        Locking the composer for that same duration is gate_composer's job (see
+        its docstring for why both conditions have to live in one callback).
+        """
+        return not (isinstance(pending, dict) and bool(pending.get("stream")))
 
     app.clientside_callback(
         "function(_ticks) { return window.dash_clientside.campbellAiStream.collect(); }",
@@ -761,9 +810,9 @@ def register_campbell_ai_callbacks(app: dash.Dash) -> None:
     # expires, after leaving this tab, and after the service restarts.
 
     @app.callback(
-        Output("campbell-ai-history-collapse", "is_open"),
+        Output(_HISTORY_PANEL_ID, "is_open"),
         Input("campbell-ai-history-toggle", "n_clicks"),
-        State("campbell-ai-history-collapse", "is_open"),
+        State(_HISTORY_PANEL_ID, "is_open"),
         prevent_initial_call=True,
     )
     def toggle_conversation_history(_clicks, is_open):
@@ -809,6 +858,7 @@ def register_campbell_ai_callbacks(app: dash.Dash) -> None:
         Output("campbell-ai-status", "color", allow_duplicate=True),
         Output("campbell-ai-failure-store", "data", allow_duplicate=True),
         Output("campbell-ai-feedback-store", "data", allow_duplicate=True),
+        Output(_HISTORY_PANEL_ID, "is_open", allow_duplicate=True),
         Input({"type": "campbell-ai-open-conversation", "session_id": ALL}, "n_clicks"),
         State("campbell-ai-company-store", "data"),
         prevent_initial_call=True,
@@ -839,6 +889,7 @@ def register_campbell_ai_callbacks(app: dash.Dash) -> None:
                 "danger",
                 _failure_from_client_error(exc),
                 no_update,
+                no_update,
             )
         return (
             payload.get("session_id") or session_id,
@@ -849,6 +900,9 @@ def register_campbell_ai_callbacks(app: dash.Dash) -> None:
             None,
             # Ratings belong to the thread that was open; the reopened one has its own.
             {},
+            # Picking a conversation is the intent to read it, not to keep browsing
+            # the list — close the panel so it doesn't cover the chat that just loaded.
+            False,
         )
 
     @app.callback(

@@ -470,6 +470,32 @@ class CampbellAgentRuntime:
             )
 
         @function_tool
+        def query_telemetry_series(
+            unit_id: str,
+            signals: str = "",
+            days: int = 30,
+            start_date: str = "",
+            end_date: str = "",
+        ) -> str:
+            """Continuous raw telemetry series for a unit, any signal, any date window.
+
+            Unlike query_alert_signals/alert_sensor_trend (scoped to one alert's own
+            sampling window), reads the raw continuous source so the agent can report
+            on or plot a signal the user asks about even when it did not trigger an
+            alert. days is capped at 90; use start_date/end_date for a longer window.
+            """
+            return safe_data_call(
+                "query_telemetry_series",
+                repository.query_telemetry_series,
+                client,
+                unit_id=unit_id,
+                signals=signals,
+                days=days,
+                start_date=start_date,
+                end_date=end_date,
+            )
+
+        @function_tool
         def query_maintenance_summary(unit_id: str = "", limit: int = 10) -> str:
             """Weekly written maintenance summary per equipment."""
             return safe_data_call(
@@ -577,6 +603,7 @@ class CampbellAgentRuntime:
             query_oil_components,
             query_telemetry_health,
             query_telemetry_components,
+            query_telemetry_series,
             query_predictive_risk,
         ]
         data_analyst = Agent(
@@ -598,13 +625,25 @@ class CampbellAgentRuntime:
         def render_dashboard_chart(
             chart_id: str,
             unit_id: str = "",
+            alert_id: str = "",
+            signal: str = "",
             days: int = 0,
+            start_date: str = "",
+            end_date: str = "",
             top_n: int = 0,
         ) -> str:
             """Render a named dashboard chart, reproducing the dashboard's own visual."""
             parameters = {
                 key: value
-                for key, value in (("unit_id", unit_id), ("days", days), ("top_n", top_n))
+                for key, value in (
+                    ("unit_id", unit_id),
+                    ("alert_id", alert_id),
+                    ("signal", signal),
+                    ("days", days),
+                    ("start_date", start_date),
+                    ("end_date", end_date),
+                    ("top_n", top_n),
+                )
                 if value
             }
             try:
@@ -707,7 +746,9 @@ class CampbellAgentRuntime:
             result = await Runner.run(
                 starting_agent=visualization_analyst,
                 input=f"Solicitud de gráfico: {question}\nContexto: {context}",
-                max_turns=5,
+                # Room for more than one chart-building call per request (a single
+                # question can legitimately ask for several distinct figures).
+                max_turns=8,
             )
             return str(result.final_output)
 

@@ -576,9 +576,18 @@ class DashboardDataRepository:
         }
         for name, _, column in applied:
             if column and column in frame.columns:
-                hints["available_values"][name] = list(
-                    self._distribution(frame, column, top=12)
-                )
+                values = list(self._distribution(frame, column, top=12))
+                hints["available_values"][name] = values
+                if name == "trigger_var":
+                    # These are raw signal codes; translate them the same way the
+                    # happy-path fields do, so a filter-hint retry doesn't leak an
+                    # untranslated code into the agent's answer either.
+                    hints["available_values_labels"] = {
+                        "trigger_var": {
+                            code: self._translate_signal_list(code) or code
+                            for code in values
+                        }
+                    }
         return hints
 
     def _filter_unit(
@@ -1385,6 +1394,7 @@ class DashboardDataRepository:
             available = self.load("alerts_detail", client)
             if unit_id and unit_col:
                 available = self._filter_unit(available, unit_col, unit_id)
+            available_triggers = list(self._distribution(available, trigger_col, top=15))
             return json.dumps(
                 {
                     "alerts_matched": 0,
@@ -1393,11 +1403,15 @@ class DashboardDataRepository:
                         "detail": (
                             "Sin filas de detalle para ese filtro. El identificador de union "
                             "es TelemetryID (no FusionID) y solo es unico dentro de un equipo. "
-                            "Reintenta con unit_id mas el nombre exacto de la senal."
+                            "Reintenta con unit_id mas el nombre exacto de la senal. "
+                            "available_triggers_labels trae el nombre en espanol de cada "
+                            "codigo listado en available_triggers."
                         ),
-                        "available_triggers": list(
-                            self._distribution(available, trigger_col, top=15)
-                        ),
+                        "available_triggers": available_triggers,
+                        "available_triggers_labels": {
+                            code: self._translate_signal_list(code) or code
+                            for code in available_triggers
+                        },
                     },
                 },
                 ensure_ascii=False,
@@ -1706,6 +1720,178 @@ class DashboardDataRepository:
             "contexto de operacion, no senales monitoreadas."
         )
         return json.dumps(summary, ensure_ascii=False, default=str)
+
+    # Columns that are operating context or position, not monitored signals.
+    _TELEMETRY_WIDE_EXCLUDED = {
+        "Unit", "Fecha", "Estado", "EstadoMaquina", "EstadoCarga",
+        "GPSLat", "GPSLon", "GPSElevation",
+    }
+
+    def _telemetry_wide_paths(self, client: str) -> list[Path]:
+        """Weekly telemetry files, one per ISO-ish week, unregistered in DATASETS
+        because they are a partitioned directory rather than a single file."""
+        normalized = normalize_client_id(client)
+        directory = (
+            self.data_root / "telemetry" / "silver" / normalized / "Telemetry_Wide_With_States"
+        )
+        if not directory.exists():
+            return []
+        return sorted(directory.glob("Week*Year*.parquet"))
+
+    def _telemetry_wide_frame(
+        self, client: str, start: pd.Timestamp, end: pd.Timestamp
+    ) -> pd.DataFrame:
+        """Concatenate the weekly files overlapping [start, end].
+
+        Filenames encode a locally-numbered week/year (not always the ISO week
+        boundary), so rather than compute exact week numbers from a date this reads
+        every file for the spanned years plus a one-year margin, then filters rows
+        by their real timestamp. A margin because a window near a year boundary can
+        touch a "week 1" file dated the following calendar year.
+        """
+        years = range(start.year - 1, end.year + 2)
+        candidates = [
+            path
+            for path in self._telemetry_wide_paths(client)
+            if any(f"Year{year}" in path.name for year in years)
+        ]
+        frames = []
+        for path in candidates:
+            try:
+                frame = pd.read_parquet(path)
+            except Exception:
+                continue
+            frames.append(frame)
+        if not frames:
+            return pd.DataFrame()
+        combined = pd.concat(frames, ignore_index=True)
+        date_col = self._resolve_column(combined, ("Fecha",))
+        if not date_col:
+            return pd.DataFrame()
+        combined[date_col] = pd.to_datetime(combined[date_col], errors="coerce")
+        return combined[(combined[date_col] >= start) & (combined[date_col] <= end)]
+
+    def query_telemetry_series(
+        self,
+        client: str,
+        unit_id: str,
+        signals: str = "",
+        days: int = 30,
+        start_date: str = "",
+        end_date: str = "",
+        max_signals: int = 4,
+    ) -> str:
+        """Continuous raw telemetry series for a unit, any signal, any date window.
+
+        Unlike alert_signal_series (scoped to one alert's own sampling window),
+        this reads the raw weekly telemetry source directly so the agent can plot
+        signals the user asks about even when none of them triggered an alert —
+        e.g. a signal related to, but not the cause of, a known problem.
+        """
+        if not unit_id:
+            raise CampbellDataError("query_telemetry_series requiere unit_id")
+        end = pd.Timestamp.now().normalize() + pd.Timedelta(days=1)
+        start = end - pd.Timedelta(days=self._clamp(days, 1, 90))
+        if start_date:
+            parsed = pd.to_datetime(start_date, errors="coerce")
+            if pd.notna(parsed):
+                start = parsed
+        if end_date:
+            parsed = pd.to_datetime(end_date, errors="coerce")
+            if pd.notna(parsed):
+                end = parsed + pd.Timedelta(days=1)
+        if start >= end:
+            raise CampbellDataError("start_date debe ser anterior a end_date")
+
+        frame = self._telemetry_wide_frame(client, start, end)
+        if frame.empty:
+            raise CampbellDataError(
+                "No hay telemetria cruda disponible para ese cliente o periodo"
+            )
+        unit_col = self._resolve_column(frame, ("Unit", "unit_id", "UnitId"))
+        date_col = self._resolve_column(frame, ("Fecha",))
+        if not unit_col or not date_col:
+            raise CampbellDataError("La fuente de telemetria no expone Unit o Fecha")
+        frame = self._filter_unit(frame, unit_col, unit_id)
+        if frame.empty:
+            raise CampbellDataError(
+                f"Sin telemetria cruda para el equipo {unit_id} en ese periodo"
+            )
+        frame = frame.sort_values(date_col)
+
+        catalogued = [
+            column
+            for column in frame.columns
+            if column not in self._TELEMETRY_WIDE_EXCLUDED
+            and pd.api.types.is_numeric_dtype(frame[column])
+            and frame[column].notna().any()
+        ]
+        by_folded = {self._fold(column): column for column in catalogued}
+        requested = [
+            item.strip() for item in signals.replace(";", ",").split(",") if item.strip()
+        ]
+        resolved = [(item, by_folded.get(self._fold(item))) for item in requested]
+        unknown = [item for item, match in resolved if match is None]
+        selected = [match for _, match in resolved if match is not None]
+        if requested and not selected:
+            raise CampbellDataError(
+                f"Ninguna de las senales solicitadas ({', '.join(requested)}) esta "
+                f"disponible. Disponibles: {', '.join(sorted(catalogued))}"
+            )
+        if not selected:
+            selected = catalogued[:1]
+        selected = list(dict.fromkeys(selected))[: max(1, min(int(max_signals), 6))]
+
+        panels: list[dict[str, Any]] = []
+        for signal in selected:
+            values = pd.to_numeric(frame[signal], errors="coerce")
+            mask = values.notna()
+            if not mask.any():
+                continue
+            panels.append(
+                {
+                    "signal": signal,
+                    "times": [stamp.isoformat() for stamp in frame.loc[mask, date_col]],
+                    "values": [float(value) for value in values[mask]],
+                    "upper": None,
+                    "lower": None,
+                }
+            )
+        if not panels:
+            raise CampbellDataError(
+                "Las senales seleccionadas no tienen valores capturados en ese periodo"
+            )
+
+        return json.dumps(
+            {
+                "unit_id": unit_id,
+                "window": {
+                    "start": frame[date_col].min().isoformat(),
+                    "end": frame[date_col].max().isoformat(),
+                },
+                "samples": int(len(frame)),
+                "signals_selected": selected,
+                "signals_selected_labels": [
+                    self._translate_signal_list(code) or code for code in selected
+                ],
+                "signals_available": catalogued,
+                "signals_available_labels": [
+                    self._translate_signal_list(code) or code for code in catalogued
+                ],
+                "signals_unknown": unknown,
+                "panels": panels,
+                "note": (
+                    "Serie continua de telemetria cruda para el periodo solicitado, "
+                    "independiente de cualquier alerta especifica: sirve para pedir "
+                    "senales adicionales a la que disparo una alerta. Usa las listas "
+                    "*_labels para nombrar cada senal en espanol. Esta fuente no "
+                    "publica limites (upper/lower); para el limite vigente durante "
+                    "una alerta usa alert_signal_series."
+                ),
+            },
+            ensure_ascii=False,
+            default=str,
+        )
 
     def query_maintenance_summary(
         self, client: str, unit_id: str = "", limit: int = 10

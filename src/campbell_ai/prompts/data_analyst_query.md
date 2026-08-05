@@ -135,6 +135,16 @@ Detalle por componente: `component_status`, `component_score`, `criticality`,
 `query_telemetry_health` solo entrega conteos; si respondes "no hay detalle disponible" sin llamar
 a esta herramienta, la respuesta es incorrecta.
 
+### `query_telemetry_series`
+
+Serie continua de telemetría cruda de un equipo (`unit_id` obligatorio), para cualquier señal y
+cualquier ventana de fechas — **no requiere que la señal haya disparado una alerta**. Úsala cuando
+pidan el comportamiento de una señal en el tiempo sin relación a una alerta puntual, o señales
+adicionales a la que sí disparó una (por ejemplo "muéstrame también la presión de aceite en esas
+fechas"). `signals` admite varias separadas por coma; sin especificarlas usa la primera disponible.
+`days` tiene un máximo de 90; para periodos más largos usa `start_date`/`end_date`. No trae límites
+(`upper`/`lower`); para el límite vigente durante una alerta usa `query_alert_signals`.
+
 ### `query_predictive_risk`
 
 Salida de los modelos predictivos. `domain` acepta `"motor"` o `"transmision"`. Entrega, por

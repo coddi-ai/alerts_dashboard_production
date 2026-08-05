@@ -174,7 +174,7 @@ def test_snapshot_keeps_messages_the_live_session_already_trimmed():
 
 
 def test_figures_are_not_copied_into_the_backup():
-    """A stored Plotly figure would dominate the archive and is reproducible."""
+    """An oversized Plotly figure is downsampled, not dropped, before archiving."""
     backend = MemoryBackend()
     archive = ConversationArchive([backend])
     messages = _exchange("grafica alertas", "Aquí está el gráfico.")
@@ -196,7 +196,9 @@ def test_figures_are_not_copied_into_the_backup():
 
     stored = backend.objects[archive.conversation_key(PRINCIPAL, "s1")]["conversation"]
     artifact = stored[1]["visualizations"][0]
-    assert artifact["figure"] == {}
+    # Still a real, interactive figure — just capped to a bounded point count
+    # instead of storing all 500 (or, unlike a live telemetry chart, 10k+) points.
+    assert len(artifact["figure"]["data"][0]["y"]) == 300
     # Identity and caption survive, so the answer still reads correctly.
     assert artifact["title"] == "Alertas por equipo"
 

@@ -53,6 +53,8 @@ ALLOWED_PARAMETERS: dict[str, type] = {
     "signal": str,
     "top_n": int,
     "days": int,
+    "start_date": str,
+    "end_date": str,
 }
 
 
@@ -718,6 +720,49 @@ class DashboardChartRegistry:
             ),
         }
 
+    def _telemetry_signal_trend(self, client: str, params: dict[str, Any]):
+        """Continuous telemetry series for a unit over a date window, any signal(s).
+
+        Complements alert_sensor_trend: that one is scoped to a single alert's own
+        sampling window, this reads the raw continuous source directly so the
+        agent can plot signals unrelated to any specific alert (issue: "telemetry
+        charts should be able to include variables other than the one alerted").
+        """
+        payload = json.loads(
+            self.repository.query_telemetry_series(
+                client,
+                unit_id=str(params.get("unit_id") or ""),
+                signals=str(params.get("signal") or ""),
+                days=int(params.get("days") or 30),
+                start_date=str(params.get("start_date") or ""),
+                end_date=str(params.get("end_date") or ""),
+            )
+        )
+        panels = [
+            {**panel, "label": signal_label(panel["signal"]) or panel["signal"]}
+            for panel in payload["panels"]
+        ]
+        window = payload["window"]
+        figure = build_signal_panels(
+            panels,
+            title=f"Telemetría de {payload['unit_id']}",
+            subtitle=f"{str(window['start'])[:10]} a {str(window['end'])[:10]}",
+        )
+        return figure, {
+            "unit_id": payload["unit_id"],
+            "samples": payload["samples"],
+            "window": window,
+            "signals_plotted": payload["signals_selected"],
+            "signals_available": payload["signals_available"],
+            "signals_unknown": payload["signals_unknown"],
+            "note": (
+                "Serie continua de telemetría cruda, independiente de cualquier "
+                "alerta específica. No hay banda de límites porque esta fuente no "
+                "los publica; para el límite vigente durante una alerta usa "
+                "alert_sensor_trend."
+            ),
+        }
+
     # ---------------------------------------------------------------- catalogue
 
     def definitions(self) -> tuple[ChartDefinition, ...]:
@@ -1048,6 +1093,28 @@ CHART_DEFINITIONS: tuple[ChartDefinition, ...] = (
         builder=DashboardChartRegistry._alert_sensor_trend,
         chart_type="line",
         tags=("alertas", "senales", "evidencia"),
+    ),
+    ChartDefinition(
+        chart_id="telemetry_signal_trend",
+        caption="Serie continua de telemetría cruda para un equipo, cualquier señal",
+        title="Telemetría de un equipo en el tiempo",
+        domain="telemetria",
+        description=(
+            "Serie temporal de una o varias señales de telemetría cruda para un "
+            "equipo, en cualquier ventana de fechas — no requiere que la señal haya "
+            "disparado una alerta. unit_id es obligatorio; signal admite varias "
+            "separadas por coma (por defecto grafica una señal disponible); days o "
+            "start_date/end_date acotan el periodo (máximo 90 días)"
+        ),
+        # The raw weekly source this reads (telemetry/silver/.../Telemetry_Wide_With_States)
+        # is a partitioned directory, not a single file, so it is not in the DATASETS
+        # registry validate_client checks. telemetry_classified is a same-pipeline proxy
+        # for "this client has telemetry data" gating list_charts, not what this chart reads.
+        datasets=("telemetry_classified",),
+        parameters=("unit_id", "signal", "days", "start_date", "end_date"),
+        builder=DashboardChartRegistry._telemetry_signal_trend,
+        chart_type="line",
+        tags=("telemetria", "senales", "tendencia"),
     ),
 )
 

@@ -212,9 +212,18 @@ class LocalArchiveBackend(ArchiveBackend):
     def put_json(self, key: str, payload: dict[str, Any]) -> None:
         path = self._path(key)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
+        # A long-lived conversation's snapshot can take a moment to serialize and
+        # write; writing straight to `path` leaves a truncated, unparseable file
+        # behind if the process is interrupted mid-write (timeout, restart, disk
+        # pressure). get_json() then silently treats that as "no conversation",
+        # which is exactly the "importación se rompe" failure for long threads.
+        # Write to a sibling temp file first and rename, which is atomic on both
+        # POSIX and Windows within the same directory/volume.
+        tmp_path = path.with_name(f"{path.name}.tmp-{os.getpid()}-{threading.get_ident()}")
+        tmp_path.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
         )
+        os.replace(tmp_path, path)
 
     def get_json(self, key: str) -> dict[str, Any] | None:
         path = self._path(key)
@@ -742,12 +751,49 @@ class ConversationArchive:
             self._meta.pop(cache_key, None)
 
 
-def _without_figures(item: dict[str, Any]) -> dict[str, Any]:
-    """Strip Plotly figures from an archived message.
+_ARCHIVE_MAX_POINTS_PER_TRACE = 300
 
-    A figure can be hundreds of kilobytes of coordinates; storing it would make every
-    write slower and the archive far larger, and it is rebuildable from the same data
-    and the same request. Chart identity and captions are kept.
+
+def _downsample_figure(figure: dict[str, Any]) -> dict[str, Any]:
+    """Evenly decimate each trace to a bounded point count for the archive.
+
+    A live chart's series can carry thousands of samples (a multi-week telemetry
+    window easily passes 10k), and storing every point would make each archive
+    write slower and the archive itself grow without bound. Sampling evenly keeps
+    the shape recognizable — peaks and trend are still visible — while capping
+    size to a fixed multiple of the trace count regardless of the source window.
+    The figure stays a real, interactive Plotly figure; nothing else changes.
+    """
+    data = figure.get("data")
+    if not isinstance(data, list):
+        return figure
+    trimmed_traces = []
+    for trace in data:
+        if not isinstance(trace, dict):
+            trimmed_traces.append(trace)
+            continue
+        trace = dict(trace)
+        length = max(
+            (len(values) for key in ("x", "y") if isinstance(values := trace.get(key), list)),
+            default=0,
+        )
+        if length > _ARCHIVE_MAX_POINTS_PER_TRACE:
+            step = length / _ARCHIVE_MAX_POINTS_PER_TRACE
+            indices = [int(i * step) for i in range(_ARCHIVE_MAX_POINTS_PER_TRACE)]
+            for key in ("x", "y", "text", "customdata"):
+                values = trace.get(key)
+                if isinstance(values, list) and len(values) == length:
+                    trace[key] = [values[i] for i in indices]
+        trimmed_traces.append(trace)
+    return {**figure, "data": trimmed_traces}
+
+
+def _without_figures(item: dict[str, Any]) -> dict[str, Any]:
+    """Downsample an archived message's Plotly figures to a bounded size.
+
+    Chart identity, captions and summary are kept as-is; only each trace's point
+    count is capped (see _downsample_figure) so archive size and write latency
+    stay bounded regardless of how wide a date window the chart covered.
     """
     visualizations = item.get("visualizations")
     if not isinstance(visualizations, list) or not visualizations:
@@ -756,7 +802,9 @@ def _without_figures(item: dict[str, Any]) -> dict[str, Any]:
     for artifact in visualizations:
         if not isinstance(artifact, dict):
             continue
-        trimmed.append({**{k: v for k, v in artifact.items() if k != "figure"}, "figure": {}})
+        figure = artifact.get("figure")
+        downsampled = _downsample_figure(figure) if isinstance(figure, dict) else {}
+        trimmed.append({**artifact, "figure": downsampled})
     return {**item, "visualizations": trimmed}
 
 

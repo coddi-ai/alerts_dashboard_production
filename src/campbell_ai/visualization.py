@@ -41,6 +41,24 @@ class _ChartSource:
     latest_order: tuple[tuple[str, ...], ...] = ()
 
 
+# Tribology essay/element columns from oil_classified, exposed as chart-able
+# metrics so a historical oil trend (not just the latest-sample snapshot every
+# other oil chart shows) can be plotted the same way telemetry/alert metrics are:
+# create_dashboard_chart(dataset="oil_components", chart_type="line",
+# dimension="day", metric="hierro", unit_id=...). Keys are lowercase because
+# create_chart() lowercases the requested metric before this lookup; values are
+# the real (accented, capitalized) column name to resolve against the frame.
+_OIL_ESSAY_METRICS: dict[str, tuple[str, ...]] = {
+    name.lower(): (name,)
+    for name in (
+        "Hierro", "Cromo", "Aluminio", "Cobre", "Plomo", "Níquel", "Plata",
+        "Estaño", "Titanio", "Vanadio", "Manganeso", "Silicio", "Potasio",
+        "Sodio", "Zinc", "Bario", "Boro", "Calcio", "Molibdeno", "Magnesio",
+        "Fósforo", "Índice PQ", "Oxidación", "Hollín", "Viscocidad", "Agua",
+        "Refrigerante", "Combustible",
+    )
+}
+
 CHART_SOURCES: dict[str, _ChartSource] = {
     "alerts": _ChartSource(
         "alerts",
@@ -139,6 +157,7 @@ CHART_SOURCES: dict[str, _ChartSource] = {
         {
             "severity_score": ("severity_score",),
             "classification_score": ("classification_score",),
+            **_OIL_ESSAY_METRICS,
         },
     ),
     "maintenance_summary": _ChartSource(
@@ -250,7 +269,16 @@ class DashboardVisualizationService:
         if not column:
             raise CampbellDataError("La dimensión solicitada no existe en la fuente")
         label = DIMENSION_LABELS.get(dimension, dimension.replace("_", " ").capitalize())
-        return self._clean_category(frame[column]), label
+        series = self._clean_category(frame[column])
+        if dimension == "trigger_var":
+            # Category values here are raw signal codes (EngCoolTemp, AirFltr...);
+            # translate each so axis ticks and legend entries read in Spanish
+            # instead of the technical column name.
+            series = series.map(
+                lambda value: DashboardDataRepository._translate_signal_list(value)
+                or value
+            )
+        return series, label
 
     def _metric_series(
         self,
