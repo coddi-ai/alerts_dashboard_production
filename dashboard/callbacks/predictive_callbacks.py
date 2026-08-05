@@ -109,6 +109,22 @@ def register_callbacks(app):
             ])
 
     # ══════════════════════════════════════════════════════════════════════════
+    # OVERVIEW: Análisis de Riesgo view switch (Riesgo Acumulado / Prioridad Actual)
+    # ══════════════════════════════════════════════════════════════════════════
+
+    @app.callback(
+        Output("predictive-risk-curve-container", "style"),
+        Output("predictive-risk-priority-container", "style"),
+        Input("predictive-risk-view-selector", "value"),
+        prevent_initial_call=True,
+    )
+    def toggle_risk_view(view):
+        """Switch between the accumulated-risk curve and the priority cards without re-rendering either."""
+        if view == "acumulado":
+            return {"display": "block"}, {"display": "none"}
+        return {"display": "none"}, {"display": "block"}
+
+    # ══════════════════════════════════════════════════════════════════════════
     # OVERVIEW: Sort failure mode table by selected period
     # ══════════════════════════════════════════════════════════════════════════
 

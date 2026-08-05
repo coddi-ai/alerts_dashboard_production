@@ -18,6 +18,7 @@ from dashboard.components.accumulated_curve import (
     render_accumulated_section,
     build_accumulated_data,
     build_accumulated_figure,
+    _empty_state as _accumulated_empty_state,
 )
 
 logger = get_logger(__name__)
@@ -514,10 +515,33 @@ def _render_component_overview(df_latest, prev_ranking, component: str,
         ),
     ], className="card", style={"marginTop": "16px"})
 
-    children = [hero]
-    if accumulated is not None:
-        children.append(accumulated)
-    children.extend([priority, table_section])
+    curve_content = accumulated if accumulated is not None else _accumulated_empty_state(
+        "Curva acumulada no disponible: no hay datos de horómetro suficientes para este cliente/componente."
+    )
+
+    risk_section = html.Div([
+        html.H4([
+            html.I(className="fas fa-shield-alt me-2"),
+            "Análisis de Riesgo"
+        ], className="text-primary mb-3 mt-4"),
+        dcc.Tabs(
+            id='predictive-risk-view-selector',
+            value='prioridad',
+            children=[
+                dcc.Tab(label='  Riesgo Acumulado', value='acumulado',
+                        className='custom-tab', selected_className='custom-tab--selected'),
+                dcc.Tab(label='  Prioridad Actual', value='prioridad',
+                        className='custom-tab', selected_className='custom-tab--selected'),
+            ],
+            className='mb-3'
+        ),
+        html.Div(id='predictive-risk-curve-container', children=[curve_content],
+                 style={'display': 'none'}),
+        html.Div(id='predictive-risk-priority-container', children=[priority],
+                 style={'display': 'block'}),
+    ])
+
+    children = [hero, risk_section, table_section]
     return html.Div(children)
 
 
