@@ -20,7 +20,9 @@ nbformat>=4.2.0
 # Utilities
 tqdm>=4.66.0
 
-# S3 Interaction (pinned to avoid pip backtracking)
-boto3==1.35.0
-botocore==1.35.0
+# S3 Interaction (pinned to avoid pip backtracking; must support S3 conditional
+# writes (IfMatch/IfNoneMatch on PutObject, used by config/client_services.py) -
+# 1.35.0 predates that feature, this pin matches what's verified working)
+boto3==1.42.30
+botocore==1.42.30
 s3fs>=2025.5.0
