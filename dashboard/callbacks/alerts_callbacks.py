@@ -35,7 +35,13 @@ from dashboard.components.alerts_charts import (
     create_gps_route_map_golden,
     create_context_kpis_cards_golden
 )
-from dashboard.components.oil_charts import build_oil_time_series_grid
+from dashboard.components.oil_charts import (
+    build_oil_time_series_grid,
+    get_essay_limits_four,
+    classify_four_limit_value,
+    FOUR_LIMIT_STATUS_ORDER,
+    FOUR_LIMIT_STATUS_HEX_COLORS,
+)
 from dashboard.components.alerts_tables import (
     create_alerts_datatable,
     create_alerts_report_table,
@@ -981,12 +987,12 @@ def create_oil_evidence_section(alert_row: pd.Series, client: str) -> html.Div:
         remaining_groups = sorted([g for g in group_mapping.keys() if g not in priority_groups])
         ordered_groups.extend(remaining_groups)
         
-        # Load Stewart limits
-        from src.data.loaders import load_stewart_limits
+        # Load four-limit Stewart limits (LIC/LIM/LSM/LSC, data contract v2.8)
+        from src.data.loaders import load_stewart_limits_four
         from config.settings import get_settings
         settings = get_settings()
-        limits_file = settings.get_stewart_limits_path(client)
-        limits = load_stewart_limits(limits_file) if limits_file.exists() else None
+        limits_file = settings.get_stewart_limits_four_path(client)
+        limits = load_stewart_limits_four(limits_file) if limits_file.exists() else None
 
         if not limits:
             return html.Div([
@@ -1004,14 +1010,6 @@ def create_oil_evidence_section(alert_row: pd.Series, client: str) -> html.Div:
 
         comp_limits = limits[client][machine][component_normalized]
 
-        # Lower Stewart limits (used by the shared Tendencia grid for
-        # Viscocidad/Aditivos lower-bound lines, same as Monitoring > Oil > Details)
-        limits_inferior_file = settings.get_stewart_limits_inferior_path(client)
-        limits_inferior = load_stewart_limits(limits_inferior_file) if limits_inferior_file.exists() else None
-        comp_limits_inferior = {}
-        if limits_inferior:
-            comp_limits_inferior = limits_inferior.get(client, {}).get(machine, {}).get(component_normalized, {})
-
         # Get sample's oil hour range for v2.3 stratified limits
         sample_oil_hour_range = oil_report.get('oilHourRange', 'UNKNOWN')
         logger.info(f"Sample oilHourRange: {sample_oil_hour_range}")
@@ -1026,48 +1024,14 @@ def create_oil_evidence_section(alert_row: pd.Series, client: str) -> html.Div:
             tendencia_history['sampleDate'] = pd.to_datetime(tendencia_history['sampleDate'])
             tendencia_history = tendencia_history.sort_values('sampleDate')
         tendencia_content = build_oil_time_series_grid(
-            tendencia_history, comp_limits, comp_limits_inferior, sample_oil_hour_range
+            tendencia_history, comp_limits, sample_oil_hour_range
         )
-        
-        # Helper function to get stratified limits with fallback (v2.3)
+
+        # Stratified limit lookup with fallback, shared with Monitoring > Oil > Details
+        # (dashboard/components/oil_charts.py::get_essay_limits_four)
         def get_essay_limits(essay_name, oil_hour_range):
-            """
-            Get limits for an essay with oil-hour stratification fallback.
-            
-            Fallback hierarchy:
-            1. Exact match: essay + oilHourRange
-            2. Fallback: Average across all available oilHourRanges for this essay
-            3. Legacy: Single 'ALL' key (v2.2 compatibility)
-            
-            Returns: dict with threshold_normal, threshold_alert, threshold_critic or None
-            """
-            if essay_name not in comp_limits:
-                return None
-            
-            essay_limits = comp_limits[essay_name]
-            
-            # Try exact match (v2.3 preferred)
-            if oil_hour_range in essay_limits:
-                logger.debug(f"Essay {essay_name}: Using oil_hour_stratified limits ({oil_hour_range})")
-                return essay_limits[oil_hour_range]
-            
-            # Try legacy 'ALL' key (v2.2 compatibility)
-            if 'ALL' in essay_limits:
-                logger.debug(f"Essay {essay_name}: Using legacy non-stratified limits (v2.2)")
-                return essay_limits['ALL']
-            
-            # Fallback: Average across all available oil hour ranges
-            if len(essay_limits) > 0:
-                logger.debug(f"Essay {essay_name}: Using fallback_global (averaging {len(essay_limits)} ranges)")
-                avg_limits = {
-                    'threshold_normal': sum(v.get('threshold_normal', 0) for v in essay_limits.values()) / len(essay_limits),
-                    'threshold_alert': sum(v.get('threshold_alert', 0) for v in essay_limits.values()) / len(essay_limits),
-                    'threshold_critic': sum(v.get('threshold_critic', 0) for v in essay_limits.values()) / len(essay_limits)
-                }
-                return avg_limits
-            
-            return None
-        
+            return get_essay_limits_four(comp_limits, essay_name, oil_hour_range)
+
         # Create charts and tables for each group
         charts_and_tables = []
         
@@ -1089,87 +1053,90 @@ def create_oil_evidence_section(alert_row: pd.Series, client: str) -> html.Div:
             normalized_values = []
             actual_values = []
             table_data = []
-            
+            group_has_lower = False
+
+            def _fmt_limit(v):
+                return round(v, 2) if v is not None else '—'
+
             for essay in valid_essays:
                 value = float(oil_report[essay])
                 actual_values.append(value)
-                
-                # Get stratified limits
+
+                # Get four-limit thresholds (LIC/LIM/LSM/LSC)
                 essay_limits = get_essay_limits(essay, sample_oil_hour_range)
-                normal = essay_limits.get('threshold_normal', 0)
-                alert = essay_limits.get('threshold_alert', 0)
-                critic = essay_limits.get('threshold_critic', 0)
-                
-                # Normalize value for radar chart (0-100 scale)
-                if value >= critic:
-                    norm_value = 100
-                elif value >= alert:
-                    norm_value = 70 + (value - alert) / max(critic - alert, 1) * 30
-                elif value >= normal:
-                    norm_value = 50 + (value - normal) / max(alert - normal, 1) * 20
+                lic = essay_limits.get('LIC')
+                lim = essay_limits.get('LIM')
+                lsm = essay_limits.get('LSM', 0)
+                lsc = essay_limits.get('LSC', 0)
+                has_lower = lic is not None and lim is not None
+                group_has_lower = group_has_lower or has_lower
+
+                # Normalize value to a 0-100 scale for the radar chart
+                if has_lower:
+                    if value < lic:
+                        norm_value = max((value / lic) * 20, 0.0) if lic else 0.0
+                    elif value < lim:
+                        norm_value = 20 + (value - lic) / max(lim - lic, 1e-9) * 20
+                    elif value <= lsm:
+                        norm_value = 40 + (value - lim) / max(lsm - lim, 1e-9) * 20
+                    elif value <= lsc:
+                        norm_value = 60 + (value - lsm) / max(lsc - lsm, 1e-9) * 20
+                    else:
+                        norm_value = min(80 + (value - lsc) / max(lsc, 1e-9) * 20, 100)
                 else:
-                    norm_value = (value / max(normal, 1)) * 50
-                
-                normalized_values.append(min(norm_value, 100))
-                
-                # Determine status
-                if value >= critic:
-                    status = 'Crítico'
-                    color = '#dc3545'
-                elif value >= alert:
-                    status = 'Condenatorio'
-                    color = '#fd7e14'
-                elif value >= normal:
-                    status = 'Marginal'
-                    color = '#ffc107'
-                else:
-                    status = 'Normal'
-                    color = '#28a745'
-                
+                    if value <= lsm:
+                        norm_value = (value / lsm) * 60 if lsm else 0.0
+                    elif value <= lsc:
+                        norm_value = 60 + (value - lsm) / max(lsc - lsm, 1e-9) * 20
+                    else:
+                        norm_value = min(80 + (value - lsc) / max(lsc, 1e-9) * 20, 100)
+
+                normalized_values.append(min(max(norm_value, 0.0), 100))
+
+                # Determine status (data contract v2.8 five-tier classification)
+                status = classify_four_limit_value(value, lic, lim, lsm, lsc)
+                color = FOUR_LIMIT_STATUS_HEX_COLORS.get(status, '#28a745')
+
                 table_data.append({
                     'essay': essay,
                     'value': round(value, 2),
                     'status': status,
-                    'normal': round(normal, 2),
-                    'alert': round(alert, 2),
-                    'critic': round(critic, 2),
+                    'lic': _fmt_limit(lic),
+                    'lim': _fmt_limit(lim),
+                    'lsm': _fmt_limit(lsm),
+                    'lsc': _fmt_limit(lsc),
                     '_color': color
                 })
-            
+
             # Sort table by status severity
-            status_order = {'Crítico': 0, 'Condenatorio': 1, 'Marginal': 2, 'Normal': 3}
-            table_data.sort(key=lambda x: (status_order.get(x['status'], 4), x['essay']))
+            table_data.sort(key=lambda x: (FOUR_LIMIT_STATUS_ORDER.get(x['status'], 9), x['essay']))
             
             # Create radar chart
             fig = go.Figure()
             
-            # Add threshold rings
-            fig.add_trace(go.Scatterpolar(
-                r=[90] * len(valid_essays),
-                theta=valid_essays,
-                name='Crítico',
-                line=dict(color='red', dash='dash', width=2),
-                fill=None,
-                mode='lines'
-            ))
-            
-            fig.add_trace(go.Scatterpolar(
-                r=[70] * len(valid_essays),
-                theta=valid_essays,
-                name='Condenatorio',
-                line=dict(color='orange', dash='dash', width=2),
-                fill=None,
-                mode='lines'
-            ))
-            
-            fig.add_trace(go.Scatterpolar(
-                r=[50] * len(valid_essays),
-                theta=valid_essays,
-                name='Marginal',
-                line=dict(color='#ffc107', dash='dash', width=2),
-                fill=None,
-                mode='lines'
-            ))
+            # Add threshold rings - LIC/LIM only shown when the group has lower limits
+            if group_has_lower:
+                ring_specs = [
+                    (80, 'LSC (Superior Condenatorio)', 'red'),
+                    (60, 'LSM (Superior Marginal)', 'orange'),
+                    (40, 'LIM (Inferior Marginal)', '#0072B2'),
+                    (20, 'LIC (Inferior Condenatorio)', '#b30000'),
+                ]
+            else:
+                ring_specs = [
+                    (80, 'LSC (Superior Condenatorio)', 'red'),
+                    (60, 'LSM (Superior Marginal)', 'orange'),
+                ]
+
+            for radius, ring_name, ring_color in ring_specs:
+                fig.add_trace(go.Scatterpolar(
+                    r=[radius] * len(valid_essays),
+                    theta=valid_essays,
+                    name=ring_name,
+                    line=dict(color=ring_color, dash='dash', width=2),
+                    fill=None,
+                    mode='lines'
+                ))
             
             # Determine fill color based on report status
             status_color = {
@@ -1230,9 +1197,10 @@ def create_oil_evidence_section(alert_row: pd.Series, client: str) -> html.Div:
                     {'name': 'Ensayo', 'id': 'essay'},
                     {'name': 'Valor', 'id': 'value', 'type': 'numeric'},
                     {'name': 'Estado', 'id': 'status'},
-                    {'name': 'Límite Normal', 'id': 'normal', 'type': 'numeric'},
-                    {'name': 'Límite Alerta', 'id': 'alert', 'type': 'numeric'},
-                    {'name': 'Límite Crítico', 'id': 'critic', 'type': 'numeric'}
+                    {'name': 'LIC', 'id': 'lic'},
+                    {'name': 'LIM', 'id': 'lim'},
+                    {'name': 'LSM', 'id': 'lsm'},
+                    {'name': 'LSC', 'id': 'lsc'}
                 ],
                 data=table_data,
                 style_table={'overflowX': 'auto'},
@@ -1250,18 +1218,24 @@ def create_oil_evidence_section(alert_row: pd.Series, client: str) -> html.Div:
                 },
                 style_data_conditional=[
                     {
-                        'if': {'filter_query': '{status} = "Crítico"'},
+                        'if': {'filter_query': '{status} = "Superior Condenatorio"'},
                         'backgroundColor': '#f8d7da',
                         'color': '#721c24',
                         'fontWeight': 'bold'
                     },
                     {
-                        'if': {'filter_query': '{status} = "Condenatorio"'},
-                        'backgroundColor': '#fff3cd',
+                        'if': {'filter_query': '{status} = "Inferior Condenatorio"'},
+                        'backgroundColor': '#f8d7da',
+                        'color': '#721c24',
+                        'fontWeight': 'bold'
+                    },
+                    {
+                        'if': {'filter_query': '{status} = "Superior Marginal"'},
+                        'backgroundColor': '#fff8e1',
                         'color': '#856404'
                     },
                     {
-                        'if': {'filter_query': '{status} = "Marginal"'},
+                        'if': {'filter_query': '{status} = "Inferior Marginal"'},
                         'backgroundColor': '#fff8e1',
                         'color': '#856404'
                     },

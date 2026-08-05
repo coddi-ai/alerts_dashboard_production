@@ -6,6 +6,13 @@ Used by both the Monitoring > Oil > Details time-series analysis section
 Evidence "Tendencia" view (dashboard/callbacks/alerts_callbacks.py), so both
 views render from the same chart-generation logic, variable combinations and
 limits.
+
+Limits are sourced from the four-limit Stewart output (stewart_limits_four.parquet,
+data contract v2.8: LIC/LIM/LSM/LSC) rather than the legacy three-limit
+stewart_limits.parquet/stewart_limits_inferior.parquet pair. Whether a lower
+limit line is drawn for a given essay is decided per-essay from the data
+(LIC/LIM both present) rather than from a fixed per-chart flag, since the new
+contract nulls LIC/LIM for whole essay groups (Desgaste, Aditivo).
 """
 
 from pathlib import Path
@@ -24,7 +31,7 @@ TIME_SERIES_CHARTS = [
     {'title': 'Silicio & Aluminio', 'essays': ['Silicio', 'Aluminio']},
     {'title': 'Sodio & Potasio', 'essays': ['Sodio', 'Potasio']},
     {'title': 'Combustible & Agua', 'essays': ['Combustible', 'Agua']},
-    {'title': 'Viscocidad', 'essays': ['Viscocidad'], 'show_lower_limit': True},
+    {'title': 'Viscocidad', 'essays': ['Viscocidad']},
     {'title': 'Hollín & Oxidación', 'essays': ['Hollín', 'Oxidación']},
 ]
 
@@ -36,56 +43,114 @@ ADITIVOS_PALETTE = [
 ]
 
 
-def get_essay_limits(comp_limits, essay, oil_hour_range):
+# Severity order (worst first) and badge-color mapping for the five-tier
+# four-limit classification (data contract v2.8).
+FOUR_LIMIT_STATUS_ORDER = {
+    'Inferior Condenatorio': 0,
+    'Superior Condenatorio': 0,
+    'Inferior Marginal': 1,
+    'Superior Marginal': 1,
+    'Normal': 2,
+}
+
+FOUR_LIMIT_STATUS_COLORS = {
+    'Normal': 'success',
+    'Inferior Marginal': 'warning',
+    'Superior Marginal': 'warning',
+    'Inferior Condenatorio': 'danger',
+    'Superior Condenatorio': 'danger',
+}
+
+FOUR_LIMIT_STATUS_HEX_COLORS = {
+    'Normal': '#28a745',
+    'Inferior Marginal': '#ffc107',
+    'Superior Marginal': '#ffc107',
+    'Inferior Condenatorio': '#dc3545',
+    'Superior Condenatorio': '#dc3545',
+}
+
+
+def get_essay_limits_four(comp_limits_four, essay, oil_hour_range):
     """
-    Get essay limits with oil-hour stratification fallback logic (v2.3).
+    Get four-limit (LIC/LIM/LSM/LSC) essay limits with oil-hour stratification
+    fallback logic (data contract v2.8).
 
     Fallback hierarchy:
     1. Try exact match: oilHourRange from sample
-    2. Try 'ALL' for v2.2 compatibility
+    2. Try 'ALL'
     3. Try averaging across all available oil hour ranges
     4. Return None if essay not found
 
     Args:
-        comp_limits: Nested dict {essay: {oilHourRange: {threshold_normal, ...}}}
+        comp_limits_four: Nested dict {essay: {oilHourRange: {LIC, LIM, LSM, LSC, ...}}}
         essay: Essay name
         oil_hour_range: Oil hour range from sample ('LT_1000', 'GE_1000', 'UNKNOWN')
 
     Returns:
-        Dict with threshold_normal, threshold_alert, threshold_critic or None
+        Dict with LIC, LIM, LSM, LSC (LIC/LIM may be None) or None if not found.
     """
-    if essay not in comp_limits:
+    if not comp_limits_four or essay not in comp_limits_four:
         return None
 
-    essay_limits = comp_limits[essay]
+    essay_limits = comp_limits_four[essay]
+    if not essay_limits:
+        return None
 
-    # If essay_limits is already a dict with thresholds (v2.2 format), return it
-    if 'threshold_normal' in essay_limits:
-        return essay_limits
-
-    # v2.3 format: try exact oilHourRange match
     if oil_hour_range in essay_limits:
         return essay_limits[oil_hour_range]
 
-    # Fallback: try 'ALL' for v2.2 compatibility
     if 'ALL' in essay_limits:
         return essay_limits['ALL']
 
-    # Fallback: average across all available oil hour ranges
-    if essay_limits:
-        available_ranges = list(essay_limits.keys())
-        if available_ranges:
-            avg_limits = {
-                'threshold_normal': sum(essay_limits[r].get('threshold_normal', 0) for r in available_ranges) / len(available_ranges),
-                'threshold_alert': sum(essay_limits[r].get('threshold_alert', 0) for r in available_ranges) / len(available_ranges),
-                'threshold_critic': sum(essay_limits[r].get('threshold_critic', 0) for r in available_ranges) / len(available_ranges)
-            }
-            return avg_limits
+    available_ranges = list(essay_limits.keys())
+    if not available_ranges:
+        return None
 
-    return None
+    def _avg(field):
+        # Never treat a missing (null) lower limit as zero: average only over
+        # the buckets where this field is actually present.
+        values = [essay_limits[r][field] for r in available_ranges if essay_limits[r].get(field) is not None]
+        return sum(values) / len(values) if values else None
+
+    return {
+        'LIC': _avg('LIC'),
+        'LIM': _avg('LIM'),
+        'LSM': _avg('LSM'),
+        'LSC': _avg('LSC'),
+    }
 
 
-def build_oil_time_series_grid(history: pd.DataFrame, comp_limits: dict, comp_limits_inferior: dict, oil_hour_range: str):
+def classify_four_limit_value(value: float, LIC, LIM, LSM: float, LSC: float) -> str:
+    """
+    Classify a value against the four-limit Stewart output (data contract v2.8).
+
+    Boundary semantics (must match the main service exactly):
+        value < LIC            -> Inferior Condenatorio
+        LIC <= value < LIM      -> Inferior Marginal
+        LIM <= value <= LSM     -> Normal
+        LSM < value <= LSC      -> Superior Marginal
+        value > LSC             -> Superior Condenatorio
+
+    Lower-limit evaluation is only applied when BOTH LIC and LIM are available
+    (a null lower limit is never treated as a lower limit of zero). Otherwise:
+        value <= LSM            -> Normal
+        LSM < value <= LSC      -> Superior Marginal
+        value > LSC             -> Superior Condenatorio
+    """
+    has_lower = LIC is not None and LIM is not None
+    if has_lower:
+        if value < LIC:
+            return 'Inferior Condenatorio'
+        if value < LIM:
+            return 'Inferior Marginal'
+    if value <= LSM:
+        return 'Normal'
+    if value <= LSC:
+        return 'Superior Marginal'
+    return 'Superior Condenatorio'
+
+
+def build_oil_time_series_grid(history: pd.DataFrame, comp_limits_four: dict, oil_hour_range: str):
     """
     Build the 9-chart oil analysis time-series grid.
 
@@ -93,12 +158,12 @@ def build_oil_time_series_grid(history: pd.DataFrame, comp_limits: dict, comp_li
         history: Pre-filtered, pre-sorted (by sampleDate ascending) rows for a
             single equipment/component pair, from the classified oil reports
             (golden/{client}/classified.parquet schema).
-        comp_limits: Upper (condemnation) Stewart limits for this component,
-            as returned by load_stewart_limits(...)[client][machine][component].
-        comp_limits_inferior: Lower Stewart limits for this component, same
-            shape as comp_limits (may be an empty dict if unavailable).
+        comp_limits_four: Four-limit (LIC/LIM/LSM/LSC) Stewart limits for this
+            component, as returned by
+            load_stewart_limits_four(...)[client][machine][component]. May be
+            an empty dict if unavailable.
         oil_hour_range: oilHourRange of the most recent sample in `history`,
-            used for stratified limit lookup via get_essay_limits.
+            used for stratified limit lookup via get_essay_limits_four.
 
     Returns:
         A dbc.Row of chart columns, or an html.P placeholder if there is
@@ -124,14 +189,12 @@ def build_oil_time_series_grid(history: pd.DataFrame, comp_limits: dict, comp_li
                     'title': 'Aditivos: Calcio, Zinc & Fósforo',
                     'essays': primary_aditivos,
                     'palette': ADITIVOS_PALETTE,
-                    'show_lower_limit': True,
                 })
             if other_aditivos:
                 charts_to_render.append({
                     'title': 'Aditivos: Otros',
                     'essays': other_aditivos,
                     'palette': ADITIVOS_PALETTE,
-                    'show_lower_limit': True,
                 })
 
     # Generate charts in a 2-column grid, with any full-width charts spanning both columns
@@ -163,9 +226,8 @@ def build_oil_time_series_grid(history: pd.DataFrame, comp_limits: dict, comp_li
         colors = chart_config.get('palette', ['#1f77b4', '#ff7f0e'])
 
         # Collect limits for deduplication
-        limit_entries = []  # [(value, essay_name), ...]
-        limit_entries_lower = []  # [(value, essay_name), ...]
-        show_lower_limit = chart_config.get('show_lower_limit', False)
+        limit_entries = []  # [(value, essay_name), ...]  -- upper (LSC)
+        limit_entries_lower = []  # [(value, essay_name), ...]  -- lower (LIC), only when available
 
         for idx, essay in enumerate(available_essays):
             essay_values = history[essay].dropna()
@@ -182,16 +244,17 @@ def build_oil_time_series_grid(history: pd.DataFrame, comp_limits: dict, comp_li
                 marker=dict(size=4),
             ))
 
-            # Collect upper condemnation limit (threshold_critic)
-            essay_limits = get_essay_limits(comp_limits, essay, oil_hour_range)
-            if essay_limits and 'threshold_critic' in essay_limits:
-                limit_entries.append((essay_limits['threshold_critic'], essay))
+            # Collect upper condemnation limit (LSC) - always available
+            essay_limits = get_essay_limits_four(comp_limits_four, essay, oil_hour_range)
+            if essay_limits and essay_limits.get('LSC') is not None:
+                limit_entries.append((essay_limits['LSC'], essay))
 
-            # Collect lower condemnation limit (threshold_critic from the inferior table)
-            if show_lower_limit:
-                essay_limits_lower = get_essay_limits(comp_limits_inferior, essay, oil_hour_range)
-                if essay_limits_lower and 'threshold_critic' in essay_limits_lower:
-                    limit_entries_lower.append((essay_limits_lower['threshold_critic'], essay))
+            # Collect lower condemnation limit (LIC) - only draw when BOTH LIC
+            # and LIM are available; never render a lower-limit trace for
+            # essay groups where the contract nulls out lower limits
+            # (Desgaste, Aditivo) or where min_value <= 0.
+            if essay_limits and essay_limits.get('LIC') is not None and essay_limits.get('LIM') is not None:
+                limit_entries_lower.append((essay_limits['LIC'], essay))
 
         # Consolidate duplicate limits (same value → one line, combined label)
         limit_by_value = {}
@@ -201,9 +264,9 @@ def build_oil_time_series_grid(history: pd.DataFrame, comp_limits: dict, comp_li
 
         for val, names in limit_by_value.items():
             if len(names) > 1:
-                label = " y ".join(names) + " Límite"
+                label = " y ".join(names) + " LSC"
             else:
-                label = f"Límite {names[0]}" if len(available_essays) > 1 else "Límite"
+                label = f"{names[0]} LSC" if len(available_essays) > 1 else "LSC"
             fig.add_hline(
                 y=val,
                 line=dict(color='#dc3545', width=1.5, dash='dash'),
@@ -220,9 +283,9 @@ def build_oil_time_series_grid(history: pd.DataFrame, comp_limits: dict, comp_li
 
         for val, names in limit_by_value_lower.items():
             if len(names) > 1:
-                label = " y ".join(names) + " Límite Inferior"
+                label = " y ".join(names) + " LIC"
             else:
-                label = f"Límite Inferior {names[0]}" if len(available_essays) > 1 else "Límite Inferior"
+                label = f"{names[0]} LIC" if len(available_essays) > 1 else "LIC"
             fig.add_hline(
                 y=val,
                 line=dict(color='#0072B2', width=1.5, dash='dash'),

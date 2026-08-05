@@ -34,59 +34,53 @@ from src.data.erp_schemas import (
 )
 from src.data.erp_write_operations import MAX_TITLE_LENGTH
 
-_SEVERITY_COLOR = {"low": "secondary", "medium": "info", "high": "warning", "critical": "danger"}
 _LABEL_COLOR = {"alerta": "warning", "anormal": "danger"}
 _LABEL_BORDER = {"alerta": "border-warning", "anormal": "border-danger"}
 
 
-def create_pending_item(warning: Warning) -> html.Div:
-    age = datetime.now(timezone.utc) - warning.generated_at
+def _age_label(warning: Warning) -> str:
+    total_hours = int((datetime.now(timezone.utc) - warning.generated_at).total_seconds() // 3600)
+    if total_hours < 48:
+        return f"{total_hours}h"
+    return f"{total_hours // 24}d"
+
+
+def create_pending_item(warning: Warning, is_selected: bool = False) -> html.Div:
+    """Compact card: asset id + criticality on one line, source + age on the next.
+    Severity and system are omitted here (still shown in full in the detail
+    panel) to keep the list scannable at normal zoom."""
     border = _LABEL_BORDER.get(warning.condition_label.value, "border-secondary")
+    selected_classes = " shadow-sm" if is_selected else ""
     return html.Div(
         dbc.Card(
             dbc.CardBody(
-                dbc.Row(
-                    [
-                        dbc.Col(
-                            [
-                                html.Strong(warning.asset_id, className="d-block"),
-                                html.Small(
-                                    f"{SOURCE_LABELS.get(warning.source, warning.source.value)} · "
-                                    f"{SYSTEM_LABELS.get(warning.system, warning.system.value)}",
-                                    className="text-muted",
-                                ),
-                            ],
-                            width=5,
-                        ),
-                        dbc.Col(
-                            [
-                                dbc.Badge(
-                                    CONDITION_LABEL_LABELS.get(warning.condition_label, warning.condition_label.value),
-                                    color=_LABEL_COLOR.get(warning.condition_label.value, "secondary"),
-                                    className="me-1",
-                                ),
-                                dbc.Badge(
-                                    SEVERITY_LABELS.get(warning.severity, warning.severity.value),
-                                    color=_SEVERITY_COLOR.get(warning.severity.value, "secondary"),
-                                ),
-                            ],
-                            width=4,
-                        ),
-                        dbc.Col(
-                            html.Small(f"{age.seconds // 3600}h ago", className="text-muted"),
-                            width=3,
-                            className="text-end",
-                        ),
-                    ],
-                    align="center",
-                ),
-                className="py-2 px-3",
+                [
+                    html.Div(
+                        [
+                            html.Strong(warning.asset_id, className="small text-truncate", style={"maxWidth": "70%"}),
+                            dbc.Badge(
+                                CONDITION_LABEL_LABELS.get(warning.condition_label, warning.condition_label.value),
+                                color=_LABEL_COLOR.get(warning.condition_label.value, "secondary"),
+                                className="ms-1",
+                                style={"fontSize": "0.65rem"},
+                            ),
+                        ],
+                        className="d-flex justify-content-between align-items-center",
+                    ),
+                    html.Small(
+                        f"{SOURCE_LABELS.get(warning.source, warning.source.value)} · {_age_label(warning)}",
+                        className="text-muted",
+                        style={"fontSize": "0.7rem"},
+                    ),
+                ],
+                className="py-1 px-2",
             ),
-            className=f"border-start {border} border-3",
+            className=f"border-start {border} border-3{selected_classes}",
+            style={"backgroundColor": "#eef6fc" if is_selected else None},
         ),
         id={"type": "erp-validator-select-pending", "index": warning.warning_id},
         n_clicks=0,
-        className="mb-2",
+        className="mb-1",
         style={"cursor": "pointer"},
     )
 
@@ -204,34 +198,16 @@ def _erp_fields_section(warning: Warning) -> html.Div:
     )
 
 
-def _operator_section() -> html.Div:
-    """Who's performing the action — required for both approve and reject.
-    Anyone who can see this tab can act; there's no separate identity check
-    beyond typing a name here, since it's recorded as `validated_by`."""
-    return html.Div(
-        [
-            html.Label(
-                [html.I(className="fas fa-user me-1"), " Operador (obligatorio)"],
-                className="fw-bold mb-1 mt-4",
-            ),
-            dbc.Input(
-                id="erp-validator-field-operator",
-                type="text",
-                placeholder="Ingrese su nombre...",
-            ),
-        ]
-    )
-
-
 def create_detail_form(warning: Warning) -> html.Div:
     """Per-warning content only. The rejection collapse and result alerts are
     intentionally NOT here — they live in the static create_layout() tree
-    instead (see the module docstring note on _handle_action's outputs)."""
+    instead (see the module docstring note on _handle_action's outputs).
+    The operator field also isn't here — it's a single session-scoped field
+    near the top of the page (see _operator_bar / create_layout)."""
     return html.Div(
         [
             _context_section(warning),
             _erp_fields_section(warning),
-            _operator_section(),
             html.Div(
                 [
                     dbc.Button(
@@ -255,6 +231,44 @@ def create_detail_form(warning: Warning) -> html.Div:
     )
 
 
+def _operator_bar() -> dbc.Card:
+    """Session-scoped operator name — entered once, reused for every approve/reject
+    on this page (dashboard.layout's erp-validator-operator-store, storage_type='session').
+    Anyone who can reach this tab can act; there's no separate identity check
+    beyond typing a name here, since it's recorded as `validated_by`."""
+    return dbc.Card(
+        dbc.CardBody(
+            dbc.Row(
+                [
+                    dbc.Col(
+                        html.Label(
+                            [html.I(className="fas fa-user me-1"), " Operador (obligatorio)"],
+                            className="fw-bold mb-0",
+                        ),
+                        width="auto",
+                        className="d-flex align-items-center",
+                    ),
+                    dbc.Col(
+                        [
+                            dbc.Input(
+                                id="erp-validator-operator-input",
+                                type="text",
+                                placeholder="Ingrese su nombre...",
+                                debounce=True,
+                            ),
+                            html.Small(id="erp-validator-operator-feedback", className="text-danger"),
+                        ],
+                        md=4,
+                    ),
+                ],
+                className="g-2 align-items-center",
+            ),
+            className="py-2",
+        ),
+        className="shadow-sm mb-3",
+    )
+
+
 def create_layout() -> dbc.Container:
     return dbc.Container(
         [
@@ -272,6 +286,7 @@ def create_layout() -> dbc.Container:
                 className="mb-4",
             ),
             dcc.Store(id="erp-validator-selected-warning-id"),
+            _operator_bar(),
             dbc.Row(
                 [
                     dbc.Col(

@@ -4,6 +4,87 @@
 
 ---
 
+> ⚠️ **Historical/legacy document.** This file predates the current `dashboard/tabs/` +
+> `dashboard/callbacks/` + `dashboard/components/` architecture (it still references paths like
+> `data/oil/to_consume/{client}/`, which no longer exist — see
+> [documentation/codebase_explaining.md](../codebase_explaining.md) for the current structure) and
+> describes the legacy three-limit Stewart classification (`threshold_normal`/`threshold_alert`/
+> `threshold_critic` → Normal/Marginal/Condenatorio/Crítico). It also documents a standalone
+> "Tab 1: Limit Visualization" tab that is **not** reachable in current navigation (see
+> `dashboard/callbacks/limits_callbacks.py` and `dashboard/tabs/tab_limits.py`).
+>
+> **As of the v2.8 four-limit Stewart migration**, oil-technique dashboard views (Monitoring ▸
+> Aceite ▸ Detalle de Reporte, Alertas ▸ Detalle ▸ Evidencia de Aceite, and the unreachable Stewart
+> Limits tab) all read `stewart_limits_four.parquet` and classify using `LIC`/`LIM`/`LSM`/`LSC`
+> instead. See "Current Classification Behavior (v2.8+)" immediately below for the up-to-date
+> rules; treat everything after that section as historical/superseded unless cross-checked against
+> the actual code in `dashboard/components/oil_charts.py`, `dashboard/callbacks/reports_callbacks.py`
+> and `dashboard/callbacks/alerts_callbacks.py`.
+
+---
+
+## ✅ Current Classification Behavior (v2.8+)
+
+**Data source**: `data/oil/golden/{client}/stewart_limits_four.parquet` (via
+`config/settings.py::get_stewart_limits_four_path()` and
+`src/data/loaders.py::load_stewart_limits_four()`), replacing `stewart_limits.parquet` +
+`stewart_limits_inferior.parquet` for all oil-related dashboard logic.
+
+**Classification** (`dashboard/components/oil_charts.py::classify_four_limit_value()`), given a
+value and the essay's `LIC`/`LIM`/`LSM`/`LSC` (looked up per oilHourRange via
+`get_essay_limits_four()`, with the same exact-match → `'ALL'` → cross-range-average fallback
+hierarchy as the legacy loader, except averaging **skips null buckets instead of treating them as
+zero**):
+
+- When `LIC` and `LIM` are **both** present (lower limits apply):
+  ```
+  value < LIC            → Inferior Condenatorio
+  LIC <= value < LIM     → Inferior Marginal
+  LIM <= value <= LSM    → Normal
+  LSM < value <= LSC     → Superior Marginal
+  value > LSC            → Superior Condenatorio
+  ```
+- Otherwise (either or both of `LIC`/`LIM` is null - lower-limit evaluation is only applied when
+  **both** are available, never just one):
+  ```
+  value <= LSM           → Normal
+  LSM < value <= LSC     → Superior Marginal
+  value > LSC            → Superior Condenatorio
+  ```
+
+Per the data contract, `LIC`/`LIM` are null whenever `GroupElement` is `Desgaste` or `Aditivo`, or
+the essay/component's minimum observed value is `<= 0` — so most wear and additive essays render
+with the 3-tier (no-lower-limit) path, while Contaminante/Fisico Quimico/Conteo essays with valid
+positive data get the full 5-tier path.
+
+**Where this is used**:
+- `dashboard/callbacks/reports_callbacks.py` - Monitoring ▸ Aceite ▸ Detalle de Reporte (single-
+  sample decision summary, evidence tables, time-series chart, 9-chart time-series grid, Analítica
+  Avanzada)
+- `dashboard/callbacks/alerts_callbacks.py::create_oil_evidence_section` - Alertas ▸ Detalle ▸
+  Evidencia de Aceite (radar charts per essay group, evidence tables, Tendencia grid)
+- `dashboard/callbacks/limits_callbacks.py` / `dashboard/tabs/tab_limits.py` - standalone Stewart
+  Limits tab (registered but **not reachable** from navigation; kept in sync for completeness)
+
+**Not migrated (out of scope / dead code)**:
+- `dashboard/components/charts.py::create_radar_chart` / `create_time_series_chart` - imported by
+  `reports_callbacks.py` but never called; still use the legacy `threshold_normal/alert/critic`
+  shape
+- `dashboard/callbacks/reports_callbacks.py`'s old radar/value-analysis-table code and
+  `dashboard/callbacks/alerts_callbacks.py`'s `create_oil_radar_chart` import were dead code
+  (unreachable, no callers) and were removed rather than migrated
+- The Predictive module's `OIL_THRESHOLDS` system (`dashboard/components/predictive_config.py`,
+  consumed by `predictive_tables.py`/`predictive_charts.py`/`tab_predictive_evidence.py`) is a
+  separate, hardcoded, non-Stewart threshold table unrelated to `stewart_limits*.parquet` - not in
+  scope for this migration
+- The legacy `stewart_limits.parquet` / `stewart_limits_inferior.parquet` files, their loaders
+  (`load_stewart_limits`, `load_stewart_limits_for_client`, `save_stewart_limits` in
+  `src/data/loaders.py`), path helpers (`get_stewart_limits_path`,
+  `get_stewart_limits_inferior_path`), and `StewartLimits` schema remain in place, unmodified, for
+  backward compatibility - nothing in this repo's oil logic depends on them anymore
+
+---
+
 ## 📋 Table of Contents
 
 1. [Dashboard Overview](#dashboard-overview)

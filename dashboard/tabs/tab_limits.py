@@ -59,13 +59,15 @@ def create_limits_tab() -> dbc.Container:
         dbc.Alert([
             html.H5("About Stewart Limits", className="alert-heading"),
             html.P([
-                "Stewart Limits define the statistical thresholds for each essay: ",
+                "Stewart Limits define the statistical thresholds for each essay (data contract v2.8): ",
                 html.Br(),
-                html.Strong("Marginal (90%): "), "Early warning threshold",
+                html.Strong("LIC - Inferior Condenatorio (2%): "), "Lower critical threshold — only present for essays where a lower limit applies",
                 html.Br(),
-                html.Strong("Condenatorio (95%): "), "Action required threshold",
+                html.Strong("LIM - Inferior Marginal (5%): "), "Lower warning threshold — only present for essays where a lower limit applies",
                 html.Br(),
-                html.Strong("Crítico (98%): "), "Critical condition threshold"
+                html.Strong("LSM - Superior Marginal (95%): "), "Upper warning threshold",
+                html.Br(),
+                html.Strong("LSC - Superior Condenatorio (98%): "), "Upper critical threshold"
             ])
         ], color="info", className="mb-4"),
         

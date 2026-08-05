@@ -12,33 +12,38 @@ from typing import List, Dict, Optional
 
 def create_limits_table(df: pd.DataFrame) -> dash_table.DataTable:
     """
-    Create Stewart Limits table with color coding.
-    
+    Create four-limit Stewart Limits table (LIC/LIM/LSM/LSC, data contract v2.8)
+    with color coding.
+
     Args:
-        df: DataFrame with limits (machine, component, essay, thresholds)
-    
+        df: DataFrame with limits (machine, component, essay, oilHourRange,
+            LIC, LIM, LSM, LSC). LIC/LIM may be null (no lower limit applies
+            for that essay/component) - rendered as a blank cell, never as 0.
+
     Returns:
         Dash DataTable
     """
     if df.empty:
         return html.Div("No limits data available", className="text-muted p-3")
-    
+
     # Apply title() to machine and component names
     df = df.copy()
     if 'machine' in df.columns:
         df['machine'] = df['machine'].str.title()
     if 'component' in df.columns:
         df['component'] = df['component'].str.title()
-    
+
     return dash_table.DataTable(
         id='limits-table',
         columns=[
             {'name': 'Machine', 'id': 'machine'},
             {'name': 'Component', 'id': 'component'},
             {'name': 'Essay', 'id': 'essay'},
-            {'name': 'Marginal (90%)', 'id': 'threshold_normal', 'type': 'numeric', 'format': {'specifier': '.2f'}},
-            {'name': 'Condenatorio (95%)', 'id': 'threshold_alert', 'type': 'numeric', 'format': {'specifier': '.2f'}},
-            {'name': 'Crítico (98%)', 'id': 'threshold_critic', 'type': 'numeric', 'format': {'specifier': '.2f'}}
+            {'name': 'Oil Hour Range', 'id': 'oilHourRange'},
+            {'name': 'LIC (Inferior Condenatorio)', 'id': 'LIC', 'type': 'numeric', 'format': {'specifier': '.2f'}},
+            {'name': 'LIM (Inferior Marginal)', 'id': 'LIM', 'type': 'numeric', 'format': {'specifier': '.2f'}},
+            {'name': 'LSM (Superior Marginal)', 'id': 'LSM', 'type': 'numeric', 'format': {'specifier': '.2f'}},
+            {'name': 'LSC (Superior Condenatorio)', 'id': 'LSC', 'type': 'numeric', 'format': {'specifier': '.2f'}}
         ],
         data=df.to_dict('records'),
         style_table={'overflowX': 'auto'},
@@ -55,15 +60,19 @@ def create_limits_table(df: pd.DataFrame) -> dash_table.DataTable:
         },
         style_data_conditional=[
             {
-                'if': {'column_id': 'threshold_normal'},
-                'backgroundColor': '#d4edda'
+                'if': {'column_id': 'LIC'},
+                'backgroundColor': '#f8d7da'
             },
             {
-                'if': {'column_id': 'threshold_alert'},
+                'if': {'column_id': 'LIM'},
                 'backgroundColor': '#fff3cd'
             },
             {
-                'if': {'column_id': 'threshold_critic'},
+                'if': {'column_id': 'LSM'},
+                'backgroundColor': '#fff3cd'
+            },
+            {
+                'if': {'column_id': 'LSC'},
                 'backgroundColor': '#f8d7da'
             }
         ],

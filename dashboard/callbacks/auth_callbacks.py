@@ -78,9 +78,10 @@ def register_auth_callbacks(app):
     
     @app.callback(
         Output('user-info-store', 'data', allow_duplicate=True),
+        Output('erp-validator-operator-store', 'data', allow_duplicate=True),
         Input('logout-button', 'n_clicks'),
         prevent_initial_call=True
     )
     def logout(n_clicks):
         """Handle user logout."""
-        return None
+        return None, None

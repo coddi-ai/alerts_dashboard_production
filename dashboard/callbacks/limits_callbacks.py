@@ -30,8 +30,8 @@ def register_limits_callbacks(app):
             return [], None
         
         settings = get_settings()
-        # Load Stewart limits for specific client from golden layer
-        limits_file = settings.get_stewart_limits_path(client)
+        # Load four-limit Stewart limits (LIC/LIM/LSM/LSC) for specific client from golden layer
+        limits_file = settings.get_stewart_limits_four_path(client)
         
         if not limits_file.exists():
             return [], None
@@ -61,8 +61,8 @@ def register_limits_callbacks(app):
             return [], None
         
         settings = get_settings()
-        # Load Stewart limits for specific client from golden layer
-        limits_file = settings.get_stewart_limits_path(client)
+        # Load four-limit Stewart limits (LIC/LIM/LSM/LSC) for specific client from golden layer
+        limits_file = settings.get_stewart_limits_four_path(client)
         
         if not limits_file.exists():
             return [], None
@@ -97,8 +97,8 @@ def register_limits_callbacks(app):
         
         settings = get_settings()
         
-        # Load Stewart Limits for specific client from golden layer
-        limits_file = settings.get_stewart_limits_path(client)
+        # Load four-limit Stewart Limits (LIC/LIM/LSM/LSC) for specific client from golden layer
+        limits_file = settings.get_stewart_limits_four_path(client)
         
         if not limits_file.exists():
             return html.Div("No limits data available", className="text-warning p-3")
