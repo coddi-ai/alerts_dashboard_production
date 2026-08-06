@@ -76,6 +76,20 @@ from dashboard.callbacks.component_hours_callbacks import register_component_hou
 # Import predictive pages callbacks (reactive content for /predictive/* pages)
 from dashboard.callbacks.predictive_pages_callbacks import register_predictive_pages_callbacks
 
+# Import admin callbacks (login events chart)
+from dashboard.callbacks.admin_callbacks import register_admin_callbacks
+
+# Import the centralized route guard (role + client-service route protection)
+from dashboard.callbacks.access_control_callbacks import register_access_control_callbacks
+
+# Import the reactive sidebar (re-renders nav when the selected client changes)
+from dashboard.callbacks.sidebar_callbacks import register_sidebar_callbacks
+
+# Validate the client service register at startup - critical structural
+# errors raise (fail fast); field-level issues are logged, not fatal.
+from config.client_services import validate_startup_config
+validate_startup_config()
+
 
 def normalize_prefix(prefix: str | None) -> str:
     """
@@ -133,6 +147,8 @@ import dashboard.pages.integration_validacion_avisos
 import dashboard.pages.integration_seguimiento_avisos
 import dashboard.pages.reporting_main
 import dashboard.pages.admin_main
+import dashboard.pages.admin_user_registry
+import dashboard.pages.no_services
 
 # Set app layout
 app.layout = create_app_layout()
@@ -180,6 +196,9 @@ register_campbell_ai_callbacks(app)
 # Same-origin SSE proxy for progressive Campbell AI answers; inert unless
 # CAMPBELL_AI_STREAMING is enabled.
 register_campbell_ai_stream(app)
+register_admin_callbacks(app)
+register_access_control_callbacks(app)
+register_sidebar_callbacks(app)
 
 
 if __name__ == '__main__':

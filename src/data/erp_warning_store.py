@@ -99,6 +99,26 @@ def find_by_id(client_id: str, warning_id: str) -> tuple[Warning, str] | None:
     return None
 
 
+def find_by_id_any_client(warning_id: str) -> tuple[Warning, str, str] | None:
+    """Search every client's warning store for `warning_id`. Returns (warning, client_id, state) or None.
+
+    Lets a warning-scoped action (view/approve/reject) resolve its own client
+    from the persisted record instead of a UI selector value — the record is
+    the source of truth for which client a warning belongs to.
+    """
+    warnings_dir = get_settings().data_root / "warnings"
+    if not warnings_dir.exists():
+        return None
+    for client_dir in warnings_dir.iterdir():
+        if not client_dir.is_dir():
+            continue
+        found = find_by_id(client_dir.name, warning_id)
+        if found is not None:
+            warning, state = found
+            return warning, client_dir.name, state
+    return None
+
+
 def transition(
     client_id: str, warning_id: str, from_state: str, to_state: str, **field_updates
 ) -> Warning:

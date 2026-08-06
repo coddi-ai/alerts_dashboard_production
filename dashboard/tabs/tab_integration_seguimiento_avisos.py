@@ -169,28 +169,31 @@ def create_layout() -> dbc.Container:
                 className="g-3 mb-4",
             ),
             dbc.Row(
-                [
-                    dbc.Col(
-                        dbc.Card(
-                            [
-                                dbc.CardHeader(
-                                    html.H5(
-                                        [html.I(className="fas fa-chart-bar me-2"), "Avisos por Fuente"],
-                                        className="mb-0",
-                                    ),
-                                    className="bg-light",
+                dbc.Col(
+                    dbc.Card(
+                        [
+                            dbc.CardHeader(
+                                html.H5(
+                                    [html.I(className="fas fa-chart-line me-2"), "Avisos en el Tiempo"],
+                                    className="mb-0",
                                 ),
-                                dbc.CardBody(
-                                    dcc.Loading(
-                                        dcc.Graph(id="erp-viewer-chart-by-source", config={"displayModeBar": False}),
-                                        type="circle",
-                                    )
-                                ),
-                            ],
-                            className="shadow-sm mb-4 h-100",
-                        ),
-                        md=6,
+                                className="bg-light",
+                            ),
+                            dbc.CardBody(
+                                dcc.Loading(
+                                    dcc.Graph(id="erp-viewer-chart-over-time", config={"displayModeBar": False}),
+                                    type="circle",
+                                )
+                            ),
+                        ],
+                        className="shadow-sm mb-4",
                     ),
+                    md=12,
+                ),
+                className="gx-3",
+            ),
+            dbc.Row(
+                [
                     dbc.Col(
                         dbc.Card(
                             [
@@ -210,13 +213,8 @@ def create_layout() -> dbc.Container:
                             ],
                             className="shadow-sm mb-4 h-100",
                         ),
-                        md=6,
+                        md=4,
                     ),
-                ],
-                className="gx-3",
-            ),
-            dbc.Row(
-                [
                     dbc.Col(
                         dbc.Card(
                             [
@@ -251,27 +249,6 @@ def create_layout() -> dbc.Container:
                                 dbc.CardBody(
                                     dcc.Loading(
                                         dcc.Graph(id="erp-viewer-chart-by-system", config={"displayModeBar": False}),
-                                        type="circle",
-                                    )
-                                ),
-                            ],
-                            className="shadow-sm mb-4 h-100",
-                        ),
-                        md=4,
-                    ),
-                    dbc.Col(
-                        dbc.Card(
-                            [
-                                dbc.CardHeader(
-                                    html.H5(
-                                        [html.I(className="fas fa-chart-line me-2"), "Avisos en el Tiempo"],
-                                        className="mb-0",
-                                    ),
-                                    className="bg-light",
-                                ),
-                                dbc.CardBody(
-                                    dcc.Loading(
-                                        dcc.Graph(id="erp-viewer-chart-over-time", config={"displayModeBar": False}),
                                         type="circle",
                                     )
                                 ),

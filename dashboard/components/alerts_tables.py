@@ -14,6 +14,7 @@ from typing import List, Optional, Dict
 
 from src.utils.logger import get_logger
 from dashboard.components.alerts_charts import FEATURE_NAMES_ES
+from dashboard.components.labels import translate_component_label
 
 logger = get_logger(__name__)
 
@@ -38,15 +39,7 @@ def _translate_system(value: object) -> str:
 
 
 def _translate_component(value: object) -> str:
-    mapping = {
-        "engine": "Motor",
-        "post_engine": "Posterior al motor",
-        "rifle": "Conducto principal de aceite",
-        "crankcase": "Cárter",
-        "lubrication": "Lubricación",
-    }
-    key = str(value or "").strip()
-    return mapping.get(key, key or "Sin componente")
+    return translate_component_label(value)
 
 
 def parse_ia_message_sections(mensaje_ia: str) -> Dict[str, str]:

@@ -6,6 +6,7 @@ SISTEMA_COLORS = {
     'Frenos': '#d08c60',
     'Direccion': '#7c6a9a',
     'Dirección': '#7c6a9a',
+    'Dirección': '#7c6a9a',
 }
 """
 Chart components for Alerts Dashboard.
@@ -27,6 +28,38 @@ from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+# Keep raw values for filtering, but use one client-facing label in every
+# alert chart. Capstone publishes ``motor`` while the dashboard presents it
+# as ``Motor``.
+SYSTEM_TRANSLATION = {
+    'Tren de Fuerza': 'Tren de fuerza',
+    'Tren de fuerza': 'Tren de fuerza',
+    'tren de fuerza': 'Tren de fuerza',
+    'Motor': 'Motor',
+    'motor': 'Motor',
+    'Frenos': 'Frenos',
+    'frenos': 'Frenos',
+    'Direccion': 'Dirección',
+    'Dirección': 'Dirección',
+}
+
+
+def translate_system_label(value) -> str:
+    """Return the display label for a raw alert system value."""
+    if value is None or (not isinstance(value, (list, tuple, dict)) and pd.isna(value)):
+        return 'Sin sistema'
+    raw = str(value).strip()
+    if not raw:
+        return 'Sin sistema'
+    translated = SYSTEM_TRANSLATION.get(raw)
+    if translated is not None:
+        return translated
+    folded = raw.casefold()
+    for key, label in SYSTEM_TRANSLATION.items():
+        if key.casefold() == folded:
+            return label
+    return raw
+
 # Operational state color mapping
 STATE_COLORS = {
     'Operacional': '#2ecc71',  # Green
@@ -39,6 +72,9 @@ STATE_COLORS = {
     'RPM_BAJA': '#f39c12',
     'HABILITADO': '#2ecc71',
     'Habilitado': '#2ecc71',
+    'Potencia': '#2ecc71',
+    'potencia': '#2ecc71',
+    'Transicion': '#f39c12',
     'ND': '#95a5a6'            # Gray
 }
 
@@ -46,6 +82,8 @@ STATE_LABELS = {
     'HABILITADO': 'Operacional',
     'Habilitado': 'Operacional',
     'Operacional': 'Operacional',
+    'Potencia': 'Potencia',
+    'potencia': 'Potencia',
     'PREPARACION': 'PreparaciÃ³n',
     'PREPARACIÃ“N': 'PreparaciÃ³n',
     'PreparaciÃ³n': 'PreparaciÃ³n',
@@ -60,8 +98,8 @@ STATE_LABELS = {
 STATE_COLORS.update({
     'Preparaci\u00f3n': '#f39c12',
     'PREPARACI\u00d3N': '#f39c12',
-    'Transici\u00f3n': '#95a5a6',
-    'Transicion': '#95a5a6',
+    'Transici\u00f3n': '#f39c12',
+    'Transicion': '#f39c12',
 })
 STATE_LABELS.update({
     'Preparaci\u00f3n': 'Preparaci\u00f3n',
@@ -71,6 +109,36 @@ STATE_LABELS.update({
     'Transici\u00f3n': 'Transici\u00f3n',
     'Transicion': 'Transici\u00f3n',
 })
+
+# Explicit canonical aliases keep Capstone's accented state values in the
+# same palette as their unaccented/legacy variants.
+STATE_COLORS['Transición'] = '#f39c12'
+STATE_LABELS['Transición'] = 'Transición'
+
+
+def _state_lookup(value, mapping: Dict, default):
+    """Resolve state aliases case-insensitively while preserving raw values."""
+    if value is None or (not isinstance(value, (list, tuple, dict)) and pd.isna(value)):
+        return default
+    raw = str(value).strip()
+    if not raw:
+        return default
+    if raw in mapping:
+        return mapping[raw]
+    folded = raw.casefold()
+    for key, mapped in mapping.items():
+        if str(key).casefold() == folded:
+            return mapped
+    return default
+
+
+def _state_color(value, default='#95a5a6'):
+    return _state_lookup(value, STATE_COLORS, default)
+
+
+def _state_label(value):
+    fallback = str(value).strip() if value is not None else ''
+    return _state_lookup(value, STATE_LABELS, fallback)
 
 # Spanish feature names mapping
 # Signal labels live in src/charts/signals.py so the dashboard and Campbell AI use
@@ -137,28 +205,32 @@ def create_alerts_per_unit_chart(alerts_df: pd.DataFrame) -> go.Figure:
         )
     
     try:
-        # Count alerts per unit and system
-        alerts_per_unit = alerts_df.groupby(['UnitId', 'sistema']).size().reset_index(name='Count')
+        # Count alerts per unit and translated display system.
+        alerts_per_unit = alerts_df.copy()
+        alerts_per_unit['_system_display'] = alerts_per_unit['sistema'].map(translate_system_label)
+        alerts_per_unit = alerts_per_unit.groupby(
+            ['UnitId', '_system_display']
+        ).size().reset_index(name='Count')
         
         # Sort systems in reverse alphabetical order for consistent ordering
-        alerts_per_unit['sistema'] = pd.Categorical(
-            alerts_per_unit['sistema'],
-            categories=sorted(alerts_per_unit['sistema'].unique(), reverse=True),
+        alerts_per_unit['_system_display'] = pd.Categorical(
+            alerts_per_unit['_system_display'],
+            categories=sorted(alerts_per_unit['_system_display'].unique(), reverse=True),
             ordered=True
         )
-        alerts_per_unit = alerts_per_unit.sort_values('sistema')
+        alerts_per_unit = alerts_per_unit.sort_values('_system_display')
         
         # Create horizontal bar chart
         fig = px.bar(
             alerts_per_unit,
             y='UnitId',
             x='Count',
-            color='sistema',
+            color='_system_display',
             orientation='h',
             title=None,
-            labels={'Count': 'Número de Alertas', 'UnitId': 'Unidad'},
             template='plotly_white',
             height=500,
+            labels={'Count': 'Número de Alertas', 'UnitId': 'Unidad', '_system_display': 'Sistema'},
             color_discrete_map=SISTEMA_COLORS
         )
         # Horizontal, compact legend at top right
@@ -209,26 +281,30 @@ def create_alerts_per_month_chart(alerts_df: pd.DataFrame) -> go.Figure:
         )
     
     try:
-        # Count alerts per month and system
-        alerts_per_month = alerts_df.groupby(['Month', 'sistema']).size().reset_index(name='Count')
+        # Count alerts per month and translated display system.
+        alerts_per_month = alerts_df.copy()
+        alerts_per_month['_system_display'] = alerts_per_month['sistema'].map(translate_system_label)
+        alerts_per_month = alerts_per_month.groupby(
+            ['Month', '_system_display']
+        ).size().reset_index(name='Count')
         alerts_per_month['Month_str'] = alerts_per_month['Month'].astype(str)
         
         # Sort systems in reverse alphabetical order for consistent ordering
-        alerts_per_month['sistema'] = pd.Categorical(
-            alerts_per_month['sistema'],
-            categories=sorted(alerts_per_month['sistema'].unique(), reverse=True),
+        alerts_per_month['_system_display'] = pd.Categorical(
+            alerts_per_month['_system_display'],
+            categories=sorted(alerts_per_month['_system_display'].unique(), reverse=True),
             ordered=True
         )
-        alerts_per_month = alerts_per_month.sort_values('sistema')
+        alerts_per_month = alerts_per_month.sort_values('_system_display')
         
         # Create vertical bar chart
         fig = px.bar(
             alerts_per_month,
             x='Month_str',
             y='Count',
-            color='sistema',
+            color='_system_display',
             title=None,
-            labels={'Month_str': 'Mes', 'Count': 'Número de Alertas'},
+            labels={'Month_str': 'Mes', 'Count': 'Número de Alertas', '_system_display': 'Sistema'},
             template='plotly_white',
             height=500,
             color_discrete_map=SISTEMA_COLORS
@@ -270,9 +346,7 @@ def create_alerts_per_week_chart(alerts_df: pd.DataFrame) -> go.Figure:
     timestamp = pd.to_datetime(frame.get('Timestamp'), errors='coerce')
     frame = frame.loc[timestamp.notna()].copy()
     frame['_week_start'] = timestamp.loc[frame.index].dt.to_period('W-SUN').dt.start_time
-    frame['_system_display'] = frame.get('sistema', '').map(lambda value: {
-        'Direccion': 'Dirección', 'Dirección': 'Dirección', 'Tren de Fuerza': 'Tren de fuerza'
-    }.get(value, value))
+    frame['_system_display'] = frame.get('sistema', '').map(translate_system_label)
     grouped = frame.groupby(['_week_start', '_system_display']).size().reset_index(name='Count')
     weeks = pd.date_range(frame['_week_start'].min(), frame['_week_start'].max(), freq='7D')
     systems = sorted(frame['_system_display'].dropna().unique())
@@ -456,7 +530,7 @@ def create_sensor_trends_chart(
                         legendgroup=estado,
                         showlegend=(idx == 1),  # Only show legend for first subplot
                         marker=dict(
-                            color=STATE_COLORS.get(estado, '#95a5a6'),
+                            color=_state_color(estado),
                             size=6
                         ),
                         hovertemplate=(
@@ -800,21 +874,23 @@ def create_system_distribution_pie_chart(alerts_df: pd.DataFrame) -> go.Figure:
         )
     
     try:
-        # Count alerts by system
-        system_counts = alerts_df['sistema'].value_counts().reset_index()
-        system_counts.columns = ['sistema', 'Count']
+        # Count alerts by translated display system.
+        system_counts = alerts_df.copy()
+        system_counts['_system_display'] = system_counts['sistema'].map(translate_system_label)
+        system_counts = system_counts['_system_display'].value_counts().reset_index()
+        system_counts.columns = ['_system_display', 'Count']
         
         # Sort systems in reverse alphabetical order
-        system_counts = system_counts.sort_values('sistema', ascending=False)
+        system_counts = system_counts.sort_values('_system_display', ascending=False)
         
         # Create pie chart with standard color mapping
         fig = px.pie(
             system_counts,
             values='Count',
-            names='sistema',
+            names='_system_display',
             title=None,  # Remove title
             hole=0.3,  # Makes it a donut chart
-            color='sistema',
+            color='_system_display',
             color_discrete_map=SISTEMA_COLORS
         )
         fig.update_traces(
@@ -949,10 +1025,10 @@ def create_sensor_trends_chart_golden(
                 if 'State' not in value_data.columns:
                     value_data['State'] = ''
                 state_labels = value_data['State'].map(
-                    lambda state: STATE_LABELS.get(str(state), str(state)) if str(state) else ''
+                    lambda state: _state_label(state) if str(state).strip() else ''
                 )
                 state_colors = value_data['State'].map(
-                    lambda state: STATE_COLORS.get(str(state), '#2ecc71') if str(state) else '#2ecc71'
+                    lambda state: _state_color(state) if str(state).strip() else '#2ecc71'
                 )
                 fig.add_trace(
                     go.Scatter(
@@ -994,12 +1070,12 @@ def create_sensor_trends_chart_golden(
                                 legendgroup=state,
                                 showlegend=(idx == 1),
                                 marker=dict(
-                                    color=STATE_COLORS.get(state, '#95a5a6'),
+                                    color=_state_color(state),
                                     size=8,
                                     line=dict(width=1, color='white')
                                 ),
                                 line=dict(
-                                    color=STATE_COLORS.get(state, '#95a5a6'),
+                                    color=_state_color(state),
                                     width=2
                                 ),
                                 hovertemplate=(
@@ -1098,7 +1174,7 @@ def create_sensor_trends_chart_golden(
                 if raw_state and raw_state not in seen_states:
                     seen_states.append(raw_state)
             for raw_state in reversed(seen_states):
-                state_label = STATE_LABELS.get(raw_state, raw_state)
+                state_label = _state_label(raw_state)
                 fig.add_trace(
                     go.Scatter(
                         x=[None],
@@ -1108,7 +1184,7 @@ def create_sensor_trends_chart_golden(
                         legendgroup=raw_state,
                         marker=dict(
                             size=8,
-                            color=STATE_COLORS.get(raw_state, '#95a5a6'),
+                            color=_state_color(raw_state),
                             line=dict(width=1, color='white')
                         ),
                         hoverinfo='skip',

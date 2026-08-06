@@ -4,10 +4,18 @@ import pandas as pd
 
 from dashboard.components.alerts_charts import (
     FEATURE_NAMES_ES,
+    create_alerts_per_unit_chart,
+    create_alerts_per_week_chart,
+    create_system_distribution_pie_chart,
     create_context_kpis_cards_golden,
+    create_sensor_trends_chart_golden,
 )
 from dashboard.callbacks.alerts_callbacks import _select_telemetry_alert_data
-from dashboard.components.alerts_report import prepare_alert_rows
+from dashboard.components.alerts_report import (
+    prepare_alert_rows,
+    translate_alert_component,
+    translate_alert_system,
+)
 from dashboard.components.alerts_tables import parse_ia_message_sections
 from src.data.loaders import _load_alerts_data_cached, load_alerts_data
 
@@ -45,6 +53,13 @@ def test_capstone_canonical_signals_and_structured_ai_are_client_facing():
     assert "Presión del refrigerante" in sections["acciones"]
     assert rows.loc[0, "component_display"] == "Motor"
     assert rows.loc[0, "signal_display"] == "Velocidad del motor"
+
+
+def test_component_labels_are_consistent_for_mixed_source_casing():
+    assert translate_alert_component("engine") == "Motor"
+    assert translate_alert_component("Engine") == "Motor"
+    assert translate_alert_component("lubrication") == "Lubricación"
+    assert translate_alert_component("Lubrication") == "Lubricación"
 
 
 def test_capstone_loader_uses_configured_data_root(tmp_path, monkeypatch):
@@ -130,3 +145,68 @@ def test_capstone_context_kpis_use_canonical_engine_signals():
 
     assert "42%" in rendered
     assert "1234 RPM" in rendered
+
+
+def test_capstone_system_labels_are_translated_in_alert_charts():
+    alerts = pd.DataFrame(
+        [
+            {
+                "UnitId": "CA-42",
+                "sistema": "motor",
+                "Timestamp": "2026-07-10T12:00:00",
+            }
+        ]
+    )
+
+    unit_chart = create_alerts_per_unit_chart(alerts)
+    week_chart = create_alerts_per_week_chart(alerts)
+    pie_chart = create_system_distribution_pie_chart(alerts)
+
+    assert translate_alert_system("motor") == "Motor"
+    assert {trace.name for trace in unit_chart.data} == {"Motor"}
+    assert unit_chart.data[0].marker.color == "#355c7d"
+    assert {trace.name for trace in week_chart.data} == {"Motor"}
+    assert set(pie_chart.data[0].labels) == {"Motor"}
+    assert list(pie_chart.data[0].marker.colors) == ["#355c7d"]
+
+
+def test_capstone_state_markers_and_legend_use_semantic_colors():
+    alert_time = pd.Timestamp("2026-07-10 12:00:00")
+    alert_data = pd.DataFrame(
+        [
+            {
+                "TimeStart": alert_time - pd.Timedelta(minutes=30),
+                "crankcase_pressure_inh2o_Value": 2.0,
+                "State": "Potencia",
+            },
+            {
+                "TimeStart": alert_time - pd.Timedelta(minutes=15),
+                "crankcase_pressure_inh2o_Value": 3.0,
+                "State": "TRANSICION",
+            },
+            {
+                "TimeStart": alert_time,
+                "crankcase_pressure_inh2o_Value": 4.0,
+                "State": "Desconocido",
+            },
+        ]
+    )
+
+    figure = create_sensor_trends_chart_golden(
+        alert_data=alert_data,
+        feature_names=["crankcase_pressure_inh2o"],
+        unit_id="CA-42",
+        alert_time=alert_time,
+        feature_name_map=FEATURE_NAMES_ES,
+        client="CAPSTONE",
+    )
+
+    sensor_trace = next(trace for trace in figure.data if trace.mode == "lines+markers")
+    assert list(sensor_trace.marker.color) == ["#2ecc71", "#f39c12", "#95a5a6"]
+
+    state_legend = {
+        trace.name: trace.marker.color
+        for trace in figure.data
+        if trace.name in {"Potencia", "Transición"}
+    }
+    assert state_legend == {"Potencia": "#2ecc71", "Transición": "#f39c12"}

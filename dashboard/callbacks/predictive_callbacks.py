@@ -50,11 +50,11 @@ def register_callbacks(app):
             if not filepath:
                 return html.P(f"No hay datos para {component}.", className="text-muted text-center")
 
-            df, df_latest, prev_ranking = _load_overview_component(filepath, component)
+            df, df_latest, prev_ranking = _load_overview_component(filepath, component, client)
             if df_latest is None or df_latest.empty:
                 return html.P(f"No hay datos disponibles para {component}.", className="text-muted text-center")
 
-            return _render_component_overview(df_latest, prev_ranking, component, client)
+            return _render_component_overview(df_latest, prev_ranking, component, client, df=df)
 
         else:
             # Render evidence shell (interactive parts handled by other callbacks)
@@ -63,9 +63,9 @@ def register_callbacks(app):
             if not filepath:
                 return html.P(f"No hay datos para {component}.", className="text-muted text-center")
 
-            df, df_latest = _load_evidence_component(filepath, component)
+            df, df_latest = _load_evidence_component(filepath, component, client)
             units = sorted(df["Unit"].unique()) if df is not None else []
-            failure_mode_options = get_failure_mode_options(component)
+            failure_mode_options = get_failure_mode_options(component, client)
 
             return html.Div([
                 # Unit selector
@@ -109,6 +109,22 @@ def register_callbacks(app):
             ])
 
     # ══════════════════════════════════════════════════════════════════════════
+    # OVERVIEW: Análisis de Riesgo view switch (Riesgo Acumulado / Prioridad Actual)
+    # ══════════════════════════════════════════════════════════════════════════
+
+    @app.callback(
+        Output("predictive-risk-curve-container", "style"),
+        Output("predictive-risk-priority-container", "style"),
+        Input("predictive-risk-view-selector", "value"),
+        prevent_initial_call=True,
+    )
+    def toggle_risk_view(view):
+        """Switch between the accumulated-risk curve and the priority cards without re-rendering either."""
+        if view == "acumulado":
+            return {"display": "block"}, {"display": "none"}
+        return {"display": "none"}, {"display": "block"}
+
+    # ══════════════════════════════════════════════════════════════════════════
     # OVERVIEW: Sort failure mode table by selected period
     # ══════════════════════════════════════════════════════════════════════════
 
@@ -129,11 +145,11 @@ def register_callbacks(app):
         if not filepath:
             return no_update
 
-        df, df_latest, _ = _load_overview_component(filepath, component)
+        df, df_latest, _ = _load_overview_component(filepath, component, client)
         if df_latest is None or df_latest.empty:
             return no_update
 
-        failure_modes = get_failure_modes_dict(component)
+        failure_modes = get_failure_modes_dict(component, client)
 
         # Classify status (same logic as _render_component_overview)
         # Saludable: avg_ranking_30d < 30 AND max_fm_30d < 50
@@ -182,7 +198,7 @@ def register_callbacks(app):
             components = _discover_components(client)
             filepath = components.get(component)
             if filepath:
-                _, df_latest = _load_evidence_component(filepath, component)
+                _, df_latest = _load_evidence_component(filepath, component, client)
                 if df_latest is not None and not df_latest.empty:
                     row = df_latest[df_latest["Unit"] == selected_unit]
                     if not row.empty:
@@ -232,7 +248,7 @@ def register_callbacks(app):
                             filepath = components_map.get(component)
                             last_ev_date = None
                             if filepath:
-                                df_ev, _ = _load_evidence_component(filepath, component)
+                                df_ev, _ = _load_evidence_component(filepath, component, client)
                                 if df_ev is not None:
                                     df_ev_unit = df_ev[df_ev["Unit"] == selected_unit]
                                     if not df_ev_unit.empty:
@@ -348,7 +364,7 @@ def register_callbacks(app):
         if not filepath:
             return html.Div(html.P("No hay datos disponibles.", className="text-muted text-center", style={"padding": "40px"}))
 
-        df, df_latest = _load_evidence_component(filepath, component)
+        df, df_latest = _load_evidence_component(filepath, component, client)
         if df is None:
             return html.Div(html.P("No hay datos disponibles.", className="text-muted text-center", style={"padding": "40px"}))
 
@@ -373,11 +389,11 @@ def register_callbacks(app):
         if not filepath:
             return no_update
 
-        df, df_latest = _load_evidence_component(filepath, component)
+        df, df_latest = _load_evidence_component(filepath, component, client)
         if df is None or df_latest is None:
             return no_update
 
-        failure_modes = get_failure_modes_dict(component)
+        failure_modes = get_failure_modes_dict(component, client)
         row = df_latest[df_latest["Unit"] == selected_unit]
         if row.empty:
             return list(failure_modes.keys())[0] if failure_modes else None
@@ -408,11 +424,11 @@ def register_callbacks(app):
         if not filepath:
             return html.Div(html.P("No hay datos disponibles.", className="text-muted text-center", style={"padding": "40px"}))
 
-        df, df_latest = _load_evidence_component(filepath, component)
+        df, df_latest = _load_evidence_component(filepath, component, client)
         if df is None:
             return html.Div(html.P("No hay datos disponibles.", className="text-muted text-center", style={"padding": "40px"}))
 
-        return render_detailed_evidence(selected_unit, df, df_latest, selected_failure_mode, component)
+        return render_detailed_evidence(selected_unit, df, df_latest, selected_failure_mode, component, client)
 
     # ══════════════════════════════════════════════════════════════════════════
     # EVIDENCE: Oil chart update (when user changes variable selection)
@@ -430,18 +446,25 @@ def register_callbacks(app):
     def update_oil_chart(selected_vars, oil_range, selected_unit, client, component):
         """Update oil timeseries chart based on user-selected variables."""
         from dashboard.components.predictive_charts import create_oil_timeseries_90d
-        from dashboard.components.predictive_config import OIL_LABELS, OIL_THRESHOLDS
+        from dashboard.components.predictive_config import OIL_LABELS, load_predictive_oil_limits_four
 
         if not selected_vars or not selected_unit or not client or not component:
             return html.P("Seleccione al menos una variable de aceite.",
                          className="text-muted", style={"fontSize": "13px", "padding": "20px", "textAlign": "center"})
+
+        # Resolve per-client labels (fallback to cda if missing) and the
+        # four-limit Stewart dict (LIC/LIM/LSM/LSC, v2.8) for this component -
+        # never the legacy three-limit OIL_THRESHOLDS table.
+        _ckey = (client or "cda").lower()
+        oil_labels = OIL_LABELS.get(_ckey, OIL_LABELS["cda"])
+        oil_limits_four = load_predictive_oil_limits_four(_ckey, component)
 
         components = _discover_components(client)
         filepath = components.get(component)
         if not filepath:
             return html.P("No hay datos disponibles.", className="text-muted")
 
-        df, _ = _load_evidence_component(filepath, component)
+        df, _ = _load_evidence_component(filepath, component, client)
         if df is None:
             return html.P("No hay datos disponibles.", className="text-muted")
 
@@ -449,10 +472,10 @@ def register_callbacks(app):
         if df_unit.empty:
             return html.P("No hay datos para esta unidad.", className="text-muted")
 
-        # Always pass thresholds — the chart function shows limit lines when len(vars)==1
+        # Always pass limits — the chart function shows limit lines when len(vars)==1
         fig = create_oil_timeseries_90d(
-            df_unit, selected_vars, OIL_LABELS,
-            oil_thresholds=OIL_THRESHOLDS,
+            df_unit, selected_vars, oil_labels,
+            oil_limits_four=oil_limits_four,
             oil_range=oil_range,
         )
 

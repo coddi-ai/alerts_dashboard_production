@@ -227,6 +227,53 @@ class StewartLimits(BaseModel):
     }
 
 
+class StewartLimitsFour(BaseModel):
+    """
+    Schema for the four-limit Stewart output (Golden layer, v2.8).
+
+    Uses the main service's own field names (LIC/LIM/LSM/LSC) directly - no limit-name
+    transformation required downstream. Based on data_contracts.md v2.8
+    stewart_limits_four.parquet specification.
+    """
+    client: str = Field(..., description="Client identifier")
+    machine: str = Field(..., description="Normalized machine name")
+    component: str = Field(..., description="Component name")
+    essay: str = Field(..., description="Essay name")
+    oilHourRange: str = Field(..., description="Oil age category: 'LT_1000', 'GE_1000', 'UNKNOWN'")
+    GroupElement: Optional[str] = Field(default=None, description="Essay classification from essays_elements.xlsx")
+    min_value: Optional[float] = Field(default=None, description="Minimum observed (non-null) value for this essay/component/oilHourRange")
+
+    # Lower limits (2nd/5th percentile) - null when lower limits don't apply
+    LIC: Optional[float] = Field(default=None, description="Límite Inferior Condenatorio (2nd percentile)")
+    LIM: Optional[float] = Field(default=None, description="Límite Inferior Marginal (5th percentile)")
+
+    # Upper limits (95th/98th percentile) - always calculated
+    LSM: float = Field(..., description="Límite Superior Marginal (95th percentile)")
+    LSC: float = Field(..., description="Límite Superior Condenatorio (98th percentile)")
+
+    sample_count: int = Field(default=0, description="Number of samples used for calculation")
+    calculation_date: Optional[str] = Field(default=None, description="ISO timestamp of calculation")
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "client": "CDA",
+                "machine": "camion",
+                "component": "motor diesel",
+                "essay": "Hierro",
+                "oilHourRange": "GE_1000",
+                "GroupElement": "Desgaste",
+                "min_value": 12.0,
+                "LIC": None,
+                "LIM": None,
+                "LSM": 45.0,
+                "LSC": 58.0,
+                "sample_count": 450
+            }
+        }
+    }
+
+
 def dataframe_to_oil_samples(df: pd.DataFrame) -> List[OilSample]:
     """
     Convert DataFrame to list of OilSample models.

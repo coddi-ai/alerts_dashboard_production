@@ -99,6 +99,7 @@ dataDev2/*
 dataDep/*
 
 new_dashboard/*
+migration_dashboard/*
 ai_docs/*
 
 # PDF files (local reference docs)

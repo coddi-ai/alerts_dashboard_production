@@ -35,6 +35,15 @@ from dashboard.components.alerts_charts import (
     create_gps_route_map_golden,
     create_context_kpis_cards_golden
 )
+from dashboard.components.oil_charts import (
+    build_oil_time_series_grid,
+    get_essay_limits_four,
+    classify_four_limit_value,
+    FOUR_LIMIT_STATUS_ORDER,
+    FOUR_LIMIT_STATUS_HEX_COLORS,
+    UPPER_LIMIT_COLOR,
+    LOWER_LIMIT_COLOR,
+)
 from dashboard.components.alerts_tables import (
     create_alerts_datatable,
     create_alerts_report_table,
@@ -45,6 +54,7 @@ from dashboard.components.alerts_report import (
     alert_summary,
     filter_alert_rows,
     prepare_alert_rows,
+    translate_alert_component,
     translate_alert_system,
 )
 from dashboard.tabs.tab_alerts_general import create_summary_stats_display, create_layout as create_general_layout
@@ -301,7 +311,7 @@ def initialize_alert_dropdown(client: str):
         # Create dropdown options
         options = []
         for _, row in alerts_df.sort_values('Timestamp', ascending=False).iterrows():
-            label = f"{row['FusionID']} | {row['Timestamp'].strftime('%Y-%m-%d %H:%M')} | {row['UnitId']} | {row['componente']}"
+            label = f"{row['FusionID']} | {row['Timestamp'].strftime('%Y-%m-%d %H:%M')} | {row['UnitId']} | {translate_alert_component(row['componente'])}"
             options.append({'label': label, 'value': row['FusionID']})
         
         logger.info(f"Dropdown initialized with {len(options)} alerts")
@@ -455,7 +465,10 @@ def populate_detail_filter_options(client: str):
         unit_options = [{'label': unit, 'value': unit} for unit in sorted(alerts_df['UnitId'].unique())]
         
         # Sistema filter options
-        sistema_options = [{'label': sistema, 'value': sistema} for sistema in sorted(alerts_df['sistema'].unique())]
+        sistema_options = [
+            {'label': translate_alert_system(sistema), 'value': sistema}
+            for sistema in sorted(alerts_df['sistema'].unique())
+        ]
         
         logger.info(f"Filter options populated: {len(unit_options)} units, {len(sistema_options)} sistemas")
         return unit_options, sistema_options
@@ -532,7 +545,7 @@ def filter_alert_dropdown_by_criteria(units, sistemas, has_telemetry, has_tribol
         # Create filtered options
         alert_options = []
         for _, row in filtered_df.sort_values('Timestamp', ascending=False).iterrows():
-            label = f"{row['FusionID']} | {row['Timestamp'].strftime('%Y-%m-%d %H:%M')} | {row['UnitId']} | {row['componente']}"
+            label = f"{row['FusionID']} | {row['Timestamp'].strftime('%Y-%m-%d %H:%M')} | {row['UnitId']} | {translate_alert_component(row['componente'])}"
             alert_options.append({'label': label, 'value': row['FusionID']})
         
         logger.info(f"Filtered alerts: {len(alert_options)} options")
@@ -564,11 +577,11 @@ def _alert_case_header(row: pd.Series) -> html.Div:
         ], className='bg-light'),
         dbc.CardBody([
             dbc.Row([
-                dbc.Col([html.Small('Unidad', className='text-muted d-block'), html.Strong(prepared.get('UnitId', '-'))], md=2),
-                dbc.Col([html.Small('Sistema', className='text-muted d-block'), html.Strong(prepared.get('system_display', '-'))], md=2),
-                dbc.Col([html.Small('Componente', className='text-muted d-block'), html.Strong(prepared.get('componente', '-'))], md=3),
-                dbc.Col([html.Small('Fecha', className='text-muted d-block'), html.Strong(timestamp)], md=3),
-                dbc.Col([html.Small('Fuente', className='text-muted d-block'), html.Strong(prepared.get('source_display', '-'))], md=2),
+                dbc.Col([html.Small('Unidad', className='text-muted d-block text-nowrap'), html.Strong(prepared.get('UnitId', '-'))], xs=6, lg=2),
+                dbc.Col([html.Small('Sistema', className='text-muted d-block text-nowrap'), html.Strong(prepared.get('system_display', '-'))], xs=6, lg=2),
+                dbc.Col([html.Small('Componente', className='text-muted d-block text-nowrap'), html.Strong(prepared.get('component_display', '-'))], xs=6, lg=3),
+                dbc.Col([html.Small('Fecha', className='text-muted d-block text-nowrap'), html.Strong(timestamp)], xs=6, lg=3),
+                dbc.Col([html.Small('Fuente', className='text-muted d-block text-nowrap'), html.Strong(prepared.get('source_display', '-'))], xs=6, lg=2),
             ], className='g-3'),
             html.Div([
                 html.Strong('Señal / variable: ', className='text-muted'),
@@ -915,6 +928,52 @@ def create_telemetry_evidence_section(alert_row: pd.Series, client: str) -> html
         ])
 
 
+def _build_oil_tendencia_view(history_full, comp_limits, oil_hour_range, start_date, end_date):
+    """
+    Build the Tendencia (oil report history) sub-view: a date-range filter on
+    the oil REPORT date (sampleDate, inclusive boundaries) plus the shared
+    9-chart time-series grid. Isolated by design - this filter only affects
+    this chart, not the rest of Monitoring > Alertas.
+
+    Args:
+        history_full: Unfiltered sampleDate-sorted history for this equipment/component.
+        comp_limits: Four-limit Stewart limits dict for this component.
+        oil_hour_range: oilHourRange of the most recent sample, for limit lookup.
+        start_date, end_date: ISO date strings (or None for no bound).
+
+    Returns:
+        List of Dash components (date-range picker row + the chart grid).
+    """
+    history = history_full
+    if not history.empty:
+        if start_date:
+            history = history[history['sampleDate'] >= pd.to_datetime(start_date)]
+        if end_date:
+            history = history[history['sampleDate'] <= pd.to_datetime(end_date)]
+
+    grid = build_oil_time_series_grid(history, comp_limits, oil_hour_range)
+
+    return [
+        dbc.Row([
+            dbc.Col([
+                html.Small("Rango de fechas (reporte de aceite): ", className="text-muted me-2"),
+                dcc.DatePickerRange(
+                    id='alert-oil-tendencia-date-range',
+                    start_date=start_date,
+                    end_date=end_date,
+                    display_format='DD/MM/YYYY',
+                    className="d-inline-block",
+                ),
+            ], width='auto'),
+            dbc.Col([
+                dbc.Button([html.I(className="fas fa-times me-1"), "Limpiar"],
+                           id='alert-oil-tendencia-date-clear', color="outline-secondary", size="sm")
+            ], width='auto'),
+        ], className="mb-2 align-items-center g-2"),
+        grid,
+    ]
+
+
 def create_oil_evidence_section(alert_row: pd.Series, client: str) -> html.Div:
     """
     Create oil evidence section with grouped radar charts and threshold tables.
@@ -977,72 +1036,72 @@ def create_oil_evidence_section(alert_row: pd.Series, client: str) -> html.Div:
         remaining_groups = sorted([g for g in group_mapping.keys() if g not in priority_groups])
         ordered_groups.extend(remaining_groups)
         
-        # Load Stewart limits
-        from src.data.loaders import load_stewart_limits
+        # Load four-limit Stewart limits (LIC/LIM/LSM/LSC, data contract v2.8)
+        from src.data.loaders import load_stewart_limits_four
         from config.settings import get_settings
         settings = get_settings()
-        limits_file = settings.get_stewart_limits_path(client)
-        limits = load_stewart_limits(limits_file) if limits_file.exists() else None
-        
+        limits_file = settings.get_stewart_limits_four_path(client)
+        limits = load_stewart_limits_four(limits_file) if limits_file.exists() else None
+
         if not limits:
             return html.Div([
                 dbc.Alert("Límites Stewart no disponibles", color="warning")
             ])
-        
+
         # Get limits for this component
         machine = oil_report.get('machineName', '')
         component_normalized = oil_report.get('componentNameNormalized', oil_report.get('componentName', ''))
-        
+
         if client not in limits or machine not in limits[client] or component_normalized not in limits[client][machine]:
             return html.Div([
                 dbc.Alert(f"Límites no disponibles para {machine}/{component_normalized}", color="warning")
             ])
-        
+
         comp_limits = limits[client][machine][component_normalized]
-        
+
         # Get sample's oil hour range for v2.3 stratified limits
         sample_oil_hour_range = oil_report.get('oilHourRange', 'UNKNOWN')
         logger.info(f"Sample oilHourRange: {sample_oil_hour_range}")
-        
-        # Helper function to get stratified limits with fallback (v2.3)
+
+        # ── Tendencia: same equipment/component history, shared grid builder ──
+        # Scoped to a date-range filter on the oil REPORT date (sampleDate),
+        # defaulting to this equipment/component's own latest 12 months of
+        # history. This filter is isolated to the Tendencia chart below - it
+        # does not affect the alerts list/table/KPIs elsewhere in Monitoring >
+        # Alertas.
+        unit_id = oil_report.get('unitId')
+        oil_component_name = oil_report.get('componentName')
+        tendencia_history_full = oil_classified[
+            (oil_classified['unitId'] == unit_id) & (oil_classified['componentName'] == oil_component_name)
+        ].copy()
+        if not tendencia_history_full.empty:
+            tendencia_history_full['sampleDate'] = pd.to_datetime(tendencia_history_full['sampleDate'])
+            tendencia_history_full = tendencia_history_full.sort_values('sampleDate')
+
+        default_end = tendencia_history_full['sampleDate'].max() if not tendencia_history_full.empty else None
+        default_start = (default_end - pd.DateOffset(months=12)) if default_end is not None else None
+        default_start_str = default_start.strftime('%Y-%m-%d') if default_start is not None else None
+        default_end_str = default_end.strftime('%Y-%m-%d') if default_end is not None else None
+
+        tendencia_context = {
+            'client': client,
+            'unit_id': unit_id,
+            'component_name': oil_component_name,
+            'machine': machine,
+            'component_normalized': component_normalized,
+            'oil_hour_range': sample_oil_hour_range,
+        }
+
+        tendencia_view_children = _build_oil_tendencia_view(
+            tendencia_history_full, comp_limits, sample_oil_hour_range,
+            start_date=default_start_str, end_date=default_end_str,
+        )
+
+        # Stratified limit lookup with fallback, shared with Monitoring > Oil > Details
+        # (dashboard/components/oil_charts.py::get_essay_limits_four)
         def get_essay_limits(essay_name, oil_hour_range):
-            """
-            Get limits for an essay with oil-hour stratification fallback.
-            
-            Fallback hierarchy:
-            1. Exact match: essay + oilHourRange
-            2. Fallback: Average across all available oilHourRanges for this essay
-            3. Legacy: Single 'ALL' key (v2.2 compatibility)
-            
-            Returns: dict with threshold_normal, threshold_alert, threshold_critic or None
-            """
-            if essay_name not in comp_limits:
-                return None
-            
-            essay_limits = comp_limits[essay_name]
-            
-            # Try exact match (v2.3 preferred)
-            if oil_hour_range in essay_limits:
-                logger.debug(f"Essay {essay_name}: Using oil_hour_stratified limits ({oil_hour_range})")
-                return essay_limits[oil_hour_range]
-            
-            # Try legacy 'ALL' key (v2.2 compatibility)
-            if 'ALL' in essay_limits:
-                logger.debug(f"Essay {essay_name}: Using legacy non-stratified limits (v2.2)")
-                return essay_limits['ALL']
-            
-            # Fallback: Average across all available oil hour ranges
-            if len(essay_limits) > 0:
-                logger.debug(f"Essay {essay_name}: Using fallback_global (averaging {len(essay_limits)} ranges)")
-                avg_limits = {
-                    'threshold_normal': sum(v.get('threshold_normal', 0) for v in essay_limits.values()) / len(essay_limits),
-                    'threshold_alert': sum(v.get('threshold_alert', 0) for v in essay_limits.values()) / len(essay_limits),
-                    'threshold_critic': sum(v.get('threshold_critic', 0) for v in essay_limits.values()) / len(essay_limits)
-                }
-                return avg_limits
-            
-            return None
-        
+            return get_essay_limits_four(comp_limits, essay_name, oil_hour_range)
+
         # Create charts and tables for each group
         charts_and_tables = []
         
@@ -1064,87 +1123,92 @@ def create_oil_evidence_section(alert_row: pd.Series, client: str) -> html.Div:
             normalized_values = []
             actual_values = []
             table_data = []
-            
+            group_has_lower = False
+
+            def _fmt_limit(v):
+                return round(v, 2) if v is not None else '—'
+
             for essay in valid_essays:
                 value = float(oil_report[essay])
                 actual_values.append(value)
-                
-                # Get stratified limits
+
+                # Get four-limit thresholds (LIC/LIM/LSM/LSC)
                 essay_limits = get_essay_limits(essay, sample_oil_hour_range)
-                normal = essay_limits.get('threshold_normal', 0)
-                alert = essay_limits.get('threshold_alert', 0)
-                critic = essay_limits.get('threshold_critic', 0)
-                
-                # Normalize value for radar chart (0-100 scale)
-                if value >= critic:
-                    norm_value = 100
-                elif value >= alert:
-                    norm_value = 70 + (value - alert) / max(critic - alert, 1) * 30
-                elif value >= normal:
-                    norm_value = 50 + (value - normal) / max(alert - normal, 1) * 20
+                lic = essay_limits.get('LIC')
+                lim = essay_limits.get('LIM')
+                lsm = essay_limits.get('LSM', 0)
+                lsc = essay_limits.get('LSC', 0)
+                has_lower = lic is not None and lim is not None
+                group_has_lower = group_has_lower or has_lower
+
+                # Normalize value to a 0-100 scale for the radar chart
+                if has_lower:
+                    if value < lic:
+                        norm_value = max((value / lic) * 20, 0.0) if lic else 0.0
+                    elif value < lim:
+                        norm_value = 20 + (value - lic) / max(lim - lic, 1e-9) * 20
+                    elif value <= lsm:
+                        norm_value = 40 + (value - lim) / max(lsm - lim, 1e-9) * 20
+                    elif value <= lsc:
+                        norm_value = 60 + (value - lsm) / max(lsc - lsm, 1e-9) * 20
+                    else:
+                        norm_value = min(80 + (value - lsc) / max(lsc, 1e-9) * 20, 100)
                 else:
-                    norm_value = (value / max(normal, 1)) * 50
-                
-                normalized_values.append(min(norm_value, 100))
-                
-                # Determine status
-                if value >= critic:
-                    status = 'Crítico'
-                    color = '#dc3545'
-                elif value >= alert:
-                    status = 'Condenatorio'
-                    color = '#fd7e14'
-                elif value >= normal:
-                    status = 'Marginal'
-                    color = '#ffc107'
-                else:
-                    status = 'Normal'
-                    color = '#28a745'
-                
+                    if value <= lsm:
+                        norm_value = (value / lsm) * 60 if lsm else 0.0
+                    elif value <= lsc:
+                        norm_value = 60 + (value - lsm) / max(lsc - lsm, 1e-9) * 20
+                    else:
+                        norm_value = min(80 + (value - lsc) / max(lsc, 1e-9) * 20, 100)
+
+                normalized_values.append(min(max(norm_value, 0.0), 100))
+
+                # Determine status (data contract v2.8 five-tier classification)
+                status = classify_four_limit_value(value, lic, lim, lsm, lsc)
+                color = FOUR_LIMIT_STATUS_HEX_COLORS.get(status, '#28a745')
+
                 table_data.append({
                     'essay': essay,
                     'value': round(value, 2),
                     'status': status,
-                    'normal': round(normal, 2),
-                    'alert': round(alert, 2),
-                    'critic': round(critic, 2),
+                    'lic': _fmt_limit(lic),
+                    'lim': _fmt_limit(lim),
+                    'lsm': _fmt_limit(lsm),
+                    'lsc': _fmt_limit(lsc),
                     '_color': color
                 })
-            
+
             # Sort table by status severity
-            status_order = {'Crítico': 0, 'Condenatorio': 1, 'Marginal': 2, 'Normal': 3}
-            table_data.sort(key=lambda x: (status_order.get(x['status'], 4), x['essay']))
+            table_data.sort(key=lambda x: (FOUR_LIMIT_STATUS_ORDER.get(x['status'], 9), x['essay']))
             
             # Create radar chart
             fig = go.Figure()
             
-            # Add threshold rings
-            fig.add_trace(go.Scatterpolar(
-                r=[90] * len(valid_essays),
-                theta=valid_essays,
-                name='Crítico',
-                line=dict(color='red', dash='dash', width=2),
-                fill=None,
-                mode='lines'
-            ))
-            
-            fig.add_trace(go.Scatterpolar(
-                r=[70] * len(valid_essays),
-                theta=valid_essays,
-                name='Condenatorio',
-                line=dict(color='orange', dash='dash', width=2),
-                fill=None,
-                mode='lines'
-            ))
-            
-            fig.add_trace(go.Scatterpolar(
-                r=[50] * len(valid_essays),
-                theta=valid_essays,
-                name='Marginal',
-                line=dict(color='#ffc107', dash='dash', width=2),
-                fill=None,
-                mode='lines'
-            ))
+            # Add threshold rings - LIC/LIM only shown when the group has lower
+            # limits. Lower-limit rings use the shared purple (not blue),
+            # matching every other oil visualization.
+            if group_has_lower:
+                ring_specs = [
+                    (80, 'LSC (Superior Condenatorio)', UPPER_LIMIT_COLOR),
+                    (60, 'LSM (Superior Marginal)', 'orange'),
+                    (40, 'LIM (Inferior Marginal)', LOWER_LIMIT_COLOR),
+                    (20, 'LIC (Inferior Condenatorio)', LOWER_LIMIT_COLOR),
+                ]
+            else:
+                ring_specs = [
+                    (80, 'LSC (Superior Condenatorio)', UPPER_LIMIT_COLOR),
+                    (60, 'LSM (Superior Marginal)', 'orange'),
+                ]
+
+            for radius, ring_name, ring_color in ring_specs:
+                fig.add_trace(go.Scatterpolar(
+                    r=[radius] * len(valid_essays),
+                    theta=valid_essays,
+                    name=ring_name,
+                    line=dict(color=ring_color, dash='dash', width=2),
+                    fill=None,
+                    mode='lines'
+                ))
             
             # Determine fill color based on report status
             status_color = {
@@ -1205,9 +1269,10 @@ def create_oil_evidence_section(alert_row: pd.Series, client: str) -> html.Div:
                     {'name': 'Ensayo', 'id': 'essay'},
                     {'name': 'Valor', 'id': 'value', 'type': 'numeric'},
                     {'name': 'Estado', 'id': 'status'},
-                    {'name': 'Límite Normal', 'id': 'normal', 'type': 'numeric'},
-                    {'name': 'Límite Alerta', 'id': 'alert', 'type': 'numeric'},
-                    {'name': 'Límite Crítico', 'id': 'critic', 'type': 'numeric'}
+                    {'name': 'LIC', 'id': 'lic'},
+                    {'name': 'LIM', 'id': 'lim'},
+                    {'name': 'LSM', 'id': 'lsm'},
+                    {'name': 'LSC', 'id': 'lsc'}
                 ],
                 data=table_data,
                 style_table={'overflowX': 'auto'},
@@ -1225,18 +1290,24 @@ def create_oil_evidence_section(alert_row: pd.Series, client: str) -> html.Div:
                 },
                 style_data_conditional=[
                     {
-                        'if': {'filter_query': '{status} = "Crítico"'},
+                        'if': {'filter_query': '{status} = "Superior Condenatorio"'},
                         'backgroundColor': '#f8d7da',
                         'color': '#721c24',
                         'fontWeight': 'bold'
                     },
                     {
-                        'if': {'filter_query': '{status} = "Condenatorio"'},
-                        'backgroundColor': '#fff3cd',
+                        'if': {'filter_query': '{status} = "Inferior Condenatorio"'},
+                        'backgroundColor': '#f8d7da',
+                        'color': '#721c24',
+                        'fontWeight': 'bold'
+                    },
+                    {
+                        'if': {'filter_query': '{status} = "Superior Marginal"'},
+                        'backgroundColor': '#fff8e1',
                         'color': '#856404'
                     },
                     {
-                        'if': {'filter_query': '{status} = "Marginal"'},
+                        'if': {'filter_query': '{status} = "Inferior Marginal"'},
                         'backgroundColor': '#fff8e1',
                         'color': '#856404'
                     },
@@ -1308,7 +1379,7 @@ def create_oil_evidence_section(alert_row: pd.Series, client: str) -> html.Div:
                 dbc.Col([
                     html.H4([
                         html.I(className="fas fa-flask me-2"),
-                        "Evidencia de Tribología"
+                        "Análisis de Aceite"
                     ], className="text-warning mb-2"),
                     html.Div([
                         dbc.Badge(
@@ -1339,7 +1410,21 @@ def create_oil_evidence_section(alert_row: pd.Series, client: str) -> html.Div:
                     ], className="mb-3")
                 ])
             ]),
-            html.Div(charts_and_tables)
+            dcc.Store(id='alert-oil-tendencia-context', data=tendencia_context),
+            dcc.Tabs(
+                id='alert-oil-view-selector',
+                value='tendencia',
+                children=[
+                    dcc.Tab(label='  Tendencia', value='tendencia',
+                            className='custom-tab', selected_className='custom-tab--selected'),
+                    dcc.Tab(label='  Último Ensayo', value='ultimo_ensayo',
+                            className='custom-tab', selected_className='custom-tab--selected'),
+                ],
+                className='mb-3'
+            ),
+            html.Div(id='alert-oil-tendencia-view', children=tendencia_view_children),
+            html.Div(id='alert-oil-radar-view', children=[html.Div(charts_and_tables)],
+                     style={'display': 'none'}),
         ], className="mb-5")
     
     except Exception as e:
@@ -1349,6 +1434,70 @@ def create_oil_evidence_section(alert_row: pd.Series, client: str) -> html.Div:
         return html.Div([
             dbc.Alert(f"Error al cargar evidencia de tribología: {str(e)}", color="danger")
         ])
+
+
+@callback(
+    Output('alert-oil-tendencia-view', 'style'),
+    Output('alert-oil-radar-view', 'style'),
+    Input('alert-oil-view-selector', 'value'),
+    prevent_initial_call=True,
+)
+def toggle_oil_evidence_view(view):
+    """Switch between the Tendencia grid and the Último Ensayo radar without re-rendering either."""
+    if view == 'ultimo_ensayo':
+        return {'display': 'none'}, {'display': 'block'}
+    return {'display': 'block'}, {'display': 'none'}
+
+
+@callback(
+    Output('alert-oil-tendencia-view', 'children'),
+    Input('alert-oil-tendencia-date-range', 'start_date'),
+    Input('alert-oil-tendencia-date-range', 'end_date'),
+    State('alert-oil-tendencia-context', 'data'),
+    prevent_initial_call=True,
+)
+def update_oil_tendencia_range(start_date, end_date, context):
+    """
+    Re-filter the Tendencia chart by oil report date (sampleDate). Isolated by
+    design: only this chart's Output is touched, nothing else in Monitoring >
+    Alertas reacts to this filter.
+    """
+    if not context:
+        raise PreventUpdate
+
+    from src.data.loaders import load_stewart_limits_four
+    from config.settings import get_settings
+
+    client = context['client']
+    oil_classified = load_oil_classified(client)
+    history_full = oil_classified[
+        (oil_classified['unitId'] == context['unit_id'])
+        & (oil_classified['componentName'] == context['component_name'])
+    ].copy()
+    if not history_full.empty:
+        history_full['sampleDate'] = pd.to_datetime(history_full['sampleDate'])
+        history_full = history_full.sort_values('sampleDate')
+
+    settings = get_settings()
+    limits_file = settings.get_stewart_limits_four_path(client)
+    limits = load_stewart_limits_four(limits_file) if limits_file.exists() else {}
+    comp_limits = limits.get(client, {}).get(context['machine'], {}).get(context['component_normalized'], {})
+
+    return _build_oil_tendencia_view(
+        history_full, comp_limits, context['oil_hour_range'],
+        start_date=start_date, end_date=end_date,
+    )
+
+
+@callback(
+    Output('alert-oil-tendencia-date-range', 'start_date'),
+    Output('alert-oil-tendencia-date-range', 'end_date'),
+    Input('alert-oil-tendencia-date-clear', 'n_clicks'),
+    prevent_initial_call=True,
+)
+def clear_oil_tendencia_date_range(_):
+    """Clear the Tendencia date filter, showing the full available history."""
+    return None, None
 
 
 def create_maintenance_evidence_section(alert_row: pd.Series, client: str) -> html.Div:

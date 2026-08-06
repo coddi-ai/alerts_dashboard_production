@@ -1,7 +1,7 @@
 # Multi-Technical Alerts Dashboard - Overview
 
-**Version**: 2.2.0  
-**Last Updated**: July 28, 2026  
+**Version**: 2.4.1  
+**Last Updated**: August 5, 2026  
 **Owner**: Technical Alerts Team
 
 ---
@@ -305,7 +305,9 @@ for the full navigation tree):
   - **Detail**: Individual alert inspection with comprehensive evidence
     - Alert specifications with AI diagnosis
     - Telemetry evidence (sensor trends, GPS route, KPIs)
-    - Oil evidence (radar chart with essay levels)
+    - Oil evidence — "Análisis de Aceite" selector: **Tendencia** (default; the same time-series
+      chart grid used in Aceite → Detalle de Reporte, scoped to the alert's equipment/component)
+      or **Último Ensayo** (radar chart with essay levels for the alert's oil report)
     - Maintenance evidence (activity summaries)
 - **Data Sources**: 
   - `alerts/golden/{client}/consolidated_alerts.csv`
@@ -344,13 +346,16 @@ for the full navigation tree):
 - **Purpose**: Tribology analysis and component health
 - **Tabs** (`dashboard/tabs/tab_oil.py`):
   - **Visión de Flota**: machine status distribution and priority table
-  - **Detalle de Reporte**: radar chart, time series vs. Stewart Limits thresholds, AI recommendations
+  - **Detalle de Reporte**: evidence tables, time series vs. four-limit Stewart thresholds
+    (LIC/LIM/LSM/LSC, v2.8), AI recommendations
   - **Cumplimiento Laboratorio**: transit-time (sample→lab) and lab-time (lab→report) KPIs,
     weekly grouped bar chart, per-unit delay chart
 - **Data Sources**:
   - `oil/golden/{client}/classified.parquet`
   - `oil/golden/{client}/machine_status.parquet`
-  - `oil/golden/{client}/stewart_limits.parquet` (thresholds used in Detalle de Reporte)
+  - `oil/golden/{client}/stewart_limits_four.parquet` (LIC/LIM/LSM/LSC thresholds used in Detalle
+    de Reporte; legacy `stewart_limits.parquet`/`stewart_limits_inferior.parquet` no longer used
+    by oil-technique dashboard logic)
 - **Status**: ✅ **Fully Implemented**
 
 ---
@@ -367,7 +372,9 @@ under `data/predictive/golden/{client}/*.csv`; each gets its own sidebar subsect
 KPI thresholds/failure-mode configuration (`dashboard/components/predictive_config.py`)
 
 **Tabs per component** (`tab_predictive_component.py`):
-- **Resumen**: fleet KPIs, priority cards, failure-mode table (`tab_predictive_overview.py`)
+- **Resumen**: fleet KPIs, an "Análisis de Riesgo" selector (**Prioridad Actual**, default — the
+  priority cards; or **Riesgo Acumulado** — the cumulative-risk curve vs. a fleet reference band),
+  and the failure-mode table (`tab_predictive_overview.py`)
 - **Evidencia**: per-unit oil/telemetry evidence with narrative insights (`tab_predictive_evidence.py`)
 
 **Data Sources**:
@@ -470,6 +477,57 @@ Alerts are generated through technique-specific logic:
 ---
 
 ## 🔄 Version History
+
+### Version 2.4.1 (August 2026)
+- **Predictive Oil-Evidence Migration**: `Predictivo ▸ {component} ▸ Evidencia ▸ Evidencia de
+  Aceite` now sources limits from `stewart_limits_four.parquet` instead of a hardcoded
+  `OIL_THRESHOLDS` table unrelated to any Stewart Limits file. Only resolves limits on an exact
+  component-name match per client (CDA's `'motor'`/`'transmision'` match directly; Capstone's split
+  engine components do not, and correctly show no limits rather than a guessed one)
+- **User-Friendly Limit Labels**: Chart annotations no longer show raw `LIC`/`LIM`/`LSM`/`LSC`
+  acronyms - labeled `"Límite {feature}"`, qualified `"Límite superior/inferior {feature}"` when
+  both directions are shown, or combined (`"Límite marginal y condenatorio de viscosidad"`) when
+  two tiers of the same feature coincide
+- **Equal/Similar Limit Consolidation**: A centrally-defined, scale-aware tolerance
+  (`dashboard/components/oil_charts.py::limit_values_are_equivalent`) prevents duplicated
+  overlapping lines/labels when two limits are equal or nearly equal
+- **Lower-Limit Color**: All lower-limit traces (`LIC`/`LIM`) now render in purple
+  (`LOWER_LIMIT_COLOR`) instead of blue, consistently across every oil chart
+- **Oil Evidence Tendencia Date Filter**: `Alertas ▸ Detalle ▸ Evidencia de Aceite ▸ Tendencia` has
+  a new isolated date-range filter on the oil report date (`sampleDate`, inclusive, defaulting to
+  the equipment/component's latest 12 months) - scoped only to that chart, not the rest of
+  Monitoring ▸ Alertas
+- See [dashboard_documentation.md](../oil/dashboard_documentation.md) ("Current Classification
+  Behavior (v2.8+)") for full detail
+
+### Version 2.4.0 (August 2026)
+- **Four-Limit Stewart Migration**: All oil-technique dashboard logic (Monitoring ▸ Aceite ▸
+  Detalle de Reporte, Alertas ▸ Detalle ▸ Evidencia de Aceite, and the unreachable Stewart Limits
+  tab) now reads `stewart_limits_four.parquet` (`LIC`/`LIM`/`LSM`/`LSC`, data contract v2.8)
+  instead of the legacy `stewart_limits.parquet`/`stewart_limits_inferior.parquet` pair
+- **Five-Tier Classification**: New shared classifier
+  (`dashboard/components/oil_charts.py::classify_four_limit_value`) replaces the old
+  Normal/Marginal/Condenatorio/Crítico 4-tier scheme with Inferior Condenatorio/Inferior
+  Marginal/Normal/Superior Marginal/Superior Condenatorio, correctly supporting null lower limits
+  (`LIC`/`LIM` are null for Desgaste/Aditivo essay groups and never treated as zero)
+- **Charts**: Time-series charts, the 9-chart grid, and radar charts no longer render a
+  lower-limit trace/ring when `LIC`/`LIM` are null for that essay
+- See [oil_data_contracts.md](../oil/oil_data_contracts.md) (v2.8) and
+  [dashboard_documentation.md](../oil/dashboard_documentation.md) ("Current Classification
+  Behavior (v2.8+)") for full detail
+
+### Version 2.3.0 (August 2026)
+- **Root Redirect Verified**: Confirmed the base dashboard URL (with or without `DASH_PATH_PREFIX`)
+  redirects once to `/overview/general` via `dashboard/pages/index.py` — no code change needed
+- **Oil Evidence Selector**: Alerts → Detail → Oil Evidence now offers **Tendencia** (default —
+  the same time-series chart grid as Aceite → Detalle de Reporte, scoped to the alert's
+  equipment/component) and **Último Ensayo** (the existing radar chart, unchanged). The grid
+  builder was extracted to `dashboard/components/oil_charts.py` and is now shared by both views
+- **Predictivo "Análisis de Riesgo" Selector**: The Resumen tab's priority cards and the
+  previously-undocumented accumulated-risk curve are now presented under one selector —
+  **Prioridad Actual** (default) and **Riesgo Acumulado** — instead of always stacking both;
+  calculations for either are unchanged. See [Curva Acumulada de Riesgo](../predictive/project_overview.md#curva-acumulada-de-riesgo)
+  for the curve's full documented behavior
 
 ### Version 2.2.0 (July 2026)
 - **Predictivo Module**: New Predictive section with per-component (Motor, Transmisión) failure-mode
