@@ -1433,8 +1433,6 @@ class DashboardDataRepository:
             mapping = dict(zip(group_keys, keys))
             signal = str(mapping.get(trigger_col, "")) if trigger_col else ""
             value_col = f"{signal}_Value" if signal else None
-            upper_col = f"{signal}_Upper_Limit" if signal else None
-            lower_col = f"{signal}_Lower_Limit" if signal else None
 
             record: dict[str, Any] = {
                 "alert_id": self._scalar(mapping.get(alert_col)) if alert_col else None,

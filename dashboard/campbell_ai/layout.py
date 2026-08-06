@@ -24,14 +24,6 @@ ACCENT_BORDER = "rgba(52, 152, 219, 0.22)"
 # colors — it defaults to the sidebar's blue-gray (dashboard/layout.py's left_menu).
 USER_BUBBLE_COLOR = "#2290ff"
 
-# How the "Conversaciones anteriores" panel renders. "inline" (default) is a
-# collapsible card above the chat, in the normal document flow. "sidebar" is a
-# collapsible off-canvas drawer (dbc.Offcanvas) that slides in from the edge of
-# the screen without pushing the chat down. Change this one value to switch —
-# dashboard/campbell_ai/callbacks.py's toggle_conversation_history reads it too,
-# so both stay in sync automatically.
-CONVERSATION_HISTORY_LAYOUT = "sidebar"  # "inline" | "sidebar"
-
 CAMPBELL_AI_VERSION = "1.1.3"
 
 ALERT_SUGGESTIONS = {
@@ -46,7 +38,7 @@ ALERT_SUGGESTIONS = {
         "Genera un Pareto de alertas por equipo para los últimos 30 días."
     ),
     "equipment-system-heatmap": (
-        "Genera un mapa de calor de alertas por equipo y sistema para los últimos 30 días."
+        "Genera un mapa de calor de alertas por equipo y sistema para los últimos 90 días."
     ),
 }
 
@@ -172,84 +164,11 @@ def _suggested_question_button(question_id: str, question: str) -> dbc.Col:
     )
 
 
-def _conversation_history_panel() -> dbc.Card:
-    """Collapsible list of the user's previous conversations.
-
-    Collapsed by default: the point of the panel is to be there when someone needs to go
-    back, not to compete with the conversation for vertical space.
-    """
-    return dbc.Card(
-        [
-            dbc.CardHeader(
-                html.Div(
-                    [
-                        dbc.Button(
-                            [
-                                html.I(className="fas fa-clock-rotate-left me-2"),
-                                "Conversaciones anteriores",
-                                html.I(
-                                    className="fas fa-chevron-down ms-2",
-                                    style={"fontSize": "0.7rem"},
-                                ),
-                            ],
-                            id="campbell-ai-history-toggle",
-                            color="link",
-                            size="sm",
-                            n_clicks=0,
-                            className="text-decoration-none p-0",
-                            style={"fontWeight": "600", "color": BRAND_TITLE},
-                        ),
-                        html.Div(
-                            [
-                                dbc.Button(
-                                    [
-                                        html.I(className="fas fa-plus me-2"),
-                                        "Nueva",
-                                    ],
-                                    id="campbell-ai-new-conversation",
-                                    color="link",
-                                    size="sm",
-                                    n_clicks=0,
-                                    className="text-decoration-none",
-                                    title="Iniciar una conversación nueva",
-                                ),
-                                dbc.Button(
-                                    html.I(className="fas fa-rotate-right"),
-                                    id="campbell-ai-refresh-conversations",
-                                    color="link",
-                                    size="sm",
-                                    n_clicks=0,
-                                    className="text-muted text-decoration-none",
-                                    title="Actualizar la lista",
-                                ),
-                            ],
-                            className="d-flex align-items-center gap-1",
-                        ),
-                    ],
-                    className="d-flex justify-content-between align-items-center",
-                ),
-                style={"backgroundColor": "white"},
-            ),
-            dbc.Collapse(
-                dbc.CardBody(
-                    html.Div(id="campbell-ai-conversation-list"),
-                    style={"padding": "0.6rem 0.75rem", "maxHeight": "34vh", "overflowY": "auto"},
-                ),
-                id="campbell-ai-history-collapse",
-                is_open=False,
-            ),
-        ],
-        className="shadow-sm mb-3",
-        style={"borderRadius": "14px", "overflow": "hidden"},
-    )
-
-
 def _conversation_history_sidebar() -> list:
-    """Off-canvas (collapsible sidebar) variant of the conversation history panel.
+    """Off-canvas drawer (dbc.Offcanvas) listing the user's previous conversations.
 
-    Enabled by setting CONVERSATION_HISTORY_LAYOUT = "sidebar" above. Same New /
-    Refresh / list controls as _conversation_history_panel(), just in a drawer
-    that overlays the page instead of a card in the document flow.
+    Slides in from the edge of the screen on demand instead of a card competing
+    with the chat for vertical space.
     """
     trigger = dbc.Button(
         [
@@ -300,13 +219,6 @@ def _conversation_history_sidebar() -> list:
         placement="end",
     )
     return [trigger, offcanvas]
-
-
-def _conversation_history_block() -> list:
-    """The conversation-history UI in whichever layout CONVERSATION_HISTORY_LAYOUT picks."""
-    if CONVERSATION_HISTORY_LAYOUT == "sidebar":
-        return _conversation_history_sidebar()
-    return [_conversation_history_panel()]
 
 
 def render_conversation_list(
@@ -481,7 +393,7 @@ def create_campbell_ai_layout(user_data: dict | None = None) -> html.Div:
                             dismissable=True,
                             className="mt-3 mb-0 campbell-ai-alert",
                         ),
-                        *_conversation_history_block(),
+                        *_conversation_history_sidebar(),
                         dbc.Card(
                             [
                                 dbc.CardHeader(

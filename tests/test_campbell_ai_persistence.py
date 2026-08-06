@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 import json
 
-import pytest
 from fastapi.testclient import TestClient
 
 from src.campbell_ai.api import app

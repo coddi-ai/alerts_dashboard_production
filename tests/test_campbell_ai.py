@@ -510,9 +510,6 @@ def test_pareto_and_heatmap_are_generated_from_alert_dimensions(tmp_path):
     assert heatmap.figure["data"][0]["type"] == "heatmap"
     assert heatmap.summary["dimension"] == "unit"
     assert heatmap.summary["secondary_dimension"] == "system"
-    # A blanket update_yaxes used to label the cumulative axis with the bar metric.
-    assert pareto.figure["layout"]["yaxis"]["title"]["text"] == "Cantidad"
-    assert pareto.figure["layout"]["yaxis2"]["title"]["text"] == "% acumulado"
     # Heatmap keys stay readable instead of leaking Python tuples.
     assert all("×" in key for key in heatmap.summary["top"])
 

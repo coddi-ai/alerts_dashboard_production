@@ -1,7 +1,9 @@
 # Campbell AI
 
-**Versión 1.1.0** — agrega persistencia de conversaciones en S3, historial por usuario,
-respaldo de feedback y control de concurrencia. El detalle está en
+**Versión 1.1.3** — arquitectura de páginas de Dash, historial de conversaciones en un
+panel lateral, streaming de respuestas sin condición de carrera y configuración
+reorganizada (solo secretos reales en `.env`). El detalle está en
+[Novedades de la versión 1.1.1–1.1.3](#novedades-de-la-versión-111–113) y
 [Novedades de la versión 1.1.0](#novedades-de-la-versión-110).
 
 Campbell AI está integrado en `tds_alerts_dashboard` mediante dos componentes:
@@ -27,33 +29,39 @@ Desde la raíz de `tds_alerts_dashboard`:
 
 ```powershell
 Copy-Item .env.example .env
-python -c "import secrets; print(secrets.token_urlsafe(32))"
 ```
 
-Copiar el valor generado en `CAMPBELL_AI_INTERNAL_TOKEN` dentro de `.env`. Configurar también
-`OPENAI_API_KEY`, una `SECRET_KEY` distinta y, si los datos están fuera del repositorio, su ruta
-real en `CAMPBELL_AI_DATA_ROOT`. El archivo `.env` está ignorado por Git y no debe compartirse.
+Configurar `OPENAI_API_KEY` en `.env` — es el único secreto de Campbell AI que vive ahí. El
+archivo `.env` está ignorado por Git y no debe compartirse.
 
-Variables esenciales:
+**Todo lo demás de Campbell AI (feature flags, timeouts, nombres de modelo, el token interno)
+son valores por defecto declarados como `ENV` en el `Dockerfile`** — no son secretos, así que
+viven en el repositorio para que un despliegue sea reproducible sin depender de un `.env`
+completo. Para overridear cualquiera de ellos sin reconstruir la imagen, agrega la variable en
+el bloque `environment:` del servicio correspondiente en `docker-compose.yml`, o localmente
+(fuera de Docker) agrega la variable de vuelta a tu `.env` — sigue ganando sobre el default de
+la imagen. Ver el `Dockerfile` para la lista completa y sus valores documentados.
+
+Variables que sí siguen viviendo en `.env` (secretos reales, compartidos con el resto del
+dashboard):
 
 | Variable | Uso |
 |---|---|
 | `OPENAI_API_KEY` | Acceso del runtime de agentes a OpenAI. |
-| `CAMPBELL_AI_INTERNAL_TOKEN` | Autentica a Dash u otro servicio frente a FastAPI. |
-| `CAMPBELL_AI_DATA_ROOT` | Directorio existente con los datos del dashboard; no se importan. |
-| `CAMPBELL_AI_API_URL` | URL que Dash usa para llamar a FastAPI. |
-| `CAMPBELL_AI_ENABLED` | Habilita u oculta Campbell AI. |
-| `SECRET_KEY` | Firma la sesión autenticada de Dash. |
+| `SECRET_KEY` | Firma la sesión autenticada de Dash; en este repositorio cumple además el rol de secret access key de AWS. |
+| `BUCKET_NAME`, `ACCESS_KEY` | Bucket y credencial del respaldo en S3; ya configurados para el dashboard. |
 | `DASHBOARD_IDENTITY_MAX_AGE_SECONDS` | Vigencia de la prueba firmada de identidad; 12 horas por defecto. |
-| `BUCKET_NAME`, `ACCESS_KEY` | Bucket y credencial del respaldo en S3; ya configurados para el dashboard. En este repositorio `SECRET_KEY` cumple además el rol de secret access key de AWS. |
 
-Variables de persistencia y concurrencia (todas con valor por defecto utilizable):
+Variables de Campbell AI con valor por defecto en el `Dockerfile` (documentadas ahí, resumen
+aquí para referencia rápida):
 
 | Variable | Defecto | Uso |
 |---|---|---|
+| `CAMPBELL_AI_ENABLED` | `true` | Habilita u oculta Campbell AI. |
+| `CAMPBELL_AI_INTERNAL_TOKEN` | valor de imagen | Autentica a Dash frente a FastAPI; ambos contenedores comparten la misma imagen, así que quedan en sincronía automáticamente. |
+| `CAMPBELL_AI_STREAMING` | `false` | Respuestas progresivas por SSE. |
 | `CAMPBELL_AI_PERSISTENCE` | `true` | Habilita el respaldo de conversaciones y feedback. |
 | `CAMPBELL_AI_S3_PREFIX` | `campbellAI` | Carpeta propia dentro del bucket ya configurado. |
-| `CAMPBELL_AI_BACKUP_DIR` | `logs/campbell_ai_backup` | Espejo local del respaldo. |
 | `CAMPBELL_AI_HISTORY_LIMIT` | `50` | Conversaciones que devuelve el listado por usuario. |
 | `CAMPBELL_AI_SUMMARY` | `true` | Genera un título con IA para las conversaciones largas. |
 | `CAMPBELL_AI_MODEL_SUMMARY` | `gpt-4.1-mini` | Modelo del titulador. |
@@ -62,6 +70,8 @@ Variables de persistencia y concurrencia (todas con valor por defecto utilizable
 | `CAMPBELL_AI_MAX_REQUESTS_PER_MINUTE` | `200` | Cuota por minuto. |
 | `CAMPBELL_AI_QUEUE_TIMEOUT_SECONDS` | `20` | Espera máxima antes de responder "ocupado". |
 | `CAMPBELL_AI_RETRY_ATTEMPTS` | `3` | Reintentos ante fallos transitorios del modelo. |
+| `CAMPBELL_AI_API_URL` | `http://127.0.0.1:8000` | URL que Dash usa para llamar a FastAPI; Docker Compose la overridea a `http://campbell-api:8000` en su `environment:`. |
+| `CAMPBELL_AI_DATA_ROOT` | ruta del proyecto + `/data` | Directorio existente con los datos del dashboard; no se importan. |
 
 ## Lanzar solo la API en local
 
@@ -90,6 +100,14 @@ python -m uvicorn src.campbell_ai.api:app `
 - Esquema OpenAPI: `http://127.0.0.1:8000/openapi.json`
 
 ### Smoke test de la API
+
+`CAMPBELL_AI_INTERNAL_TOKEN` solo tiene un valor por defecto dentro de la imagen Docker (ver
+Dockerfile); para correr la API fuera de Docker hay que declararlo explícitamente en `.env`:
+
+```powershell
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+# pega el valor en CAMPBELL_AI_INTERNAL_TOKEN dentro de .env
+```
 
 En otra terminal, desde la misma carpeta:
 
@@ -440,6 +458,13 @@ sería describir una operación que no ocurrió. El histograma no acepta `dimens
 el scatter reutiliza `secondary_dimension` para nombrar su segunda métrica; ambos rechazan la llamada
 con el motivo exacto en lugar de ignorar el argumento en silencio.
 
+Una respuesta puede incluir **más de una figura** cuando la pregunta realmente pide varias
+distintas ("muéstrame el estado de la flota y también el ranking de alertas"): los prompts del
+Head y del Data Visualization Analyst instruyen llamar a la herramienta de construcción una vez
+por figura en lugar de comprimir varias peticiones en una sola llamada, y el presupuesto de
+turnos del analista de visualización se amplió de 5 a 8 para dar espacio a esas llamadas
+adicionales.
+
 Además de esa gramática existe un **catálogo de gráficos con nombre** en `chart_registry.py`, que
 reproduce vistas concretas del dashboard. El agente lo consulta con `list_dashboard_charts()` y lo
 renderiza con `render_dashboard_chart(chart_id, ...)`, de modo que "muéstrame el estado de la flota"
@@ -567,9 +592,11 @@ Tres decisiones que no son las obvias:
 
 Las claves se derivan siempre del principal autenticado, nunca de la entrada del cliente, así que la
 carpeta de un usuario es inalcanzable desde la sesión de otro. Los segmentos se normalizan: un
-`../` en un nombre no produce una clave que se salga del prefijo. Las **figuras Plotly no se
-respaldan** (se conservan título, descripción y tipo): son cientos de kilobytes reproducibles desde
-los mismos datos.
+`../` en un nombre no produce una clave que se salga del prefijo. Las **figuras Plotly se
+respaldan diezmadas**: cada traza se reduce a un máximo de 300 puntos (`_downsample_figure`),
+así que la figura que se reabre sigue siendo interactiva y conserva la forma de la serie, sin
+guardar los cientos de miles de puntos originales — probar renderizarlas como imagen (kaleido)
+resultó frágil en el entorno de despliegue, y el diezmado no depende de ningún binario externo.
 
 **Recuperación.** `initialize` comprueba si la sesión viva está vacía y, en ese caso, restaura la
 conversación archivada de ese mismo `session_id`, informando cuántos mensajes recuperó en
@@ -585,10 +612,14 @@ trazabilidad que cualquier respuesta: si contiene una cifra que no aparece en la
 descarta y queda el título. Un fallo del titulador no es un error; solo significa que manda el primer
 mensaje.
 
-**En la vista.** Un panel plegable "Conversaciones anteriores" lista las conversaciones respaldadas
-con su etiqueta, fecha y cantidad de mensajes; abrir una la deja activa y se puede seguir
-conversando en ella. "Nueva" abre un hilo vacío sin tocar el respaldo, y "Limpiar" vacía el hilo
-visible **sin borrar** lo ya respaldado: vaciar la pantalla no es una orden de eliminación.
+**En la vista.** Un panel lateral (`dbc.Offcanvas`, desliza desde el borde de la pantalla en lugar
+de empujar el chat hacia abajo) "Conversaciones anteriores" lista las conversaciones respaldadas
+con su etiqueta, fecha y cantidad de mensajes; abrir una la deja activa, cierra el panel — elegir
+una conversación es la intención de leerla, no de seguir explorando la lista — y se puede seguir
+conversando en ella. La ventana de mensajes hace scroll automático al último mensaje tanto al
+enviar uno como al cargar una conversación. "Nueva" abre un hilo vacío sin tocar el respaldo, y
+"Limpiar" vacía el hilo visible **sin borrar** lo ya respaldado: vaciar la pantalla no es una
+orden de eliminación.
 
 **Al volver a la pestaña.** La conversación ya no desaparece. `campbell-ai-session-company` guarda,
 junto al `session_id` en almacenamiento de sesión, a qué empresa pertenece el hilo. Antes el store de
@@ -680,6 +711,17 @@ exista texto, así que los eventos `status` con el nombre del paso ("Consultando
 puede tardar decenas de segundos. El primer mensaje de una conversación no usa streaming, porque el
 navegador no puede crear la sesión.
 
+**Compositor bloqueado durante toda la solicitud, en ambos caminos.** El compositor (input, botón
+Enviar, Limpiar) se deshabilita mientras `campbell-ai-pending-message-store` tiene un mensaje en
+curso, sin importar si termina por streaming o por el camino bloqueante — es la única fuente de
+verdad para ese estado. Antes existían dos mecanismos separados escribiendo la misma propiedad
+(el `running=[...]` de la llamada bloqueante y el gate de streaming), y podían competir: la
+reactivación de uno llegaba al navegador después de la deshabilitación del otro, dejando el
+compositor operable durante una respuesta todavía en curso — lo que permitía enviar un segundo
+mensaje antes de que el primero terminara, y la respuesta tardía del primero (con su gráfico)
+podía aparecer después de que el segundo ya estuviera en pantalla. Consolidar el bloqueo en un
+único callback elimina la carrera.
+
 ## Pruebas
 
 Las pruebas rápidas no consumen la API de OpenAI ni requieren secretos:
@@ -740,6 +782,22 @@ cifra derivada de un código de categoría sin respaldo en los datos.
 
 Los tests del evaluador (`test_response_quality.py`) sí corren siempre, así que un error en la
 lógica de puntuación se detecta sin gastar tokens.
+
+## Novedades de la versión 1.1.1–1.1.3
+
+| Cambio | Dónde |
+|---|---|
+| Migración a la arquitectura de páginas de Dash (`dash.register_page`) | `dashboard/campbell_ai/` |
+| Corrección de códigos de señal sin traducir en las respuestas del chat (`EngCoolTemp`, `AirFltr`, etc.) | `src/charts/signals.py`, `data.py`, `visualization.py` |
+| Respaldo de figuras Plotly por diezmado (300 puntos por traza) en vez de omitirlas; se descartó una prueba con render a PNG (kaleido) por resultar frágil en el entorno de despliegue | `persistence._downsample_figure` |
+| Panel "Conversaciones anteriores" es ahora exclusivamente un drawer lateral (`dbc.Offcanvas`); se retiró la variante inline (`dbc.Collapse`) que existía como alternativa | `dashboard/campbell_ai/layout.py` |
+| Abrir una conversación cierra el panel lateral | `open_archived_conversation` |
+| Scroll automático al último mensaje, tanto al enviar uno como al cargar una conversación | `campbell-ai-scroll-container`, callback clientside |
+| Indicador de "Pensando…" visible por defecto en la burbuja de streaming (antes quedaba vacía hasta el primer delta o status) | `_streaming_placeholder` |
+| El compositor se bloquea de forma confiable durante **toda** la solicitud, tanto en el camino de streaming como en el bloqueante, eliminando una condición de carrera que permitía enviar un segundo mensaje mientras el primero seguía en curso | `gate_composer` |
+| Mayor flexibilidad para generar varias figuras en una misma respuesta cuando la pregunta lo pide | prompts del Head y del Data Visualization Analyst, presupuesto de turnos del analista de visualización (5 → 8) |
+| Configuración reorganizada: solo `OPENAI_API_KEY` (y los secretos ya existentes del dashboard) siguen en `.env`; el resto de las variables de Campbell AI son valores por defecto declarados en el `Dockerfile`, no secretos | `Dockerfile`, `.env.example`, `docker-compose.yml` |
+| Limpieza previa al primer despliegue a producción: código muerto, imports sin usar y tests redundantes retirados | ver commit de limpieza |
 
 ## Novedades de la versión 1.1.0
 

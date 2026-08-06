@@ -13,7 +13,6 @@ from dashboard.auth import resolve_authenticated_username
 from dashboard.campbell_ai.client import CampbellAPIClient, CampbellAPIClientError
 from dashboard.campbell_ai.layout import (
     ALERT_SUGGESTIONS,
-    CONVERSATION_HISTORY_LAYOUT,
     render_chat_history,
     render_conversation_list,
     service_error_content,
@@ -24,14 +23,7 @@ from dashboard.campbell_ai.stream import streaming_enabled
 
 logger = logging.getLogger(__name__)
 
-# Both dbc.Collapse (inline) and dbc.Offcanvas (sidebar) expose "is_open", so the
-# same toggle callback works for either — only the target id depends on which
-# layout.CONVERSATION_HISTORY_LAYOUT picked at import time.
-_HISTORY_PANEL_ID = (
-    "campbell-ai-history-offcanvas"
-    if CONVERSATION_HISTORY_LAYOUT == "sidebar"
-    else "campbell-ai-history-collapse"
-)
+_HISTORY_PANEL_ID = "campbell-ai-history-offcanvas"
 
 
 def _company_id_from_state(company_state) -> str | None:

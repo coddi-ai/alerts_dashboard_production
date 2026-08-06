@@ -8,8 +8,6 @@ aggregate, and the curated shapes that only the named registry can build.
 
 from __future__ import annotations
 
-import json
-
 import pandas as pd
 import pytest
 

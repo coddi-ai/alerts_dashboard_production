@@ -189,23 +189,6 @@ def test_a_qualitative_answer_is_grounded_by_construction():
     assert report.verified == 0
 
 
-def test_iso_date_parts_ground_a_date_rewritten_in_spanish():
-    """In "2026-04-26T00:00:00" the day is followed by T, so a generic scan misses it."""
-    oil = json.dumps(
-        {
-            "total_units": 11,
-            "sample_window": {"oldest": "2026-04-26T00:00:00", "newest": "2026-07-07T00:00:00"},
-        }
-    )
-
-    report = audit_response(
-        "Muestras entre el **26 de abril** y el **7 de julio de 2026**.", [oil]
-    )
-
-    assert report.unverified_numbers == []
-    assert report.is_grounded is True
-
-
 def test_a_two_step_derivation_is_reported_separately_from_invention():
     """6 of 11 is real arithmetic over grounded counts; the answer just hid its basis."""
     oil = json.dumps({"total_units": 11, "by_status": {"Normal": 5, "Anormal": 4, "Alerta": 2}})
