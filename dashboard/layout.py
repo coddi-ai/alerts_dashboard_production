@@ -25,6 +25,13 @@ PREDICTIVE_COMPONENT_ICONS = {
 }
 
 
+def _campbell_ai_enabled() -> bool:
+    """Keep the new navigation entry behind an environment feature flag."""
+    return os.getenv("CAMPBELL_AI_ENABLED", "true").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+
+
 def _discover_predictive_components(client: str) -> list:
     """Discover available predictive component CSVs for a client."""
     settings = get_settings()
@@ -299,7 +306,8 @@ def create_navbar(user_data: dict, available_clients: list[str] = None) -> html.
                                 color="danger",
                                 size="sm",
                                 className="px-3",
-                                style={"fontWeight": "500"}
+                                style={"fontWeight": "500"},
+                                n_clicks=0
                             )
                         ], className="d-flex align-items-center")
                     ], width="auto")
@@ -361,6 +369,11 @@ def build_navigation_items(selected_client: str, user_data: dict) -> list:
     client-selector change).
     """
     def _enabled(service_id: str) -> bool:
+        # Campbell AI additionally sits behind a global kill switch, on top of
+        # the per-client service registry - so it can be pulled everywhere
+        # (e.g. an OpenAI outage) without editing client_services.yaml.
+        if service_id == "agents-campbell-ai" and not _campbell_ai_enabled():
+            return False
         return is_service_enabled(selected_client, service_id)
 
     user_has_predictive_access = _enabled('predictive')
@@ -373,7 +386,9 @@ def build_navigation_items(selected_client: str, user_data: dict) -> list:
     # omitted entirely, never shown as an inactive tab. A section with zero
     # visible services is skipped. Predictive is spliced in after
     # 'monitoring' (its historical position) since its subsections are
-    # discovered dynamically rather than listed in SERVICE_SECTIONS.
+    # discovered dynamically rather than listed in SERVICE_SECTIONS. Campbell
+    # AI's own global kill switch is folded into _enabled() above, so its
+    # 'agents' section is omitted the same way a disabled client service is.
     navigation_items = []
     for section_def in SERVICE_SECTIONS:
         subsections = [

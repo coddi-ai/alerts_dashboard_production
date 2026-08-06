@@ -21,6 +21,7 @@ import pytz
 
 # Import the functions from the callback module
 from dashboard.callbacks.data_freshness_callbacks import (
+    FRESHNESS_CRITERIA,
     load_data_freshness,
     convert_utc_to_chile,
     calculate_freshness_status,
@@ -77,59 +78,59 @@ def test_timezone_conversion():
 
 
 def test_status_calculation():
-    """Test freshness status calculation"""
-    print("\n" + "=" * 80)
-    print("TEST 3: Status Calculation")
-    print("=" * 80)
-    
-    # Get current time in Chile
-    chile_tz = pytz.timezone('America/Santiago')
+    """Freshness labels and colors must match the criteria the dashboard applies.
+
+    The expectations are derived from FRESHNESS_CRITERIA rather than restated here.
+    This test previously hardcoded an older spec (labels 'Actualizado'/'Crítico' and
+    different thresholds) and kept failing after the criteria were refactored, which
+    is exactly the desync a derived test prevents.
+    """
+    chile_tz = pytz.timezone("America/Santiago")
     current_time = datetime.now(chile_tz)
-    
-    # Test cases for Telemetry
-    print("\n📡 TELEMETRY STATUS TESTS:")
-    
-    # Green: 30 minutes ago
-    test_time_green = current_time - pd.Timedelta(minutes=30)
-    status, color, time_str = calculate_freshness_status(test_time_green, 'Telemetria', current_time)
-    print(f"  30 min ago -> Status: {status} (Color: {color}) - {time_str}")
-    assert status == 'Actualizado', f"Expected 'Actualizado', got '{status}'"
-    
-    # Yellow: 2 hours ago
-    test_time_yellow = current_time - pd.Timedelta(hours=2)
-    status, color, time_str = calculate_freshness_status(test_time_yellow, 'Telemetria', current_time)
-    print(f"  2 hours ago -> Status: {status} (Color: {color}) - {time_str}")
-    assert status == 'Atención Requerida', f"Expected 'Atención Requerida', got '{status}'"
-    
-    # Red: 12 hours ago
-    test_time_red = current_time - pd.Timedelta(hours=12)
-    status, color, time_str = calculate_freshness_status(test_time_red, 'Telemetria', current_time)
-    print(f"  12 hours ago -> Status: {status} (Color: {color}) - {time_str}")
-    assert status == 'Crítico', f"Expected 'Crítico', got '{status}'"
-    
-    # Test cases for Tribology
-    print("\n🧪 TRIBOLOGY STATUS TESTS:")
-    
-    # Green: 3 days ago
-    test_time_green = current_time - pd.Timedelta(days=3)
-    status, color, time_str = calculate_freshness_status(test_time_green, 'Tribologia', current_time)
-    print(f"  3 days ago -> Status: {status} (Color: {color}) - {time_str}")
-    assert status == 'Actualizado', f"Expected 'Actualizado', got '{status}'"
-    
-    # Yellow: 10 days ago
-    test_time_yellow = current_time - pd.Timedelta(days=10)
-    status, color, time_str = calculate_freshness_status(test_time_yellow, 'Tribologia', current_time)
-    print(f"  10 days ago -> Status: {status} (Color: {color}) - {time_str}")
-    assert status == 'Atención Requerida', f"Expected 'Atención Requerida', got '{status}'"
-    
-    # Red: 30 days ago
-    test_time_red = current_time - pd.Timedelta(days=30)
-    status, color, time_str = calculate_freshness_status(test_time_red, 'Tribologia', current_time)
-    print(f"  30 days ago -> Status: {status} (Color: {color}) - {time_str}")
-    assert status == 'Crítico', f"Expected 'Crítico', got '{status}'"
-    
-    print("\n✅ All status calculation tests passed!")
-    return True
+
+    for data_type, criteria in FRESHNESS_CRITERIA.items():
+        previous = pd.Timedelta(0)
+        for index, (threshold, label, color) in enumerate(criteria):
+            span = pd.Timedelta(threshold) - previous
+            if span <= pd.Timedelta(0):
+                # The last entry repeats its threshold as a sentinel for the
+                # "worse than everything" case, covered separately below.
+                continue
+            inside = previous + span / 2
+            status, actual_color, time_str = calculate_freshness_status(
+                current_time - inside, data_type, current_time
+            )
+            assert status == label, (
+                f"{data_type} a {inside} esperaba {label!r}, obtuvo {status!r}"
+            )
+            assert actual_color == color, f"{data_type} {label}: color {actual_color}"
+            assert time_str and time_str != "N/A"
+            previous = pd.Timedelta(threshold)
+
+        # Beyond every threshold the worst status applies.
+        worst_label, worst_color = criteria[-1][1], criteria[-1][2]
+        status, actual_color, _ = calculate_freshness_status(
+            current_time - (pd.Timedelta(criteria[-1][0]) * 2), data_type, current_time
+        )
+        assert status == worst_label, f"{data_type} fuera de rango: {status!r}"
+        assert actual_color == worst_color
+
+
+def test_status_calculation_handles_missing_and_unknown_inputs():
+    """A missing timestamp or an unmodelled data type must not raise."""
+    chile_tz = pytz.timezone("America/Santiago")
+    current_time = datetime.now(chile_tz)
+
+    status, color, time_str = calculate_freshness_status(
+        pd.NaT, "Telemetria", current_time
+    )
+    assert (status, time_str) == ("Sin Datos", "N/A")
+    assert color
+
+    status, _, _ = calculate_freshness_status(
+        current_time - pd.Timedelta(hours=1), "Vibraciones", current_time
+    )
+    assert status == "Desconocido"
 
 
 def test_data_processing():

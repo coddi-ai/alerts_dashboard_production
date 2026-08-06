@@ -8,14 +8,10 @@ import pandas as pd
 import numpy as np
 from typing import List, Dict, Optional
 
-
-# Color scheme (GR-05: Single status design language)
-STATUS_COLORS = {
-    'Normal': '#28a745',   # Green
-    'Alerta': '#ffc107',   # Yellow/Amber
-    'Anormal': '#dc3545',  # Red
-    'InsufficientData': '#6c757d'  # Neutral gray
-}
+# Color scheme (GR-05: Single status design language).
+# Defined once in src/charts/theme.py so the dashboard tabs and Campbell AI agree
+# on what each status looks like; re-exported here for existing importers.
+from src.charts.theme import STATUS_COLORS  # noqa: F401
 
 
 def create_status_pie_chart(df: pd.DataFrame) -> go.Figure:

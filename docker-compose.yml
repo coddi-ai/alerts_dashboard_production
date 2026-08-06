@@ -7,9 +7,12 @@ services:
     env_file:
       - .env  # Load environment variables from .env file
     environment:
-      # Override specific variables if needed
+      # Override specific variables if needed. Everything else Campbell-AI-specific
+      # (feature flags, timeouts, model names, the internal token) defaults from the
+      # Dockerfile; add a line here to override one of those without editing it.
       - DASHBOARD_HOST=0.0.0.0
       - DASHBOARD_PORT=8050
+      - CAMPBELL_AI_API_URL=http://campbell-api:8000
       # MAPBOX_TOKEN will be read from .env file
       # Or set explicitly: MAPBOX_TOKEN=${MAPBOX_TOKEN}
     volumes:
@@ -22,4 +25,42 @@ services:
       - ./src:/app/src
     ports:
       - "8050:8050"
+    depends_on:
+      campbell-api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  campbell-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: campbell-ai-api
+    command: ["uvicorn", "src.campbell_ai.api:app", "--host", "0.0.0.0", "--port", "8000"]
+    env_file:
+      - .env
+    environment:
+      # Campbell-AI-specific operational settings (feature flags, timeouts, model
+      # names, the internal token) default from the Dockerfile; only the real
+      # secrets need to flow through from .env here.
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      # Durable conversation and feedback backup. Declared explicitly so a deployment
+      # without these values fails visibly here instead of silently degrading to the
+      # local mirror inside the container.
+      - BUCKET_NAME=${BUCKET_NAME:-}
+      - ACCESS_KEY=${ACCESS_KEY:-}
+      - SECRET_KEY=${SECRET_KEY:-}
+    volumes:
+      - ./data:/app/data:ro
+      # Read-write: holds the feedback log and the local backup mirror.
+      - ./logs:/app/logs
+      - ./config:/app/config:ro
+      - ./src:/app/src:ro
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/campbell-ai/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
     restart: unless-stopped
