@@ -7,6 +7,10 @@ __pycache__/
 .env
 .venv
 venv/
+data/
+logs/
+.pytest_cache/
+outputs/
 *.log
 .git/
 .gitignore

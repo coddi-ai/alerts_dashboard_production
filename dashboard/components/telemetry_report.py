@@ -213,11 +213,14 @@ def _events_for_signal_cached(
     return events.loc[mask].copy()
 
 
-@lru_cache(maxsize=8)
-def _event_stats_cached(client: str, cache_key: str) -> dict:
-    """Aggregate event counts once for the current materialized snapshot."""
-    events = _snapshot_events(load_telemetry_snapshot(client))
-    if events.empty:
+def _aggregate_event_stats(events: pd.DataFrame) -> dict:
+    """Aggregate event counts per unit and signal.
+
+    Pure on purpose: the cached wrapper below reloads the snapshot from disk, which
+    made this logic impossible to exercise with an in-memory snapshot and silently
+    returned zeros for any caller that built one.
+    """
+    if events is None or events.empty:
         return {}
     feature_col = "feature" if "feature" in events.columns else "signal"
     if "unit" not in events.columns or feature_col not in events.columns:
@@ -240,6 +243,24 @@ def _event_stats_cached(client: str, cache_key: str) -> dict:
     if "duration_minutes" in frame.columns:
         stats["longest_episode"] = grouped["duration_minutes"].max()
     return stats.to_dict("index")
+
+
+@lru_cache(maxsize=8)
+def _event_stats_cached(client: str, cache_key: str) -> dict:
+    """Aggregate event counts once per materialized snapshot."""
+    return _aggregate_event_stats(_snapshot_events(load_telemetry_snapshot(client)))
+
+
+def _event_stats(snapshot: "TelemetrySnapshot") -> dict:
+    """Event stats for a snapshot, using its own frame when it carries one.
+
+    A snapshot built in memory (tests, ad-hoc analysis) must be aggregated directly;
+    only a snapshot materialized from disk can go through the cache.
+    """
+    events = _snapshot_events(snapshot)
+    if events is not None and not events.empty:
+        return _aggregate_event_stats(events)
+    return _event_stats_cached(snapshot.client, snapshot.cache_key)
 
 
 def filter_fleet_snapshot(
@@ -609,7 +630,7 @@ def build_signal_rows(snapshot: TelemetrySnapshot, unit: str, system: str) -> li
     if dev.empty:
         return []
     trends = snapshot.trends.copy()
-    event_stats = _event_stats_cached(snapshot.client, snapshot.cache_key)
+    event_stats = _event_stats(snapshot)
     system_health = snapshot.system_health[
         (snapshot.system_health.get("unit", pd.Series(dtype=str)) == unit)
         & (snapshot.system_health.get("system", pd.Series(dtype=str)) == raw_system)
