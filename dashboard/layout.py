@@ -409,7 +409,6 @@ def build_navigation_items(selected_client: str, user_data: dict) -> list:
             'subsections': [
                 {'id': 'admin-main', 'label': 'Administración'},
                 {'id': 'admin-user-registry', 'label': 'Registro de usuarios'},
-                {'id': 'admin-client-services', 'label': 'Servicios del cliente'},
             ]
         })
 
@@ -568,12 +567,6 @@ def create_app_layout() -> html.Div:
         
         # Store for alerts internal navigation
         dcc.Store(id='alerts-navigation-state', storage_type='memory', data=None),
-
-        # Bumped by dashboard/callbacks/client_services_admin_callbacks.py on every
-        # successful save; sidebar_callbacks.py and access_control_callbacks.py
-        # watch it as an extra Input so they re-render/re-evaluate the current
-        # page immediately after an admin edits a client's enabled services.
-        dcc.Store(id='client-services-config-version', storage_type='memory', data=0),
 
         # Page content (initialized with login page, will be replaced by callback)
         html.Div(id='page-content', children=create_login_page())

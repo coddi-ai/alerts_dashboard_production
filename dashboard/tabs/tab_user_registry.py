@@ -26,11 +26,21 @@ def create_layout() -> html.Div:
                 ),
                 className="bg-light",
             ),
-            dbc.CardBody(
+            dbc.CardBody([
+                dbc.Alert(
+                    id="user-registry-load-error",
+                    color="danger",
+                    is_open=False,
+                    className="mb-3",
+                ),
                 dcc.Loading(
-                    dcc.Graph(id="user-registry-login-events-chart", config={"displayModeBar": False}),
+                    dcc.Graph(
+                        id="user-registry-login-events-chart",
+                        config={"displayModeBar": False, "responsive": True},
+                        style={"height": "calc(100vh - 260px)"},
+                    ),
                     type="circle",
-                )
-            ),
+                ),
+            ]),
         ], className="shadow-sm mb-4"),
     ])
