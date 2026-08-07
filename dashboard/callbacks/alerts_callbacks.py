@@ -6,7 +6,7 @@ interactive filtering, and cross-navigation.
 """
 
 import pandas as pd
-from dash import callback, clientside_callback, Input, Output, State, html, dcc, no_update, dash_table
+from dash import callback, callback_context, clientside_callback, ALL, Input, Output, State, html, dcc, no_update, dash_table
 from dash.exceptions import PreventUpdate
 import dash_bootstrap_components as dbc
 from datetime import date, datetime, timedelta
@@ -57,7 +57,11 @@ from dashboard.components.alerts_report import (
     translate_alert_component,
     translate_alert_system,
 )
-from dashboard.tabs.tab_alerts_general import create_summary_stats_display, create_layout as create_general_layout
+from dashboard.tabs.tab_alerts_general import (
+    create_summary_stats_display,
+    create_active_filter_badges,
+    create_layout as create_general_layout,
+)
 from dashboard.tabs.tab_alerts_detail import (
     create_alert_detail_content,
     create_oil_status_display,
@@ -151,69 +155,158 @@ def render_tab_content(active_tab):
         Output('alerts-summary-stats', 'children'),
         Output('alerts-table-container', 'children'),
         Output('alerts-general-filter-summary', 'children'),
+        Output('alerts-general-active-filter-badges', 'children'),
+        Output('alerts-general-filter-clear-all', 'style'),
     ],
     [
         Input('client-selector', 'value'),
         Input('alerts-date-range-picker', 'start_date'),
         Input('alerts-date-range-picker', 'end_date'),
+        Input('alerts-general-active-filters', 'data'),
     ]
 )
-def update_general_tab(client: str, start_date: str, end_date: str):
+def update_general_tab(client: str, start_date: str, end_date: str, active_filters: dict):
     """
     Update all components in the General Tab when client changes or filters are applied.
-    
+
     Args:
         client: Selected client identifier
-        filters: Dictionary with active filters (unit, month, sistema)
-    
+        start_date, end_date: Date-range picker bounds
+        active_filters: Cross-filter selections from clicking the charts
+            (keys: 'unit', 'week', 'system'), combined with AND.
+
     Returns:
-        Tuple of (unit_chart, month_chart, system_chart, stats, table)
+        Tuple of (unit_chart, month_chart, system_chart, stats, table, filter_summary,
+        badges, clear_all_button_style)
     """
     if not client:
         raise PreventUpdate
-    
+
     logger.info(f"Loading alerts general view for client: {client}")
     # Load alerts data
     alerts_df = load_alerts_data(client)
-    
+
     if alerts_df.empty:
         logger.warning(f"No alerts data available for client: {client}")
         empty_fig = {'data': [], 'layout': {'title': 'No data available'}}
         empty_alert = dbc.Alert("No hay datos de alertas disponibles", color="warning")
-        return empty_fig, empty_fig, empty_fig, empty_alert, empty_alert, ""
-    
+        return empty_fig, empty_fig, empty_fig, empty_alert, empty_alert, "", [], {'display': 'none'}
+
+    active_filters = active_filters or {}
+    badges = create_active_filter_badges(active_filters)
+    clear_all_style = {'display': 'inline-block'} if badges else {'display': 'none'}
+
     try:
-        # Apply the same presentation filter set to KPIs, charts and table.
-        filtered_df = filter_alert_rows(alerts_df, start_date=start_date, end_date=end_date)
+        # Apply the same presentation filter set to KPIs, charts and table,
+        # combining the date range with any active chart cross-filters (AND).
+        unit_filter = [active_filters['unit']] if active_filters.get('unit') else None
+        system_filter = [active_filters['system']] if active_filters.get('system') else None
+        filtered_df = filter_alert_rows(
+            alerts_df, unit=unit_filter, system=system_filter,
+            start_date=start_date, end_date=end_date,
+        )
+
+        week_value = active_filters.get('week')
+        if week_value and not filtered_df.empty:
+            week_start = pd.to_datetime(week_value)
+            week_end = week_start + pd.Timedelta(days=7)
+            filtered_df = filtered_df[(filtered_df['Timestamp'] >= week_start) & (filtered_df['Timestamp'] < week_end)]
 
         if filtered_df.empty:
             logger.warning("No data after applying filters")
             empty_fig = {'data': [], 'layout': {'title': 'No hay datos con los filtros aplicados'}}
             empty_alert = dbc.Alert("No hay datos con los filtros aplicados", color="info")
-            return empty_fig, empty_fig, empty_fig, empty_alert, empty_alert, "No hay alertas para los filtros seleccionados."
-        
+            return empty_fig, empty_fig, empty_fig, empty_alert, empty_alert, "No hay alertas para los filtros seleccionados.", badges, clear_all_style
+
         # Create charts (using filtered data for visualization) - removed trigger_chart
         unit_chart = create_alerts_per_unit_chart(filtered_df)
         month_chart = create_alerts_per_week_chart(filtered_df)
         system_chart = create_system_distribution_pie_chart(filtered_df)
-        
+
         # Calculate summary statistics
         summary = alert_summary(filtered_df)
         stats = create_summary_stats_display(summary['total'], summary['units'], mixed_count=summary['mixed'])
-        
+
         # Create table
         table = create_alerts_report_table(filtered_df)
-        
+
         latest = summary['latest'].strftime('%d/%m/%Y %H:%M') if pd.notna(summary['latest']) else '-'
         filter_summary = f"Mostrando {summary['total']} alertas de {summary['units']} unidades · última alerta: {latest}"
         logger.info(f"General tab updated successfully with {summary['total']} alerts")
-        return unit_chart, month_chart, system_chart, stats, table, filter_summary
-    
+        return unit_chart, month_chart, system_chart, stats, table, filter_summary, badges, clear_all_style
+
     except Exception as e:
         logger.error(f"Error updating general tab: {e}")
         error_fig = {'data': [], 'layout': {'title': f'Error: {str(e)}'}}
         error_alert = dbc.Alert(f"Error al cargar datos: {str(e)}", color="danger")
-        return error_fig, error_fig, error_fig, error_alert, error_alert, f"Error: {str(e)}"
+        return error_fig, error_fig, error_fig, error_alert, error_alert, f"Error: {str(e)}", badges, clear_all_style
+
+
+@callback(
+    Output('alerts-general-active-filters', 'data', allow_duplicate=True),
+    [
+        Input('alerts-unit-distribution-chart', 'clickData'),
+        Input('alerts-month-distribution-chart', 'clickData'),
+        Input('alerts-system-distribution-chart', 'clickData'),
+        Input({'type': 'alerts-general-filter-chip', 'key': ALL}, 'n_clicks'),
+        Input('alerts-general-filter-clear-all', 'n_clicks'),
+    ],
+    State('alerts-general-active-filters', 'data'),
+    prevent_initial_call=True,
+)
+def update_active_filters(unit_click, week_click, system_click, _chip_clicks, _clear_clicks, current):
+    """
+    Maintain the shared cross-filter state for the General tab's three charts.
+
+    Clicking a bar/point/slice sets (or, if already active, clears) that
+    dimension's filter; multiple dimensions combine with AND. A filter chip's
+    own click removes just that dimension; "Limpiar filtros" clears all.
+    """
+    trigger = callback_context.triggered_id
+    current = dict(current or {})
+
+    if trigger == 'alerts-general-filter-clear-all':
+        return {}
+
+    if isinstance(trigger, dict) and trigger.get('type') == 'alerts-general-filter-chip':
+        current.pop(trigger.get('key'), None)
+        return current
+
+    if trigger == 'alerts-unit-distribution-chart':
+        points = (unit_click or {}).get('points') or []
+        value = points[0].get('y') if points else None
+        key = 'unit'
+    elif trigger == 'alerts-month-distribution-chart':
+        points = (week_click or {}).get('points') or []
+        customdata = points[0].get('customdata') if points else None
+        value = customdata[0] if customdata else None
+        key = 'week'
+    elif trigger == 'alerts-system-distribution-chart':
+        points = (system_click or {}).get('points') or []
+        value = points[0].get('label') if points else None
+        key = 'system'
+    else:
+        raise PreventUpdate
+
+    if value is None:
+        raise PreventUpdate
+
+    if current.get(key) == value:
+        current.pop(key, None)
+    else:
+        current[key] = value
+    return current
+
+
+@callback(
+    Output('alerts-general-active-filters', 'data', allow_duplicate=True),
+    Input('client-selector', 'value'),
+    prevent_initial_call=True,
+)
+def reset_active_filters_on_client_change(_client):
+    """Drop any chart cross-filter when the client changes, since selections
+    (unit/week/system) don't necessarily carry over to a different client."""
+    return {}
 
 
 @callback(

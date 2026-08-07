@@ -233,6 +233,6 @@ if __name__ == '__main__':
     
     app.run(
         host=host,
-        port=port,
+        port=6767,
         debug=debug
     )

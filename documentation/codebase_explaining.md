@@ -101,6 +101,150 @@ Each feature area follows the same three-file pattern:
 - `dashboard/components/<name>_charts.py` / `_tables.py` — reusable Plotly figures / DataTables
   used by that feature's callbacks
 
+**Don't assume `_tables.py` holds the live table code.** For Aceite and Telemetría specifically,
+the actual `dash_table.DataTable` for each feature's main "general table" is built inline inside
+the callback file, not in the sibling `_tables.py`:
+- Oil's fleet heatmap table (`fleet-heatmap-table`) is built in
+  `dashboard/callbacks/machines_callbacks.py` (`update_fleet_heatmap_table`)
+- Telemetría's fleet status table (`telemetry-fleet-status-table`) is built in
+  `dashboard/callbacks/telemetry_callbacks.py` (`_fleet_status_table` / `update_fleet_overview`)
+
+`dashboard/components/telemetry_tables.py` is dead code as of 2026-08 — its functions
+(`build_fleet_priority_table`, `build_system_risk_table`, `build_signal_overview_table`,
+`build_signal_kpi`) aren't imported anywhere; the live equivalents live in
+`dashboard/components/telemetry_report.py` and inline in `telemetry_callbacks.py`. Grep for a
+function's usage before assuming a `_tables.py`/`_charts.py` file is where the real logic lives.
+
+The two general tables above (Oil's and Telemetría's) intentionally share the same visual
+convention — header color, cell padding/font-size, status color palette, tooltip CSS — so the
+tabs read as one system. If you touch one, check whether the other should be mirrored too. See
+[documentation/telemetry/dashboard_proposal.md](telemetry/dashboard_proposal.md) for the as-built
+notes on this.
+
+### Alertas → Detalle specifics: the sensor trends chart isn't shared with Telemetría
+
+Despite looking similar, `dashboard/components/alerts_charts.py::create_sensor_trends_chart_golden`
+(used by Alertas → Detalle's evidence section) and
+`dashboard/components/telemetry_charts.py::build_signal_timeseries_card` (used by Telemetría) are
+two independent functions in two independent files — they share no chart-building code, only the
+Spanish signal-label dict (`src/charts/signals.py::SIGNAL_LABELS`). Don't assume a styling/gap/
+tooltip fix to one needs to touch the other, and don't go looking for a single shared "time series
+chart component" in `dashboard/components/` — there isn't one for this purpose.
+
+As of 2026-08, `create_sensor_trends_chart_golden` renders **identically for every client**. It
+used to have an `is_capstone` branch that drove completely different trace styles (CDA: markers
+only, one trace per `State` value; Capstone: a single continuous `lines+markers` trace with
+`connectgaps=True`). That branch is gone. The only surviving `is_capstone` check resolves legacy
+column aliases (`engine_speed_rpm`→`EngSpd`, `engine_load_pct`→`EngLoad`) when Capstone's canonical
+column is empty — that's a data-column lookup, not rendering, so don't reintroduce client-specific
+trace styling there without a strong reason.
+
+**Gap handling**: `_split_gap_segments()` (module level, just above the golden-layer chart
+functions in `alerts_charts.py`) splits a time-sorted series into contiguous chunks wherever the
+gap between consecutive samples exceeds ~3x the series' median sampling interval. Both the signal
+line and the upper/lower limit lines are rendered as one `go.Scatter` trace per segment instead of
+one trace for the whole series, so a real data gap shows as a visible break instead of a straight
+connector. This is the only gap-detection logic in the codebase — nothing else here uses
+`resample`/`reindex` for this — so reuse `_split_gap_segments` rather than writing a second
+implementation if another chart needs the same treatment.
+
+**Line styling**: module-level constants `SIGNAL_LINE_COLOR` (gray), `SIGNAL_LINE_WIDTH`, and
+`LIMIT_LINE_WIDTH` control the signal line and the upper/lower limit lines respectively — limit
+lines are intentionally rendered heavier than the signal line so they don't blend into it.
+
+**Alert-moment overlays**: two independent shapes are added near the end of the function — a
+full-height dotted vertical line at `alert_time` on every subplot (marks *when* the alert
+happened, pre-existing), and a red highlight rectangle spanning `alert_time ± 30s` ×
+`alert_value ± 1` (marks *where*, added 2026-08) drawn on **only** the panel of the feature that
+actually triggered the alert. Which feature that is comes from the `Trigger` column on
+`alert_data` (matched case-insensitively against the loop's `feature` variable) — if a future
+caller stops passing a `Trigger` column, the rectangle silently stops appearing instead of
+erroring, so check that column first if the highlight seems to be missing.
+
+### Predictivo specifics: two data sources feeding one page
+
+Predictivo (`dashboard/tabs/tab_predictive_overview.py`, `tab_predictive_evidence.py`,
+`tab_predictive_component.py`) is the one tab that routinely reads **two different techniques'
+golden layers at once** — its own `predictive/golden/` CSVs plus the Oil technique's
+`oil/golden/` files. Don't assume everything on this page comes from one source:
+
+- **Own data**: `data/predictive/golden/{client}/{component}.csv` — one file per component
+  (currently only `motor.csv`/`transmision.csv` for CDA, `motor.csv` for Capstone). Components are
+  **auto-discovered** by scanning that folder for `*.csv` files (`_discover_components`, duplicated
+  identically in `tab_predictive_overview.py`, `tab_predictive_evidence.py`, and
+  `predictive_pages_callbacks.py` — there's no single shared helper). Grain is **one row per
+  Unit per day**; oil variable columns (`Hierro`, `Cobre`, ...) are forward-filled across every
+  daily row between real samples by the upstream pipeline, only `sampleDate` distinguishes a real
+  sample from a carried-forward value. Full schema:
+  [documentation/predictive/predictive_data_contracts.md](predictive/predictive_data_contracts.md).
+- **Borrowed from Oil**: two separate `oil/golden/{client}/` files feed Predictivo:
+  - `cleaned_component_hours.parquet` — powers the "Curva Acumulada de Riesgo" chart
+    (`dashboard/components/accumulated_curve.py`, rendered via `render_accumulated_section` /
+    `build_accumulated_figure`). Joined on `unitId` (normalized `T_09`→`T_9`) +
+    `componentName` matching the Predictivo component key exactly (`"motor"`, `"transmision"`).
+    Gated entirely on this parquet's existence per client — if it's missing, the page falls back
+    to a classic KPI hero instead of the zone-classified one (`_load_component_hours_if_available`
+    returns `None` and `_render_component_overview` uses `classic_hero`).
+  - `classified.parquet` — powers the oil evidence time-series chart (Evidencia ▸ Evidencia
+    Tribológica), via `_load_real_oil_samples` in `predictive_callbacks.py`. This reads real,
+    un-forward-filled lab samples so the chart shows genuine sample-to-sample variation instead of
+    a staircase. Matching is case-insensitive exact equality on `componentName` **or**
+    `componentNameNormalized` — this works cleanly for CDA (`"motor"`/`"transmision"` literal in
+    both files) but **not** for every client: Capstone's oil data names the engine `"MOTOR DIESEL"`
+    / `"motor diesel"`, which doesn't equality-match the Predictivo key `"motor"`. When no match is
+    found the chart silently falls back to the forward-filled `component.csv` column instead of
+    rendering empty — check `use_real` in `update_oil_chart` before assuming every client gets the
+    real-sample chart.
+
+Because of this dual-source pattern, a "why does this chart look different for Capstone vs CDA"
+question is often answered by a naming mismatch between the two golden layers, not a code bug —
+check `componentName`/`componentNameNormalized` values in that client's `classified.parquet`
+before assuming the matching logic itself is broken.
+
+### Aceite specifics: three internal tabs, three callback files, two AI-text parsers
+
+Aceite (`dashboard/tabs/tab_oil.py`) is a shell holding `dcc.Tabs(id='oil-internal-tabs')`.
+`dashboard/callbacks/oil_callbacks.py::render_oil_tab_content` is the router — it switches on the
+tab value and returns a different sub-tab's layout, and **each sub-tab's interactivity lives in
+its own callback file**, not in `oil_callbacks.py` itself:
+
+| Internal tab (`oil-internal-tabs` value) | Layout | Callbacks |
+|---|---|---|
+| `fleet-overview` (Visión de Flota, the default) | `tab_machines.py::create_machines_tab` | `machines_callbacks.py` |
+| `report-detail` (Detalle de Reporte) | `tab_reports.py::create_reports_tab` | `reports_callbacks.py` |
+| `lab-compliance` (Cumplimiento Laboratorio) | `tab_lab_compliance.py::create_lab_compliance_tab` | `lab_compliance_callbacks.py` |
+| `component-hours` (Horómetro) | commented out in `tab_oil.py`, see §4 nav table | `tab_component_hours.py` |
+
+**`reports_callbacks.py` is where most of Detalle de Reporte's actual rendering lives**, inline,
+the same "don't assume `_tables.py`/`_charts.py` has the real logic" pattern noted above: the
+sticky identity header, decision summary, evidence tables, AI diagnosis boxes, and delta-vs-previous
+summary are all built as helper functions inside this one callback file
+(`create_report_identity_display`, `create_ai_diagnosis_and_action`, `create_delta_summary`, etc.),
+not in `oil_charts.py` or `oil_view_models.py`.
+
+**AI comment formatting is two independent parsers, not one shared component**, despite looking
+visually identical. Both Alertas and Aceite render an "Análisis Inteligente"-style block —
+labeled sections in `p-3 bg-light rounded` boxes with an icon+title header — but the parsing logic
+behind each is separate because the underlying text contracts differ:
+- Alerts' `mensaje_ia` (`alerts_tables.py::parse_ia_message_sections`, used by
+  `alerts_callbacks.py::_alert_case_header`) handles a richer contract: either a JSON payload
+  (`diagnostic`/`recommended_actions`/`evidence` keys) or free-text with `DIAGNÓSTICO`/`CAUSA
+  PROBABLE`/`ACCIONES` keyword markers, rendered as **3** boxes.
+- Oil's `ai_recommendation` (`reports_callbacks.py::_parse_oil_ai_sections`, used by
+  `create_ai_diagnosis_and_action`) handles a simpler, fixed format —
+  `"Diagnóstico: ...\nAcción: ..."`, always in that order — rendered as **2** boxes (no "causa
+  probable"; oil comments don't carry one).
+
+If a comment fails to parse (unexpected format), each parser has its own fallback — don't assume
+fixing one function's edge case fixes the other. When asked to change how AI text renders in one
+tab, check which of these two parsers is actually in play before reusing logic from the other.
+
+**Unit ID casing isn't consistent across Aceite's own filters.** The Equipo (unit) selector and
+sticky identity display in Detalle de Reporte use `.upper()`; the Familia and Componente selectors
+in the same sticky header still use `.title()`. This is intentional per current requirements (only
+the Unit filter was asked to be uppercased), not an oversight — don't "fix" the others without
+checking whether it was actually requested.
+
 ### Navigation: what's actually live vs. shelved
 
 `dashboard/layout.py::create_main_dashboard` builds the sidebar from a Python list
@@ -110,7 +254,10 @@ reachable in the UI. As of this writing:
 **Live in navigation:**
 - Resumen → General, Estado de Datos
 - Monitoreo → Alertas, Telemetría, Aceite (Aceite's internal tabs include Cumplimiento
-  Laboratorio; a Component Hours internal tab exists in code but is commented out)
+  Laboratorio; a Component Hours internal tab exists in code but is commented out).
+  Telemetría follows the same internal-tabs pattern: 'Vista de Flota' and 'Detalle de Unidad',
+  routed by `dashboard/callbacks/telemetry_callbacks.py::render_telemetry_health_tab` (the
+  Telemetría equivalent of Aceite's `oil_callbacks.py` internal-tab router).
 - Predictivo → one subsection per auto-discovered component CSV, **only shown if the logged-in
   user's client is in `settings.predictive_allowed_clients`**
 - Integración / Reportes / Administración → static "En Desarrollo" placeholders, no real content
@@ -165,7 +312,14 @@ backward compatibility only — see [documentation/oil/dashboard_documentation.m
 - **`config/settings.py`** — a Pydantic `Settings` object (env-driven via `.env`) holding API
   keys, thresholds (Stewart Limits percentiles, classification cutoffs), and
   **module access-control lists** (`predictive_allowed_clients`, `component_hours_allowed_clients`)
-  that gate entire nav sections per client. Accessed as a singleton via `get_settings()`.
+  that gate entire nav sections per client. Accessed as a singleton via `get_settings()`. Not every
+  per-client numeric threshold lives in a golden-layer parquet (like Stewart Limits do, see §5) —
+  some are plain config, e.g. `lab_compliance_threshold_days_by_client` /
+  `get_lab_compliance_threshold_days(client)`, which drives the compliance-window reference line on
+  Aceite → Cumplimiento Laboratorio's charts and falls back to
+  `lab_compliance_default_threshold_days` (2.0) for any client without an override. Same
+  allow-list-style per-client pattern as the access-control lists above, just returning a value
+  instead of a boolean.
 - **`config/users.py`** — the user/auth database (see §4).
 - **`src/data/`** — loaders (`loaders.py`, `maintenance_loaders.py`), a repository layer for
   maintenance data (`maintenance_repository.py`), Pydantic schemas mirroring the data contracts
@@ -208,7 +362,8 @@ backward compatibility only — see [documentation/oil/dashboard_documentation.m
 | Telemetry data shape/contract | [documentation/telemetry/](telemetry/) |
 | Alerts data shape/contract | [documentation/alerts/](alerts/) |
 | Mantentions data shape/contract | [documentation/mantentions/](mantentions/) |
-| Predictive module processing notes | [documentation/predictive/](predictive/) |
+| Predictive data shape/contract (golden CSV schema, component auto-discovery, oil-hours cross-dependency) | [documentation/predictive/predictive_data_contracts.md](predictive/predictive_data_contracts.md) |
+| Predictive processing/pipeline background notes | [documentation/predictive/](predictive/) |
 | Data freshness feature design | [documentation/general/DATA_FRESHNESS_TAB.md](general/DATA_FRESHNESS_TAB.md), [DATA_FRESHNESS_IMPLEMENTATION.md](general/DATA_FRESHNESS_IMPLEMENTATION.md) |
 | Historical implementation notes for shelved features | `ai_docs/` |
 
@@ -248,3 +403,26 @@ plus live-reload mounts for `./dashboard`, `./config`, `./src`).
   `bronze/`/`silver/`, unless there's a specific reason not to.
 - **This repo doesn't process data.** If a bug looks like "the classification/AI output is
   wrong," it's very likely an upstream pipeline issue, not something fixable in this repo.
+- **A function computing something ≠ that something being rendered.** Some callbacks compute
+  widgets that are never returned/displayed because of an earlier `return` in the same function
+  (e.g. `telemetry_callbacks.py::update_fleet_overview` builds KPI cards, a Plotly heatmap and an
+  insights row, then hits `return _fleet_status_table(...)` before any of that code runs). Trace
+  the actual `return` path before assuming a widget you see referenced in code is live in the UI.
+- **Alertas → Detalle's sensor trends chart and Telemetría's chart are different functions in
+  different files**, not a shared component, even though they look alike. As of 2026-08 that
+  chart (`create_sensor_trends_chart_golden` in `alerts_charts.py`) renders identically for CDA
+  and Capstone, splits traces on real time gaps via `_split_gap_segments`, and draws the
+  alert-highlight rectangle only on the triggering feature's panel (from the `Trigger` column) —
+  see §4's Alertas → Detalle subsection before assuming client-specific rendering exists there.
+- **Alertas and Aceite each have their own AI-comment section parser** —
+  `alerts_tables.py::parse_ia_message_sections` (3 sections, JSON-or-keyword contract) and
+  `reports_callbacks.py::_parse_oil_ai_sections` (2 sections, fixed `Diagnóstico:`/`Acción:`
+  format). They render visually the same way on purpose, but are not the same code — see §4's
+  Aceite subsection before assuming a change to one applies to the other.
+- **Predictivo silently mixes two techniques' golden layers** (its own `predictive/golden/` CSVs
+  plus `oil/golden/cleaned_component_hours.parquet` and `oil/golden/classified.parquet`), and the
+  join between them is a plain string equality on component name (`"motor"`, `"transmision"`) that
+  only holds for clients whose oil data happens to use those exact names. A component/client
+  combo that "has no chart" or "shows different data than another client" is often a naming
+  mismatch between the two files, not a broken calculation — see §4's Predictivo subsection before
+  digging into the chart code itself.

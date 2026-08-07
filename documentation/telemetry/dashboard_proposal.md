@@ -5,6 +5,103 @@
 **Date**: June 2026  
 **Tech Stack**: Dash + Plotly (Python)
 
+> **Status note (2026-08-07)**: everything below "Objective" through "Future Enhancements" is
+> the **original design proposal**, kept for its design rationale (the two-question framing,
+> color system, drill-down philosophy still hold). It does **not** match the shipped code in
+> several concrete ways — page structure, file layout, and some interactivity. Read
+> **[As Built](#as-built-2026-08)** below first for what's actually true today; treat the rest of
+> this file as historical intent, not a spec of current behavior. If something here contradicts
+> the code, trust the code.
+
+---
+
+## As Built (2026-08)
+
+### Real file map
+
+The proposal's `dashboard/pages/` + `components/data_loader.py` layout was never built. The
+actual structure follows this repo's standard tabs/callbacks/components convention (see
+[documentation/codebase_explaining.md](../codebase_explaining.md#4-dashboard--the-app-itself)):
+
+| File | Role |
+|---|---|
+| `dashboard/tabs/tab_telemetry.py` | Outer shell — header + internal `dcc.Tabs` ('Vista de Flota' / 'Detalle de Unidad') |
+| `dashboard/tabs/tab_telemetry_fleet.py` | Layout only for the fleet overview page (filters + table container) |
+| `dashboard/tabs/tab_telemetry_unit_detail.py` | Layout only for the unit drill-down page (unit/system/signal selectors + table containers) |
+| `dashboard/callbacks/telemetry_callbacks.py` | All interactivity, including the fleet table's `dash_table.DataTable` spec itself (`_fleet_status_table`) |
+| `dashboard/components/telemetry_report.py` | `TelemetrySnapshot` view-model — loads golden-layer outputs via `src/data/loaders.py` and joins/orders them for display only, no recomputation |
+| `dashboard/components/telemetry_charts.py` | Plotly figure builders (fleet heatmap, signal time series), Spanish translation maps, `STATUS_COLORS` |
+| `dashboard/components/telemetry_tables.py` | **Dead code** — `build_fleet_priority_table`, `build_system_risk_table`, `build_signal_overview_table`, `build_signal_kpi` are not imported anywhere; superseded by `telemetry_report.py` and inline builders in `telemetry_callbacks.py` |
+
+### Vista de Flota (Page 1) — what's actually there
+
+The live page is filters (equipment model, status, visible systems) plus **one**
+`dash_table.DataTable` (`telemetry-fleet-status-table`, built by `_fleet_status_table` in
+`telemetry_callbacks.py`): columns Unidad / Modelo / one column per visible system / Estado, rows
+sorted server-side by severity then `priority_score`. There is no donut chart, no separate
+heatmap graphic, no separate priority table, and no separate AI-assessment table on this page —
+the mockup below overstates what's rendered.
+
+`update_fleet_overview` (the callback behind this table) does still contain code that builds KPI
+cards, a `build_fleet_heatmap` Plotly figure, and an insights row — but it hits
+`return _fleet_status_table(rows, visible)` before that code executes, so none of it renders.
+This is dead code, not a toggleable feature — don't build on top of it without first wiring it
+into the actual return path.
+
+**Interactivity that is live**: clicking a system-column cell (`active_cell`) navigates straight
+to "Detalle de Unidad" with that unit + system pre-selected (`navigate_from_fleet`). Sorting is
+native (client-side); there is no filter box on this table (matching Aceite's equivalent table,
+which also has no filter). No row-selection checkboxes — Telemetría has no inline detail panel on
+this page for a checkbox to drive, unlike Aceite's Fleet Overview.
+
+**Visual styling (as of REQ-TE-01, 2026-08-07)**: this table's header color, cell padding/font
+size, status color palette, tooltip CSS, and page size were aligned to match Aceite's equivalent
+fleet-heatmap table (`dashboard/callbacks/machines_callbacks.py::update_fleet_heatmap_table`) so
+the two "general tables" read as one system. See `_SYSTEM_STATUS_BG/_FG` and
+`_OVERALL_STATUS_BG/_FG` in `telemetry_callbacks.py`, mirrored from Oil's `_STATUS_BG/_FG` and
+`_MACHINE_STATUS_BG/_FG`. Interactivity was deliberately **not** touched — Telemetría's
+click-to-navigate stayed as-is rather than being replaced with Aceite's checkbox row-selection,
+since there's no inline detail panel here to drive with it.
+
+### Detalle de Unidad (Page 2) — what's actually there
+
+Broadly matches the proposal's drill-down intent (unit → system → signal, AI text at every
+level), with one notable difference: **only one signal's evidence card renders at a time** (the
+one currently selected in the signal table/selector), not a stacked list of cards for every
+signal in the system as the mockup shows. The actual flow is:
+
+1. Unit selector → unit-level AI decision-summary card (`_decision_summary`)
+2. System status table (row-selectable) → selected-system AI analysis card (`_system_analysis_card`)
+3. Signal table (row-selectable, scoped to the selected system)
+4. One signal-evidence card for the selected signal: time series (`build_signal_timeseries_card`,
+   with rolling mean, P2/P5/P95/P98 baseline lines, trend overlay, and materialized event/anomaly
+   shading) + a KPI table, side by side
+
+These tables (`telemetry-detail-system-table`, `telemetry-detail-signal-table`) still use the
+original telemetry header color (`#34495e`) and padding — REQ-TE-01 only touched the fleet
+overview table, not this page.
+
+### Data loading — what's actually true
+
+No 5-minute polling cache and no `dcc.Interval` exists anywhere in the telemetry tab. Instead,
+`load_telemetry_snapshot` (in `telemetry_report.py`) keys an `lru_cache`-backed `TelemetrySnapshot`
+off the upstream pipeline's own evaluation identity (`evaluation_year`/`evaluation_week`/
+`execution_timestamp`/`baseline_version` from `data/telemetry/golden/{client}/latest.json`) — the
+UI picks up a new evaluation automatically the next time any callback fires after the pipeline
+publishes one, with no timer involved. Detail-only artifacts (deviation, trends, limits, signal
+comments) are loaded lazily via `include_detail=True` only once a unit is opened; the event
+parquet (the largest artifact) is lazier still, loaded per unit+signal only when a signal chart
+is requested (`_events_for_signal_cached`).
+
+Real golden-layer paths (via `src/data/loaders.py`), for reference against the "AI Comments
+Integration" section below (which is directionally correct but not path-exact):
+`data/telemetry/golden/{client}/{unit_health,system_health}/`,
+`.../{deviation_summary,technique_results/deviation}`,
+`.../{event_results,technique_results/events}`, `.../{trend_results,technique_results/trend}`,
+`.../latest.json` (manifest), plus AI comments via `load_telemetry_ai_comments(client, level)`.
+Spanish translation/registry config lives at `data/telemetry/config/{client}/signal_registry.yaml`
+and `equipment_registry.yaml` — not part of the original proposal at all.
+
 ---
 
 ## Objective
@@ -251,6 +348,10 @@ def load_ai_comments(cache_key):
 ---
 
 ## Implementation Architecture
+
+> Historical design sketch — the code below was never built this way. See
+> **[As Built](#as-built-2026-08)** at the top of this file for the real file map, data loading,
+> and callback structure.
 
 ### App Structure
 

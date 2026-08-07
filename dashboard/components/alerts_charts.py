@@ -353,6 +353,7 @@ def create_alerts_per_week_chart(alerts_df: pd.DataFrame) -> go.Figure:
     full = pd.MultiIndex.from_product([weeks, systems], names=['_week_start', '_system_display']).to_frame(index=False)
     grouped = full.merge(grouped, how='left', on=['_week_start', '_system_display']).fillna({'Count': 0})
     grouped['Semana'] = grouped['_week_start'].dt.strftime('%d/%m')
+    grouped['_week_start_iso'] = grouped['_week_start'].dt.strftime('%Y-%m-%d')
     fig = px.bar(
         grouped,
         x='Semana',
@@ -363,6 +364,7 @@ def create_alerts_per_week_chart(alerts_df: pd.DataFrame) -> go.Figure:
         color_discrete_map=SISTEMA_COLORS,
         template='plotly_white',
         height=360,
+        custom_data=['_week_start_iso'],
     )
     fig.update_traces(hovertemplate='<b>%{fullData.name}</b><br>Semana: %{x}<br>Alertas: %{y}<extra></extra>')
     fig.update_layout(
@@ -914,6 +916,32 @@ def create_system_distribution_pie_chart(alerts_df: pd.DataFrame) -> go.Figure:
             x=0.5, y=0.5, showarrow=False
         )
 
+def _split_gap_segments(df: pd.DataFrame, time_col: str) -> List[pd.DataFrame]:
+    """Split a time-sorted dataframe into contiguous chunks wherever the gap
+    between consecutive samples exceeds ~3x the series' median sampling
+    interval. Used so real data gaps render as a visible break in the line
+    instead of a straight connector implying data that doesn't exist.
+    """
+    if len(df) < 2:
+        return [df]
+    deltas = df[time_col].diff().dt.total_seconds()
+    median_interval = deltas.iloc[1:].median()
+    if not median_interval or median_interval <= 0:
+        return [df]
+    gap_threshold = median_interval * 3
+    segment_id = (deltas > gap_threshold).cumsum()
+    return [group for _, group in df.groupby(segment_id)]
+
+
+# Main signal line style (REQ-AD-02): gray, reduced thickness, shared by
+# both clients so CDA and Capstone render identically (REQ-AD-01).
+SIGNAL_LINE_COLOR = '#95a5a6'
+SIGNAL_LINE_WIDTH = 1.3
+
+# Limit lines must stand out against the (now thin, gray) signal line rather
+# than blend in with it.
+LIMIT_LINE_WIDTH = 3
+
 # ================================
 # NEW GOLDEN LAYER CHART FUNCTIONS
 # ================================
@@ -973,13 +1001,11 @@ def create_sensor_trends_chart_golden(
         # Use Spanish names if mapping provided
         subplot_titles = [feature_name_map.get(f, f) if feature_name_map else f for f in feature_names]
         
-        # Plotly limits vertical_spacing to 1 / (rows - 1). Capstone can
-        # expose many mapped signals, so reduce spacing for tall charts.
+        # Plotly limits vertical_spacing to 1 / (rows - 1). Charts can expose
+        # many mapped signals, so reduce spacing for tall charts regardless
+        # of client (REQ-AD-01: rendering must not depend on client).
         panel_count = len(feature_names)
-        vertical_spacing = (
-            (0.12 if panel_count <= 1 else min(0.05, 0.9 / (panel_count - 1)))
-            if is_capstone else 0.12
-        )
+        vertical_spacing = 0.12 if panel_count <= 1 else min(0.05, 0.9 / (panel_count - 1))
         fig = make_subplots(
             rows=panel_count,
             cols=1,
@@ -988,6 +1014,13 @@ def create_sensor_trends_chart_golden(
             vertical_spacing=vertical_spacing
         )
         limit_legend_shown = False
+        # REQ-AD-03: the highlight rectangle is drawn only on the panel of
+        # the feature that actually triggered the alert.
+        trigger_feature = None
+        if 'Trigger' in alert_data.columns and not alert_data['Trigger'].empty:
+            raw_trigger = alert_data['Trigger'].iloc[0]
+            if pd.notna(raw_trigger):
+                trigger_feature = str(raw_trigger).strip().casefold()
         # Plot each feature
         for idx, feature in enumerate(feature_names, 1):
             value_col = f'{feature}_Value'
@@ -1008,46 +1041,49 @@ def create_sensor_trends_chart_golden(
                         value_col = f'{alias}_Value'
                         upper_col = f'{alias}_Upper_Limit'
                         lower_col = f'{alias}_Lower_Limit'
-            if is_capstone:
-                if value_col not in alert_data.columns:
-                    logger.warning("Skipping feature without value column: %s", feature)
-                    continue
-                # Keep one continuous trace per variable. State is retained
-                # in hover metadata and represented by explicit swatches.
-                value_columns = ['TimeStart', value_col]
-                if 'State' in alert_data.columns:
-                    value_columns.append('State')
-                value_data = alert_data[value_columns].copy()
-                value_data[value_col] = pd.to_numeric(value_data[value_col], errors='coerce')
-                value_data = value_data.dropna(subset=['TimeStart', value_col]).sort_values('TimeStart')
-                if value_data.empty:
-                    continue
-                if 'State' not in value_data.columns:
-                    value_data['State'] = ''
-                state_labels = value_data['State'].map(
-                    lambda state: _state_label(state) if str(state).strip() else ''
-                )
-                state_colors = value_data['State'].map(
-                    lambda state: _state_color(state) if str(state).strip() else '#2ecc71'
-                )
+            if value_col not in alert_data.columns:
+                logger.warning("Skipping feature without value column: %s", feature)
+                continue
+            # One continuous signal per variable, rendered identically for
+            # every client (REQ-AD-01). State is retained in hover metadata
+            # and represented via explicit legend swatches below.
+            value_columns = ['TimeStart', value_col]
+            if 'State' in alert_data.columns:
+                value_columns.append('State')
+            value_data = alert_data[value_columns].copy()
+            value_data[value_col] = pd.to_numeric(value_data[value_col], errors='coerce')
+            value_data = value_data.dropna(subset=['TimeStart', value_col]).sort_values('TimeStart')
+            if value_data.empty:
+                continue
+            if 'State' not in value_data.columns:
+                value_data['State'] = ''
+            value_data['_state_label'] = value_data['State'].map(
+                lambda state: _state_label(state) if str(state).strip() else ''
+            )
+            value_data['_state_color'] = value_data['State'].map(
+                lambda state: _state_color(state) if str(state).strip() else SIGNAL_LINE_COLOR
+            )
+
+            # REQ-AD-02: break the line at real time gaps instead of
+            # connecting them, by rendering one trace per contiguous segment.
+            for segment in _split_gap_segments(value_data, 'TimeStart'):
                 fig.add_trace(
                     go.Scatter(
-                        x=value_data['TimeStart'],
-                        y=value_data[value_col],
+                        x=segment['TimeStart'],
+                        y=segment[value_col],
                         mode='lines+markers',
-                        connectgaps=True,
                         name=display_name,
                         showlegend=False,
-                        customdata=state_labels.to_numpy(),
+                        customdata=segment['_state_label'].to_numpy(),
                         marker=dict(
                             size=6,
-                            color=state_colors.to_numpy(),
+                            color=segment['_state_color'].to_numpy(),
                             line=dict(width=1, color='white')
                         ),
-                        line=dict(color='#2ecc71', width=2),
+                        line=dict(color=SIGNAL_LINE_COLOR, width=SIGNAL_LINE_WIDTH),
                         hovertemplate=(
                             f'<b>{display_name}</b><br>' +
-                            'Hora: %{x}<br>' +
+                            'Hora: %{x|%d/%m/%Y %H:%M:%S}<br>' +
                             'Valor: %{y:.2f}<br>' +
                             'Estado: %{customdata}<br>' +
                             '<extra></extra>'
@@ -1056,56 +1092,59 @@ def create_sensor_trends_chart_golden(
                     row=idx,
                     col=1
                 )
-            else:
-                # Preserve CDA's established state-split marker rendering.
-                if 'State' in alert_data.columns and alert_data['State'].notna().any():
-                    for state in alert_data['State'].dropna().unique():
-                        state_data = alert_data[alert_data['State'] == state]
-                        fig.add_trace(
-                            go.Scatter(
-                                x=state_data['TimeStart'],
-                                y=state_data[value_col],
-                                mode='markers',
-                                name=state,
-                                legendgroup=state,
-                                showlegend=(idx == 1),
-                                marker=dict(
-                                    color=_state_color(state),
-                                    size=8,
-                                    line=dict(width=1, color='white')
-                                ),
-                                line=dict(
-                                    color=_state_color(state),
-                                    width=2
-                                ),
-                                hovertemplate=(
-                                    f'<b>{display_name}</b><br>' +
-                                    'Hora: %{x}<br>' +
-                                    'Valor: %{y:.2f}<br>' +
-                                    f'Estado: {state}<br>' +
-                                    '<extra></extra>'
-                                )
-                            ),
-                            row=idx,
-                            col=1
-                        )
-                else:
+
+            # REQ-AD-03: flashy highlight rectangle around the alert moment,
+            # only on the panel of the feature that triggered the alert --
+            # 30s before/after the alert timestamp on the x-axis, and
+            # (alert value +/- 1) on the y-axis.
+            is_trigger_feature = (
+                trigger_feature is not None
+                and trigger_feature == str(feature).strip().casefold()
+            )
+            if is_trigger_feature:
+                time_deltas = (value_data['TimeStart'] - alert_time).abs()
+                nearest_idx = time_deltas.idxmin()
+                alert_value = value_data.loc[nearest_idx, value_col]
+            if is_trigger_feature and pd.notna(alert_value):
+                fig.add_shape(
+                    type='rect',
+                    x0=alert_time - timedelta(seconds=30),
+                    x1=alert_time + timedelta(seconds=30),
+                    y0=alert_value - 1,
+                    y1=alert_value + 1,
+                    line=dict(color='#ff0000', width=3),
+                    fillcolor='rgba(255, 0, 0, 0.25)',
+                    layer='above',
+                    row=idx,
+                    col=1
+                )
+            # Plot limits (SECONDARY PRIORITY - Visually lighter), also
+            # gap-segmented so a missing limit window doesn't draw a
+            # straight connector across it.
+            for limit_col, limit_label, dash_style in (
+                (lower_col, 'Límite Inferior', 'dash'),
+                (upper_col, 'Límite Superior', 'dash'),
+            ):
+                if limit_col not in alert_data.columns or not alert_data[limit_col].notna().any():
+                    continue
+                limit_data = alert_data[['TimeStart', limit_col]].dropna(subset=[limit_col]).sort_values('TimeStart')
+                for segment in _split_gap_segments(limit_data, 'TimeStart'):
                     fig.add_trace(
                         go.Scatter(
-                            x=alert_data['TimeStart'],
-                            y=alert_data[value_col],
-                            mode='markers',
-                            name=display_name,
-                            showlegend=(idx == 1),
-                            marker=dict(
-                                size=8,
-                                color='#3498db',
-                                line=dict(width=1, color='white')
+                            x=segment['TimeStart'],
+                            y=segment[limit_col],
+                            mode='lines',
+                            name='Límite',
+                            legendgroup='limits',
+                            showlegend=not limit_legend_shown,
+                            line=dict(
+                                color='rgba(231, 76, 60, 0.4)',
+                                width=LIMIT_LINE_WIDTH,
+                                dash=dash_style
                             ),
-                            line=dict(color='#3498db', width=2),
                             hovertemplate=(
-                                f'<b>{display_name}</b><br>' +
-                                'Hora: %{x}<br>' +
+                                limit_label + '<br>' +
+                                'Hora: %{x|%d/%m/%Y %H:%M:%S}<br>' +
                                 'Valor: %{y:.2f}<br>' +
                                 '<extra></extra>'
                             )
@@ -1113,86 +1152,38 @@ def create_sensor_trends_chart_golden(
                         row=idx,
                         col=1
                     )
-            # Plot limits (SECONDARY PRIORITY - Visually lighter)
-            # Lower limit - Use lighter color and thinner line
-            if lower_col in alert_data.columns and alert_data[lower_col].notna().any():
-                alert_low = alert_data[['TimeStart', lower_col]].copy()
-                alert_low.sort_values(by='TimeStart', inplace=True)  # Ensure limits are plotted in order
-                fig.add_trace(
-                    go.Scatter(
-                        x=alert_low['TimeStart'],
-                        y=alert_low[lower_col],
-                        mode='lines',
-                        name='L\u00edmite',
-                        legendgroup='limits',
-                        showlegend=not limit_legend_shown,
-                        line=dict(
-                            color='rgba(231, 76, 60, 0.4)',  # Lighter red with transparency
-                            width=1.5,  # Thinner than signal
-                            dash='dash'  # Dashed style for lower limit
-                        ),
-                        hovertemplate='Límite Inferior: %{y:.2f}<extra></extra>'
+                    limit_legend_shown = True
+
+        # Add state swatches after the real sensor traces so they cannot
+        # interfere with the first subplot's data rendering (both clients,
+        # REQ-AD-01).
+        state_values = alert_data.get(
+            'State', pd.Series(index=alert_data.index, dtype='object')
+        ).fillna('').astype(str)
+        seen_states = []
+        for raw_state in state_values.tolist():
+            if raw_state and raw_state not in seen_states:
+                seen_states.append(raw_state)
+        for raw_state in reversed(seen_states):
+            state_label = _state_label(raw_state)
+            fig.add_trace(
+                go.Scatter(
+                    x=[None],
+                    y=[None],
+                    mode='markers',
+                    name=state_label,
+                    legendgroup=raw_state,
+                    marker=dict(
+                        size=8,
+                        color=_state_color(raw_state),
+                        line=dict(width=1, color='white')
                     ),
-                    row=idx,
-                    col=1
-                )
-                limit_legend_shown = True
-            
-            # Upper limit - Use different style to distinguish from lower
-            if upper_col in alert_data.columns and alert_data[upper_col].notna().any():
-                alert_high = alert_data[['TimeStart', upper_col]].copy()
-                alert_high.sort_values(by='TimeStart', inplace=True)  # Ensure limits are plotted in order
-                fig.add_trace(
-                    go.Scatter(
-                        x=alert_high['TimeStart'],
-                        y=alert_high[upper_col],
-                        mode='lines',
-                        name='L\u00edmite',
-                        legendgroup='limits',
-                        showlegend=not limit_legend_shown,
-                        line=dict(
-                            color='rgba(231, 76, 60, 0.4)',  # Lighter red with transparency
-                            width=1.5,  # Thinner than signal
-                            dash='dash'  # Dashed style for upper limit (different from lower)
-                        ),
-                        hovertemplate='Límite Superior: %{y:.2f}<extra></extra>'
-                    ),
-                    row=idx,
-                    col=1
-                )
-                limit_legend_shown = True
-            
-        
-        if is_capstone:
-            # Add state swatches after the real sensor traces so they cannot
-            # interfere with the first subplot's data rendering.
-            state_values = alert_data.get(
-                'State', pd.Series(index=alert_data.index, dtype='object')
-            ).fillna('').astype(str)
-            seen_states = []
-            for raw_state in state_values.tolist():
-                if raw_state and raw_state not in seen_states:
-                    seen_states.append(raw_state)
-            for raw_state in reversed(seen_states):
-                state_label = _state_label(raw_state)
-                fig.add_trace(
-                    go.Scatter(
-                        x=[None],
-                        y=[None],
-                        mode='markers',
-                        name=state_label,
-                        legendgroup=raw_state,
-                        marker=dict(
-                            size=8,
-                            color=_state_color(raw_state),
-                            line=dict(width=1, color='white')
-                        ),
-                        hoverinfo='skip',
-                        showlegend=True
-                    ),
-                    row=1,
-                    col=1
-                )
+                    hoverinfo='skip',
+                    showlegend=True
+                ),
+                row=1,
+                col=1
+            )
 
         # Update layout with proper spacing and horizontal legend at top
         fig.update_layout(
@@ -1201,7 +1192,7 @@ def create_sensor_trends_chart_golden(
             showlegend=True,  # Show legend for state colors and limits
             legend=dict(
                 orientation='h',  # Horizontal orientation
-                traceorder='reversed' if is_capstone else 'normal',
+                traceorder='reversed',
                 yanchor='bottom',
                 y=1.02,  # Same legend position as CDA
                 xanchor='center',
@@ -1225,11 +1216,11 @@ def create_sensor_trends_chart_golden(
             )
         )
 
-        if is_capstone:
-            # The card heading and subplot titles identify the chart; avoid a
-            # second global title covering the first panel or the legend.
-            fig.layout.title = None
-        
+        # The card heading and subplot titles identify the chart; avoid a
+        # second global title covering the first panel or the legend
+        # (both clients, REQ-AD-01).
+        fig.layout.title = None
+
         # Add alert time vertical lines as shapes (full height in each subplot)
         for idx in range(1, len(feature_names) + 1):
             yref = 'y' if idx == 1 else f'y{idx}'

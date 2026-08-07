@@ -5,7 +5,7 @@ Uses Pydantic Settings for configuration management with environment variable su
 """
 
 from pathlib import Path
-from typing import List
+from typing import Dict, List
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -77,7 +77,23 @@ class Settings(BaseSettings):
         default=["CDA", "ENEX"],
         description="Clients with access to the Component Hours (Horómetro) module"
     )
-    
+
+    # Laboratory Compliance - per-client threshold (days) for the compliance window
+    lab_compliance_default_threshold_days: float = Field(
+        default=2.0,
+        description="Default laboratory compliance threshold (days) when a client has no override"
+    )
+    lab_compliance_threshold_days_by_client: Dict[str, float] = Field(
+        default_factory=dict,
+        description="Per-client laboratory compliance threshold (days), keyed by uppercase client id"
+    )
+
+    def get_lab_compliance_threshold_days(self, client: str) -> float:
+        """Get the laboratory compliance threshold (days) for a client, falling back to the default."""
+        return self.lab_compliance_threshold_days_by_client.get(
+            str(client or "").upper(), self.lab_compliance_default_threshold_days
+        )
+
     @field_validator("logs_dir", mode="before")
     @classmethod
     def ensure_path(cls, v):
