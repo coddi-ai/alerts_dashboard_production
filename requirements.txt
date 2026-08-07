@@ -16,6 +16,17 @@ dash>=2.14.0
 dash-bootstrap-components>=1.5.0
 plotly>=5.17.0
 nbformat>=4.2.0
+itsdangerous>=2.2.0
+
+# Campbell AI internal API and agents runtime
+fastapi>=0.115.0
+uvicorn>=0.30.0
+openai-agents>=0.3.3,<0.4.0
+
+# Shared conversation sessions across workers/replicas.
+# Only needed when CAMPBELL_AI_SESSION_BACKEND=redis; the default in-memory backend
+# imports nothing. Kept declared so a horizontally scaled deployment installs it.
+redis>=5.0.0
 
 # Utilities
 tqdm>=4.66.0

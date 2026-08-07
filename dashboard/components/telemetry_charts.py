@@ -21,35 +21,10 @@ STATUS_COLORS = {
     'InsufficientData': '#95a5a6'
 }
 
-SIGNAL_TRANSLATION = {
-    'EngCoolTemp': 'Temperatura del refrigerante del motor',
-    'EngOilPres': 'Presión de aceite del motor',
-    'EngOilFltr': 'Filtro de aceite del motor',
-    'EngSpd': 'Velocidad del motor',
-    'TCOutTemp': 'Temperatura de salida del turbocompresor',
-    'RAftrclrTemp': 'Temperatura del posenfriador derecho',
-    'LtExhTemp': 'Temperatura de escape izquierda',
-    'RtExhTemp': 'Temperatura de escape derecha',
-    'RtLtExhTemp': 'Diferencia de temperatura de escape (derecha-izquierda)',
-    'AirFltr': 'Restricción del filtro de aire',
-    'CnkcasePres': 'Presión del cárter',
-    'CompInPres1': 'Presión de entrada del compresor 1',
-    'CompInPres2': 'Presión de entrada del compresor 2',
-    'TrboInPres': 'Presión de entrada del turbocompresor',
-    'TrboOutPres': 'Presión de salida del turbocompresor',
-    'TrnLubeTemp': 'Temperatura del aceite de transmisión',
-    'LckupSlip': 'Deslizamiento del embrague de bloqueo',
-    'TrnSlip': 'Deslizamiento de la transmisión',
-    'TrnGear': 'Marcha de la transmisión',
-    'GearSelect': 'Selección de marcha',
-    'DiffTemp': 'Temperatura del diferencial',
-    'DiffLubePres': 'Presión de lubricación del diferencial',
-    'LtFBrkTemp': 'Temperatura del freno delantero izquierdo',
-    'RtFBrkTemp': 'Temperatura del freno delantero derecho',
-    'LtRBrkTemp': 'Temperatura del freno trasero izquierdo',
-    'RtRBrkTemp': 'Temperatura del freno trasero derecho',
-    'StrgOilTemp': 'Temperatura del aceite de dirección',
-}
+# Defined once in src/charts/signals.py so this tab, the alerts tab and Campbell AI
+# all use the same code -> Spanish description; re-exported here for existing
+# importers (translate_signal() below).
+from src.charts.signals import SIGNAL_LABELS as SIGNAL_TRANSLATION
 
 TREND_TRANSLATION = {
     'worsening': 'En deterioro',
@@ -323,10 +298,6 @@ def build_signal_timeseries_card(
         if window['end'] >= raw_start and window['start'] <= raw_end
     ]
     event_colors = {
-        'anomaly': ('#dc3545', 'Anomalía'),
-        'event': ('#fd7e14', 'Evento'),
-    }
-    event_colors = {
         'anomaly': ('#c1121f', 'Anomal\u00eda'),
         'event': ('#f59e0b', 'Evento'),
     }
@@ -386,10 +357,16 @@ def build_signal_timeseries_card(
             ))
 
     latest_observed = df['Fecha'].max()
-    # Open on the latest three days that actually contain values for the
-    # selected signal. Event/anomaly backgrounds remain clipped to this same
-    # valid series domain, while the range selector can still expand the view.
-    initial_start = max(df['Fecha'].min(), latest_observed - pd.Timedelta(days=3))
+    # Open on the longest materialized episode: this chart exists to show signal
+    # evidence, and defaulting to the latest three days hides an episode that
+    # happened earlier. Fall back to that recent window when there is no episode.
+    # The range selector can still expand the view either way.
+    episode_start = _max_episode_start(events_df, signal_name)
+    recent_start = max(df['Fecha'].min(), latest_observed - pd.Timedelta(days=3))
+    if episode_start is not None and df['Fecha'].min() <= episode_start <= latest_observed:
+        initial_start = episode_start
+    else:
+        initial_start = recent_start
 
     # Limits reference lines (from limits or baselines)
     if not limits_df.empty and unit:

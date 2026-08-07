@@ -31,6 +31,7 @@ Dashboard multi-técnica que consolida **análisis de aceite**, **alertas operac
 | 🚨 **Alerts** | Alertas enriquecidas | Telemetría + aceite + GPS + diagnóstico |
 | 🧪 **Oil** | Análisis tribológico | Muestras, límites Stewart, clasificación AI |
 | 🔮 **Predictive** | Modelos predictivos por componente | Ranking 0-100 por modo de falla (motor, transmisión) |
+| 🤖 **Campbell AI** v1.1.3 | Asistente de mantenimiento basado en agentes | Consulta las mismas fuentes y permisos; gráficos interactivos, historial por usuario respaldado en S3 |
 
 ### Integraciones Futuras
 
@@ -143,8 +144,28 @@ DASHBOARD_PORT=8050
 DEBUG_MODE=False
 CLIENTS=CDA,EMIN
 MAPBOX_TOKEN=pk.xxx          # Opcional, para mapas GPS
-OPENAI_API_KEY=sk-xxx        # Opcional, para features AI
+OPENAI_API_KEY=sk-xxx        # Requerido para Campbell AI
 ```
+
+Campbell AI's operational settings (feature flags, timeouts, model names, the internal
+service token) live as `ENV` defaults in the `Dockerfile` instead of `.env` — none of them
+are actually secrets. `OPENAI_API_KEY` is the only Campbell AI value that stays in `.env`. See
+[src/campbell_ai/README.md](src/campbell_ai/README.md#configuración-local) for the full list
+and how to override one without rebuilding the image.
+
+### Iniciar API Campbell AI
+
+```powershell
+python -m dotenv run -- python -m uvicorn src.campbell_ai.api:app `
+  --host 127.0.0.1 `
+  --port 8000 `
+  --reload
+```
+
+Campbell AI respalda cada interacción en la carpeta `campbellAI/` del bucket ya configurado
+(`BUCKET_NAME`, `ACCESS_KEY`, `SECRET_KEY`) y mantiene un espejo en `logs/campbell_ai_backup`. Sin
+bucket configurado sigue funcionando solo con el espejo local. Detalle en
+[src/campbell_ai/README.md](src/campbell_ai/README.md).
 
 ### Credenciales
 
@@ -192,6 +213,8 @@ USERS = {
 
 ## 📋 Documentación
 
+- [Campbell AI](src/campbell_ai/README.md) — agentes, API interna, persistencia y concurrencia
+- [Campbell AI — changelog de la migración](documentation/general/campbell_ai_migration_changelog.md) — historial de cambios organizado en épicas, insumo para Jira
 - [Oil Data Contracts](documentation/oil/DATA_CONTRACTS.md)
 - [Telemetry Data Contracts](documentation/telemetry/data_contracts.md)
 - [Alerts Data Contracts](documentation/alerts/data_contracts.md)

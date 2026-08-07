@@ -66,6 +66,9 @@ import dashboard.callbacks.data_freshness_callbacks
 
 # Import predictive callbacks
 from dashboard.callbacks.predictive_callbacks import register_callbacks as register_predictive_callbacks
+from dashboard.campbell_ai.callbacks import register_campbell_ai_callbacks
+from dashboard.campbell_ai.stream import register_campbell_ai_stream
+from config.settings import get_settings
 
 # Import component hours callbacks
 from dashboard.callbacks.component_hours_callbacks import register_component_hours_callbacks
@@ -119,6 +122,14 @@ app = dash.Dash(
     title="Multi-Technical Alerts",
     url_base_pathname=PATH_PREFIX,
     serve_locally=True
+)
+
+# Campbell AI inherits the authenticated dashboard identity from this signed session.
+app.server.secret_key = get_settings().secret_key
+app.server.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=os.getenv("SESSION_COOKIE_SECURE", "false").lower() == "true",
 )
 
 # Import page modules so their dash.register_page() calls run (must happen
@@ -181,6 +192,10 @@ register_health_index_callbacks(app)
 register_predictive_callbacks(app)
 register_component_hours_callbacks(app)
 register_predictive_pages_callbacks(app)
+register_campbell_ai_callbacks(app)
+# Same-origin SSE proxy for progressive Campbell AI answers; inert unless
+# CAMPBELL_AI_STREAMING is enabled.
+register_campbell_ai_stream(app)
 register_admin_callbacks(app)
 register_access_control_callbacks(app)
 register_sidebar_callbacks(app)
