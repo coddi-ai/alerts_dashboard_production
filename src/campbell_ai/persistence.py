@@ -310,10 +310,6 @@ class ConversationArchive:
         self.base_prefix = normalize_prefix(base_prefix)
         self.list_limit = max(1, int(list_limit))
         self._lock = threading.RLock()
-        # Full record per session, so the snapshot is complete even though the live
-        # session store only keeps the trimmed tail.
-        self._records: dict[str, list[dict[str, Any]]] = {}
-        self._meta: dict[str, dict[str, Any]] = {}
 
     # -- keys ---------------------------------------------------------------
 
@@ -358,10 +354,6 @@ class ConversationArchive:
             f"{self.base_prefix}/logs/feedback/{company}/{user}/"
             f"{normalize_segment(day, 'sin_fecha')}/{name}.json"
         )
-
-    @staticmethod
-    def _cache_key(principal: DashboardPrincipal, session_id: str) -> str:
-        return f"{principal.username}|{principal.company_id}|{session_id}"
 
     # -- backend fan-out ----------------------------------------------------
 
@@ -409,14 +401,8 @@ class ConversationArchive:
         if not self.enabled or not messages:
             return result
 
-        cache_key = self._cache_key(principal, session_id)
         with self._lock:
-            record = self._records.get(cache_key)
-            if record is None:
-                record, meta = self._load_record(principal, session_id)
-                self._records[cache_key] = record
-                self._meta[cache_key] = meta
-            meta = self._meta.setdefault(cache_key, {})
+            record, meta = self._load_record(principal, session_id)
 
             known = {str(item.get("message_id")) for item in record}
             fresh = [
@@ -509,14 +495,8 @@ class ConversationArchive:
         if not self.enabled or not cleaned:
             return result
 
-        cache_key = self._cache_key(principal, session_id)
         with self._lock:
-            record = self._records.get(cache_key)
-            if record is None:
-                record, meta = self._load_record(principal, session_id)
-                self._records[cache_key] = record
-                self._meta[cache_key] = meta
-            meta = self._meta.setdefault(cache_key, {})
+            record, meta = self._load_record(principal, session_id)
             if not record:
                 return result
             meta["summary"] = cleaned
@@ -553,8 +533,7 @@ class ConversationArchive:
         return result
 
     def has_summary(self, principal: DashboardPrincipal, session_id: str) -> bool:
-        with self._lock:
-            meta = self._meta.get(self._cache_key(principal, session_id)) or {}
+        _record, meta = self._load_record(principal, session_id)
         return bool(str(meta.get("summary", "")).strip())
 
     def save_feedback(
@@ -607,13 +586,9 @@ class ConversationArchive:
         """Return an archived conversation, or an empty list when there is none."""
         if not self.enabled:
             return []
-        record, meta = self._load_record(principal, session_id)
+        record, _meta = self._load_record(principal, session_id)
         if not record:
             return []
-        with self._lock:
-            cache_key = self._cache_key(principal, session_id)
-            self._records[cache_key] = list(record)
-            self._meta[cache_key] = meta
         messages: list[ConversationMessage] = []
         for item in record:
             try:
@@ -740,15 +715,12 @@ class ConversationArchive:
         )
 
     def forget(self, principal: DashboardPrincipal, session_id: str) -> None:
-        """Drop in-process caches for a session; the stored objects are kept.
+        """Keep stored objects and retain no in-process archive state.
 
         Called when a user clears a conversation: the visible thread restarts, but the
         backup of what was already said is not rewritten or deleted.
         """
-        with self._lock:
-            cache_key = self._cache_key(principal, session_id)
-            self._records.pop(cache_key, None)
-            self._meta.pop(cache_key, None)
+        return None
 
 
 _ARCHIVE_MAX_POINTS_PER_TRACE = 300
@@ -789,11 +761,11 @@ def _downsample_figure(figure: dict[str, Any]) -> dict[str, Any]:
 
 
 def _without_figures(item: dict[str, Any]) -> dict[str, Any]:
-    """Downsample an archived message's Plotly figures to a bounded size.
+    """Store chart metadata without making rendered Plotly JSON durable.
 
-    Chart identity, captions and summary are kept as-is; only each trace's point
-    count is capped (see _downsample_figure) so archive size and write latency
-    stay bounded regardless of how wide a date window the chart covered.
+    The live session can carry the full figure so the user sees it immediately. The
+    archive keeps chart identity, parameters, caption and summary, which are enough
+    to regenerate the chart without keeping old figure payloads in memory or storage.
     """
     visualizations = item.get("visualizations")
     if not isinstance(visualizations, list) or not visualizations:
@@ -802,9 +774,7 @@ def _without_figures(item: dict[str, Any]) -> dict[str, Any]:
     for artifact in visualizations:
         if not isinstance(artifact, dict):
             continue
-        figure = artifact.get("figure")
-        downsampled = _downsample_figure(figure) if isinstance(figure, dict) else {}
-        trimmed.append({**artifact, "figure": downsampled})
+        trimmed.append({**artifact, "figure": {}})
     return {**item, "visualizations": trimmed}
 
 

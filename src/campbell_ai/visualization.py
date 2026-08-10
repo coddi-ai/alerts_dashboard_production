@@ -789,6 +789,22 @@ class DashboardVisualizationService:
             dataset=source.dataset,
             chart_type=kind,
             figure=json.loads(figure.to_json()),
+            parameters={
+                "dataset": dataset,
+                "chart_type": kind,
+                "dimension": primary,
+                "secondary_dimension": secondary,
+                "metric": resolved_metric,
+                "aggregation": resolved_aggregation,
+                "days": days,
+                "start_date": start_date,
+                "end_date": end_date,
+                "unit_id": unit_id,
+                "filter_dimension": filter_dimension,
+                "filter_value": filter_value,
+                "top_n": limit,
+                "title": resolved_title,
+            },
             summary=summary,
         )
 
