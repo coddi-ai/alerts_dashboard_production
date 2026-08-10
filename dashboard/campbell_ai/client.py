@@ -299,12 +299,13 @@ class CampbellAPIClient:
         payload["session_id"] = session_id
         return self._request("POST", "/api/v1/campbell-ai/history", payload)
 
-    def list_conversations(self, username: str, company_id: str) -> dict[str, Any]:
-        return self._request(
-            "POST",
-            "/api/v1/campbell-ai/conversations",
-            self._identity(username, company_id),
-        )
+    def list_conversations(
+        self, username: str, company_id: str, refresh: bool = False
+    ) -> dict[str, Any]:
+        payload = self._identity(username, company_id)
+        if refresh:
+            payload["refresh"] = True
+        return self._request("POST", "/api/v1/campbell-ai/conversations", payload)
 
     def open_conversation(
         self, username: str, company_id: str, session_id: str

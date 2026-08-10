@@ -13,6 +13,7 @@ from dashboard.auth import resolve_authenticated_username
 from dashboard.campbell_ai.client import CampbellAPIClient, CampbellAPIClientError
 from dashboard.campbell_ai.layout import (
     ALERT_SUGGESTIONS,
+    CAMPBELL_AI_VERSION,
     KEEP_WAITING_EXTENSION_SECONDS,
     SLOW_ANSWER_SECONDS,
     render_chat_history,
@@ -140,6 +141,43 @@ def _status_label(exc: CampbellAPIClientError) -> str:
         "busy": "Servicio ocupado",
     }
     return labels.get(getattr(exc, "kind", ""), "No disponible")
+
+
+def _state_stamp(username: str | None) -> dict:
+    """Identity of whoever owns this tab's stored conversation, plus the build.
+
+    `sessionStorage` is scoped to the tab and to nothing else, so it survives both a
+    logout and a redeploy. Both need to invalidate it, for different reasons, and one
+    comparison covers both.
+    """
+    return {"user": str(username or ""), "version": CAMPBELL_AI_VERSION}
+
+
+def _stale_browser_state(stamp, username: str | None) -> str | None:
+    """Why the stored conversation cannot be trusted, or None when it can.
+
+    Three real failures, all of them reported from production:
+
+    - **a different user.** Nothing scoped this state to an account, so logging out and
+      back in as someone else left the previous user's thread in the tab. The dashboard
+      would even re-render it, because when the API has no history for a session id the
+      view falls back to the copy the browser is holding.
+    - **a different build.** A tab left open across a deploy keeps feeding state written
+      by the old code into the new code. The stores gained fields over this work
+      (`client_message_id`, `job_id`); older values flowing into newer callbacks is a
+      whole class of bug that is miserable to reproduce.
+    - **no stamp at all**, which is any tab that predates this mechanism.
+
+    Returning a reason rather than a bool so the log says which of the three it was.
+    """
+    current = _state_stamp(username)
+    if not isinstance(stamp, dict):
+        return "sin sello previo"
+    if stamp.get("user") != current["user"]:
+        return "cambio de usuario"
+    if stamp.get("version") != current["version"]:
+        return f"cambio de version ({stamp.get('version')} -> {current['version']})"
+    return None
 
 
 def _stored_session_company(session_company) -> str | None:
@@ -275,6 +313,7 @@ def register_campbell_ai_callbacks(app: dash.Dash) -> None:
         Output("campbell-ai-company-store", "data"),
         Output("campbell-ai-pending-message-store", "data"),
         Output("campbell-ai-session-company", "data"),
+        Output("campbell-ai-state-stamp", "data"),
         Input("client-selector", "value"),
         Input("campbell-ai-send", "n_clicks"),
         Input("campbell-ai-input", "n_submit"),
@@ -293,6 +332,7 @@ def register_campbell_ai_callbacks(app: dash.Dash) -> None:
         State("campbell-ai-company-store", "data"),
         State("campbell-ai-failure-store", "data"),
         State("campbell-ai-session-company", "data"),
+        State("campbell-ai-state-stamp", "data"),
     )
     def synchronize_chat(
         selected_client,
@@ -307,9 +347,21 @@ def register_campbell_ai_callbacks(app: dash.Dash) -> None:
         session_company,
         failure,
         stored_session_company,
+        state_stamp,
     ):
         username = _current_username(session_company)
         company_id = str(selected_client or "").strip().lower()
+
+        # Drop a conversation this tab has no business showing, before anything reads
+        # it. Discarding rather than clearing the stores separately: this callback
+        # already owns the session, history and company outputs, so overwriting them
+        # below is enough and there is no second callback to race.
+        stale = _stale_browser_state(state_stamp, username)
+        if stale and (session_id or history):
+            logger.info("Campbell AI descarta el estado del navegador: %s", stale)
+        if stale:
+            session_id, history, stored_session_company = None, [], None
+        stamp = _state_stamp(username)
         if not username:
             return (
                 session_id,
@@ -325,6 +377,7 @@ def register_campbell_ai_callbacks(app: dash.Dash) -> None:
                 session_company,
                 None,
                 stored_session_company,
+                stamp,
             )
         if not company_id:
             return (
@@ -341,6 +394,7 @@ def register_campbell_ai_callbacks(app: dash.Dash) -> None:
                 _updated_company_state(session_company, None),
                 None,
                 None,
+                stamp,
             )
 
         client = CampbellAPIClient.from_env()
@@ -376,6 +430,7 @@ def register_campbell_ai_callbacks(app: dash.Dash) -> None:
                         "stream": bool(streaming_enabled() and session_id),
                     },
                     company_id,
+                    stamp,
                 )
         try:
             company_changed = bool(
@@ -397,6 +452,7 @@ def register_campbell_ai_callbacks(app: dash.Dash) -> None:
                     _updated_company_state(session_company, company_id),
                     None,
                     company_id,
+                    stamp,
                 )
 
             normalized_message = _resolve_outgoing_message(triggered_id, message)
@@ -416,6 +472,7 @@ def register_campbell_ai_callbacks(app: dash.Dash) -> None:
                         _updated_company_state(session_company, company_id),
                         None,
                         company_id,
+                        stamp,
                     )
                 if not session_id or company_changed:
                     session_id = None
@@ -443,6 +500,7 @@ def register_campbell_ai_callbacks(app: dash.Dash) -> None:
                         "stream": bool(streaming_enabled() and session_id),
                     },
                     company_id,
+                    stamp,
                 )
 
 
@@ -474,6 +532,7 @@ def register_campbell_ai_callbacks(app: dash.Dash) -> None:
                 _updated_company_state(session_company, company_id),
                 None,
                 company_id,
+                stamp,
             )
         except CampbellAPIClientError as exc:
             logger.warning(
@@ -491,6 +550,7 @@ def register_campbell_ai_callbacks(app: dash.Dash) -> None:
                 session_company,
                 None,
                 stored_session_company,
+                stamp,
             )
         except Exception:
             logger.exception("Unexpected Campbell AI Dash callback error")
@@ -509,6 +569,7 @@ def register_campbell_ai_callbacks(app: dash.Dash) -> None:
                 session_company,
                 None,
                 stored_session_company,
+                stamp,
             )
 
     @app.callback(
@@ -624,6 +685,9 @@ def register_campbell_ai_callbacks(app: dash.Dash) -> None:
                     "company_id": company_id,
                     "question": question,
                     "client_message_id": client_message_id,
+                    # Stamped so a tab that changes hands does not poll — or display —
+                    # an answer belonging to whoever was logged in before.
+                    "username": username,
                 },
             )
         except CampbellAPIClientError as exc:
@@ -712,6 +776,21 @@ def register_campbell_ai_callbacks(app: dash.Dash) -> None:
             job.get("company_id") or _company_id_from_state(session_company) or ""
         ).strip().lower()
         username = _current_username(session_company)
+
+        # The job handle lives in sessionStorage so a reload can resume it, which also
+        # means it outlives a logout. Polling someone else's job would at best show
+        # their answer in this tab; drop it instead. `synchronize_chat` clears the rest
+        # of the stale state, but it cannot own this store as well (Dash forbids a
+        # duplicate output on a callback that must run on mount), so the check lives
+        # here where the job is actually used.
+        owner = job.get("username")
+        if owner and username and owner != username:
+            logger.info("Campbell AI descarta un job de otro usuario tras el cambio")
+            return (
+                no_update, no_update, no_update, no_update,
+                None, None, None, False, "",
+            )
+
         client = CampbellAPIClient.from_env()
 
         try:
@@ -1272,14 +1351,25 @@ def register_campbell_ai_callbacks(app: dash.Dash) -> None:
         State("campbell-ai-conversations-store", "data"),
     )
     def refresh_conversations(_session_id, _history, _clicks, company_state, current):
-        """Reload the archived list after every exchange, so titles stay current."""
+        """Reload the archived list after every exchange, so titles stay current.
+
+        The button is the only caller that asks for a real re-read. The other two
+        triggers fire after every exchange, where the cached index is both correct and
+        much cheaper — reconciling on each message would list the bucket constantly.
+
+        Pressing the button is how a conversation deleted straight from S3 disappears
+        from the sidebar: the listing is served from an index document, so until
+        something re-reads the stored objects the deleted rows keep showing, and
+        clicking one opens nothing.
+        """
         company_id = _company_id_from_state(company_state)
         username = _current_username(company_state)
         if not username or not company_id:
             return []
+        asked_for_it = ctx.triggered_id == "campbell-ai-refresh-conversations"
         try:
             payload = CampbellAPIClient.from_env().list_conversations(
-                username, company_id
+                username, company_id, refresh=asked_for_it
             )
         except CampbellAPIClientError as exc:
             # The list is a convenience; a failure here must not disturb the chat.

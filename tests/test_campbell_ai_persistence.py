@@ -430,7 +430,9 @@ class FakeConversationService:
     def __init__(self):
         self.opened: list[str] = []
 
-    async def conversations(self, username, company_id):
+    async def conversations(self, username, company_id, refresh=False):
+        # `refresh` asks the archive to re-read stored conversations instead of the
+        # cached index; this double serves the same rows either way.
         from src.campbell_ai.models import ConversationListResponse
 
         return ConversationListResponse(

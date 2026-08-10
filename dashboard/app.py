@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 import dash
 import dash_bootstrap_components as dbc
-from flask import send_from_directory
+from flask import request, send_from_directory
 from dashboard.layout import create_app_layout
 from dashboard.callbacks.auth_callbacks import register_auth_callbacks
 from dashboard.callbacks.navigation_callbacks import register_navigation_callbacks
@@ -199,6 +199,40 @@ register_campbell_ai_stream(app)
 register_admin_callbacks(app)
 register_access_control_callbacks(app)
 register_sidebar_callbacks(app)
+
+
+@app.server.after_request
+def _do_not_cache_the_app_shell(response):
+    """Keep the page and the callback graph out of every cache; keep assets in.
+
+    Dash already cache-busts files under `assets/` by appending the file's mtime to
+    their URL, so a deploy gives them fresh URLs. That only helps if the browser
+    re-fetches the *page* carrying those URLs — and the index was going out with no
+    cache headers at all, which leaves browsers and proxies free to apply heuristic
+    caching. The result after an update is a stale page asking for the previous build's
+    JavaScript, against a server running the new callbacks: clientside functions that no
+    longer exist, callbacks wired to components that moved. It looks like the app is
+    broken, and a hard reload "fixes" it, which is the tell.
+
+    Three things must never be cached, all of them descriptions of the current build:
+    the index, the layout, and the dependency graph. Everything else — the fingerprinted
+    assets and the bundled component libraries — is safe to cache and worth caching,
+    since those are the large files.
+    """
+    path = request.path or ""
+    never_cache = (
+        path in ("/", "")
+        or path.endswith("/_dash-layout")
+        or path.endswith("/_dash-dependencies")
+        or path.endswith("/_dash-update-component")
+        # Any page route: this is a multi-page app served from the same shell.
+        or not (path.startswith("/assets/") or path.startswith("/_dash-component-suites/"))
+    )
+    if never_cache:
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
 
 
 if __name__ == '__main__':

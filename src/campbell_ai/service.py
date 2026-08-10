@@ -348,7 +348,7 @@ class CampbellAIService:
         )
 
     async def conversations(
-        self, username: str, company_id: str
+        self, username: str, company_id: str, refresh: bool = False
     ) -> ConversationListResponse:
         """List the user's archived conversations for the active company.
 
@@ -358,7 +358,7 @@ class CampbellAIService:
         """
         self._ensure_enabled()
         principal = resolve_dashboard_principal(username, company_id)
-        rows = await self.runtime.archived_conversations(principal)
+        rows = await self.runtime.archived_conversations(principal, refresh=refresh)
         return ConversationListResponse(
             company_id=principal.company_id,
             conversations=[row.as_dict() for row in rows],

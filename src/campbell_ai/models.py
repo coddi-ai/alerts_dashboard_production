@@ -106,6 +106,11 @@ class FeedbackRequest(SessionRequest):
 class ConversationsRequest(BaseModel):
     username: str = Field(min_length=1, max_length=100)
     company_id: str = Field(min_length=1, max_length=80)
+    # Re-read the stored conversations instead of the cached index. What the sidebar's
+    # refresh button asks for, and the only way a deletion made directly in the bucket
+    # shows up here. Off by default: every page load lists conversations, and that path
+    # should stay a single cheap read.
+    refresh: bool = False
 
 
 class InitializeResponse(BaseModel):

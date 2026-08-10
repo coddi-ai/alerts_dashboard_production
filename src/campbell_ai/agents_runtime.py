@@ -199,11 +199,14 @@ class CampbellAgentRuntime:
             await self.sessions.write(key, list(messages)[-max_items:])
 
     async def archived_conversations(
-        self, principal: DashboardPrincipal
+        self, principal: DashboardPrincipal, refresh: bool = False
     ) -> list[ConversationSummary]:
+        """Archived conversations. `refresh` re-reads the objects instead of the index."""
         if not self.archive.enabled:
             return []
-        return await asyncio.to_thread(self.archive.list_conversations, principal)
+        return await asyncio.to_thread(
+            lambda: self.archive.list_conversations(principal, refresh=refresh)
+        )
 
     async def archived_conversation(
         self, principal: DashboardPrincipal, session_id: str

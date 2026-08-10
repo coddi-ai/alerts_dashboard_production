@@ -24,7 +24,7 @@ ACCENT_BORDER = "rgba(52, 152, 219, 0.22)"
 # colors — it defaults to the sidebar's blue-gray (dashboard/layout.py's left_menu).
 USER_BUBBLE_COLOR = "#2290ff"
 
-CAMPBELL_AI_VERSION = "1.2.1"
+CAMPBELL_AI_VERSION = "1.3.1"
 
 # Campbell AI typography. Tune these values to adjust normal UI text without
 # changing titles or section headers.
@@ -410,6 +410,16 @@ def create_campbell_ai_layout(user_data: dict | None = None) -> html.Div:
     """Build the Campbell AI agent and visualization view."""
     return html.Div(
         [
+            # Who this tab's stored conversation belongs to, and which build wrote it.
+            #
+            # Everything below in `session` storage survives a reload, a logout and a
+            # redeploy, because sessionStorage is scoped to the tab and to nothing else.
+            # That is wanted for a reload and wrong for the other two: a second user
+            # logging into the same tab inherited the previous one's thread, and a tab
+            # left open across a deploy kept feeding the new code state the old code
+            # wrote. Comparing this stamp on mount is what makes stale state visible;
+            # see `synchronize_chat`.
+            dcc.Store(id="campbell-ai-state-stamp", storage_type="session"),
             dcc.Store(id="campbell-ai-session-store", storage_type="session"),
             dcc.Store(id="campbell-ai-history-store", storage_type="session", data=[]),
             # Which company the stored session belongs to. Kept next to the session id in

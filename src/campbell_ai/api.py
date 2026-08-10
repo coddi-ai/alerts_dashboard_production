@@ -381,7 +381,9 @@ async def list_conversations(
 ) -> ConversationListResponse:
     """Archived conversations for the caller's user and active company."""
     try:
-        return await service.conversations(body.username, body.company_id)
+        return await service.conversations(
+            body.username, body.company_id, body.refresh
+        )
     except Exception as exc:
         raise _translate_error(exc) from exc
 
