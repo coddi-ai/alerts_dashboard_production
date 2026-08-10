@@ -147,7 +147,9 @@ class CampbellAIService:
             session_id=resolved_session,
             company_id=principal.company_id,
             request_type=request_type,
-            visualizations=visualizations,
+            # `messages` is the canonical render payload for Dash. Sending the same
+            # figures again here doubles response size and transient memory.
+            visualizations=[],
             messages=await self.runtime.history(principal, resolved_session),
             grounding=grounding.as_dict(),
         )
@@ -210,6 +212,9 @@ class CampbellAIService:
         messages = await self.runtime.history(principal, resolved_session)
         return {
             **event,
+            # The final stream event also includes `messages`; avoid a second copy of
+            # the same figure payload at the top level.
+            "visualizations": [],
             "session_id": resolved_session,
             "company_id": principal.company_id,
             "messages": [message.model_dump(mode="json") for message in messages],

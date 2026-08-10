@@ -36,6 +36,9 @@ class VisualizationArtifact(BaseModel):
             )
         return value
     figure: dict[str, Any]
+    # Inputs needed to recreate the chart without treating the rendered Plotly JSON
+    # as the durable source of truth.
+    parameters: dict[str, Any] = Field(default_factory=dict)
     summary: dict[str, Any] = Field(default_factory=dict)
 
 

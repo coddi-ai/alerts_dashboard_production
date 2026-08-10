@@ -834,6 +834,7 @@ class DashboardChartRegistry:
             dataset=definition.datasets[0],
             chart_type=definition.chart_type,
             figure=json.loads(figure.to_json()),
+            parameters={"chart_id": definition.chart_id, **cleaned},
             summary={"chart_id": definition.chart_id, **summary},
         )
 

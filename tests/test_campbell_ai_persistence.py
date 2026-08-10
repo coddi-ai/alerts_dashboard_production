@@ -152,6 +152,17 @@ def test_replaying_the_same_messages_writes_no_new_batch():
     assert len([key for key in backend.writes if "/batches/" in key]) == 1
 
 
+def test_archive_does_not_keep_conversation_records_in_process():
+    backend = MemoryBackend()
+    archive = ConversationArchive([backend])
+
+    archive.save_exchange(PRINCIPAL, "s1", _exchange("hola", "respuesta"))
+    archive.load_conversation(PRINCIPAL, "s1")
+
+    assert not hasattr(archive, "_records")
+    assert not hasattr(archive, "_meta")
+
+
 def test_snapshot_keeps_messages_the_live_session_already_trimmed():
     """The session store keeps a tail; the backup has to keep the whole thread."""
     backend = MemoryBackend()
@@ -173,7 +184,7 @@ def test_snapshot_keeps_messages_the_live_session_already_trimmed():
 
 
 def test_figures_are_not_copied_into_the_backup():
-    """An oversized Plotly figure is downsampled, not dropped, before archiving."""
+    """The archive keeps chart metadata, not rendered Plotly payloads."""
     backend = MemoryBackend()
     archive = ConversationArchive([backend])
     messages = _exchange("grafica alertas", "Aquí está el gráfico.")
@@ -187,6 +198,8 @@ def test_figures_are_not_copied_into_the_backup():
                 dataset="alerts",
                 chart_type="bar",
                 figure={"data": [{"y": list(range(500))}], "layout": {}},
+                parameters={"chart_id": "alert_ranking", "days": 30},
+                summary={"total": 500},
             )
         ],
     )
@@ -195,11 +208,10 @@ def test_figures_are_not_copied_into_the_backup():
 
     stored = backend.objects[archive.conversation_key(PRINCIPAL, "s1")]["conversation"]
     artifact = stored[1]["visualizations"][0]
-    # Still a real, interactive figure — just capped to a bounded point count
-    # instead of storing all 500 (or, unlike a live telemetry chart, 10k+) points.
-    assert len(artifact["figure"]["data"][0]["y"]) == 300
-    # Identity and caption survive, so the answer still reads correctly.
+    assert artifact["figure"] == {}
     assert artifact["title"] == "Alertas por equipo"
+    assert artifact["parameters"] == {"chart_id": "alert_ranking", "days": 30}
+    assert artifact["summary"] == {"total": 500}
 
 
 # ------------------------------------------------------------- listing, titles

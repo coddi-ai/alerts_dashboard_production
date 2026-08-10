@@ -238,7 +238,10 @@ class RedisSessionStore(SessionStore):
         # Two different budgets: the key expiry must outlive the slowest answer so no
         # second request can interleave, while the *wait* is short so a queued request
         # gives the user an answer instead of holding a worker for minutes.
-        wait_budget = min(self.lock_wait_seconds, timeout)
+        wait_budget = min(
+            getattr(self, "lock_wait_seconds", DEFAULT_LOCK_WAIT_SECONDS),
+            timeout,
+        )
 
         @asynccontextmanager
         async def _guard() -> AsyncIterator[None]:
