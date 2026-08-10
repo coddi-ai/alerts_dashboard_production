@@ -51,6 +51,24 @@ def _project_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+# Shared secret between the dashboard and the internal API. Both processes read the
+# same variable, so what matters most is that they agree.
+#
+# This default lives here rather than as an `ENV` in the Dockerfile, which is where it
+# used to be. That move is the point of keeping configuration in one place — but the
+# default itself has to stay, because it is not only docker-compose that starts these
+# containers. A deployment that runs the image directly gets no compose `environment:`
+# block, and with no default the API answers 503 to everything while `/health` still
+# reports "ok": the service looks up and cannot answer a single question.
+#
+# It is a weak secret and deliberately so: the API listens only on the internal network
+# and is never published, so this guards against accidental cross-talk rather than
+# against an attacker. Any deployment where that is not true must override
+# CAMPBELL_AI_INTERNAL_TOKEN — `/health` reports `internal_auth_configured` so the
+# override can be verified from outside.
+DEFAULT_INTERNAL_TOKEN = "campbell-internal-service-token"
+
+
 @dataclass(frozen=True)
 class CampbellSettings:
     """Environment-backed settings shared by API and agent logic."""
@@ -137,11 +155,10 @@ class CampbellSettings:
     def from_env(cls) -> "CampbellSettings":
         """Build settings from the environment, falling back to the declared defaults.
 
-        Nothing here needs to be set for the service to run correctly — except
-        `CAMPBELL_AI_INTERNAL_TOKEN`, which has no safe default and must come from the
-        deployment. Everything else is a knob with a working value already declared on
-        the field above, so an image or a compose file only has to name what it wants to
-        change.
+        Nothing here has to be set for the service to run: every setting has a working
+        value declared above, so an image or a compose file only names what it wants to
+        change. `CAMPBELL_AI_INTERNAL_TOKEN` is the one worth overriding per deployment
+        even though it has a default — see `DEFAULT_INTERNAL_TOKEN`.
         """
         declared = _declared()
         return cls(
@@ -155,7 +172,9 @@ class CampbellSettings:
                     str(_project_root() / "logs" / "campbell_ai_feedback.jsonl"),
                 )
             ).expanduser().resolve(),
-            internal_token=os.getenv("CAMPBELL_AI_INTERNAL_TOKEN", "").strip(),
+            internal_token=_env_str(
+                "CAMPBELL_AI_INTERNAL_TOKEN", DEFAULT_INTERNAL_TOKEN
+            ),
             session_ttl_seconds=int(os.getenv("CAMPBELL_AI_SESSION_TTL_SECONDS", "1800")),
             max_history_messages=int(os.getenv("CAMPBELL_AI_MAX_HISTORY_MESSAGES", "20")),
             max_message_chars=int(os.getenv("CAMPBELL_AI_MAX_MESSAGE_CHARS", "4000")),

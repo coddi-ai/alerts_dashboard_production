@@ -24,7 +24,7 @@ ACCENT_BORDER = "rgba(52, 152, 219, 0.22)"
 # colors — it defaults to the sidebar's blue-gray (dashboard/layout.py's left_menu).
 USER_BUBBLE_COLOR = "#2290ff"
 
-CAMPBELL_AI_VERSION = "1.2.0"
+CAMPBELL_AI_VERSION = "1.2.1"
 
 # Campbell AI typography. Tune these values to adjust normal UI text without
 # changing titles or section headers.

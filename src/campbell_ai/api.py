@@ -12,7 +12,7 @@ from fastapi.responses import StreamingResponse
 
 from src.campbell_ai.chart_registry import CHART_DEFINITIONS
 from src.charts import CHART_KINDS
-from src.campbell_ai.config import get_campbell_settings
+from src.campbell_ai.config import DEFAULT_INTERNAL_TOKEN, get_campbell_settings
 from src.campbell_ai.errors import (
     CampbellAuthenticationError,
     CampbellAuthorizationError,
@@ -103,11 +103,38 @@ def _translate_error(exc: Exception) -> HTTPException:
     return HTTPException(status_code=500, detail="Campbell AI internal error")
 
 
+@app.on_event("startup")
+async def warn_about_internal_auth() -> None:
+    """Report the credential situation at boot, not at the first question.
+
+    A misconfigured token is otherwise invisible until somebody sends a message and
+    gets "Campbell AI no está configurado" — potentially long after the deployment that
+    caused it, and with nothing in the logs connecting the two.
+    """
+    settings = get_campbell_settings()
+    if not settings.internal_token:
+        logger.error(
+            "CAMPBELL_AI_INTERNAL_TOKEN está vacío: la API rechazará toda consulta "
+            "con 503."
+        )
+    elif settings.internal_token == DEFAULT_INTERNAL_TOKEN:
+        logger.warning(
+            "Campbell AI está usando el token interno por defecto. Sirve para que el "
+            "servicio funcione sin configuración extra, pero cualquier despliegue "
+            "expuesto debería definir CAMPBELL_AI_INTERNAL_TOKEN."
+        )
+
+
 @app.get("/api/v1/campbell-ai/health")
 async def health() -> dict[str, object]:
     settings = get_campbell_settings()
     return {
         "status": "ok" if settings.enabled else "disabled",
+        # Reported because `status` alone is misleading here: the service is running and
+        # will still answer this endpoint, while every endpoint that matters returns
+        # 503. A deployment check that only looks at `status` sees a healthy service
+        # that cannot answer a single question.
+        "internal_auth_configured": bool(settings.internal_token),
         "profile": "campbell_agents",
         "reports": False,
         "visualizations": True,

@@ -9,6 +9,8 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from src.campbell_ai.config import DEFAULT_INTERNAL_TOKEN
+
 
 class CampbellAPIClientError(RuntimeError):
     """Error safe to surface in the Campbell AI Dash view.
@@ -128,7 +130,12 @@ class CampbellAPIClient:
             base_url=os.getenv(
                 "CAMPBELL_AI_API_URL", "http://127.0.0.1:8000"
             ).rstrip("/"),
-            internal_token=os.getenv("CAMPBELL_AI_INTERNAL_TOKEN", "").strip(),
+            # Same default as the API resolves to, so the two halves agree without any
+            # deployment configuration. They must match or every call is a 401.
+            internal_token=(
+                os.getenv("CAMPBELL_AI_INTERNAL_TOKEN", "").strip()
+                or DEFAULT_INTERNAL_TOKEN
+            ),
             timeout_seconds=float(os.getenv("CAMPBELL_AI_API_TIMEOUT_SECONDS", "90")),
         )
 
