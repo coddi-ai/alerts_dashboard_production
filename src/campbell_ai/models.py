@@ -62,6 +62,35 @@ class MessageRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
 
 
+class SubmitMessageRequest(MessageRequest):
+    """A message to answer in the background.
+
+    `client_message_id` is chosen by the caller and is the idempotency key: resending
+    the same one for the same session attaches to the run already in progress instead of
+    starting a second one. Optional so an ad-hoc consumer need not care, but the
+    dashboard always sends it — it is what stops a refresh or a double click from
+    producing two answers to one question.
+    """
+
+    client_message_id: str | None = Field(default=None, max_length=100)
+
+
+class JobStatusRequest(BaseModel):
+    job_id: str = Field(min_length=1, max_length=100)
+
+
+class JobStatusResponse(BaseModel):
+    job_id: str
+    # queued | running | done | error | cancelled
+    status: str
+    # Time the answer has been running, so a consumer can decide when to offer the user
+    # a way out without having to track the wait itself.
+    elapsed_seconds: float = 0.0
+    session_id: str | None = None
+    result: MessageResponse | None = None
+    error: dict[str, Any] | None = None
+
+
 class SessionRequest(BaseModel):
     username: str = Field(min_length=1, max_length=100)
     company_id: str = Field(min_length=1, max_length=80)

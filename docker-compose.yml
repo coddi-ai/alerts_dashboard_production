@@ -7,12 +7,21 @@ services:
     env_file:
       - .env  # Load environment variables from .env file
     environment:
-      # Override specific variables if needed. Everything else Campbell-AI-specific
-      # (feature flags, timeouts, model names, the internal token) defaults from the
-      # Dockerfile; add a line here to override one of those without editing it.
+      # Campbell AI settings are NOT baked into the image. Every knob has a working
+      # default in src/campbell_ai/config.py; set one in .env, or add a line here, to
+      # change it — see .env.example for the full list.
       - DASHBOARD_HOST=0.0.0.0
       - DASHBOARD_PORT=8050
       - CAMPBELL_AI_API_URL=http://campbell-api:8000
+      # Shared secret with campbell-api. Both services read the same variable, so they
+      # cannot drift apart; the default keeps a local `docker compose up` working. The
+      # API is only reachable on the compose network and is never published to the
+      # host, so a well-known default here is low exposure — but set
+      # CAMPBELL_AI_INTERNAL_TOKEN in .env for any real deployment.
+      - CAMPBELL_AI_INTERNAL_TOKEN=${CAMPBELL_AI_INTERNAL_TOKEN:-campbell-internal-service-token}
+      # Progressive answers over SSE. Must match the value the API sees, or the browser
+      # opens a stream the service will refuse.
+      - CAMPBELL_AI_STREAMING=${CAMPBELL_AI_STREAMING:-true}
       # MAPBOX_TOKEN will be read from .env file
       # Or set explicitly: MAPBOX_TOKEN=${MAPBOX_TOKEN}
     volumes:
@@ -39,10 +48,14 @@ services:
     env_file:
       - .env
     environment:
-      # Campbell-AI-specific operational settings (feature flags, timeouts, model
-      # names, the internal token) default from the Dockerfile; only the real
-      # secrets need to flow through from .env here.
+      # Campbell AI settings default from src/campbell_ai/config.py, not from the
+      # image. Only what this deployment actually changes belongs here; the rest is
+      # listed in .env.example.
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      # Same value as the dashboard service above — this pair is the trust boundary
+      # between the two containers and must match.
+      - CAMPBELL_AI_INTERNAL_TOKEN=${CAMPBELL_AI_INTERNAL_TOKEN:-campbell-internal-service-token}
+      - CAMPBELL_AI_STREAMING=${CAMPBELL_AI_STREAMING:-true}
       # Durable conversation and feedback backup. Declared explicitly so a deployment
       # without these values fails visibly here instead of silently degrading to the
       # local mirror inside the container.

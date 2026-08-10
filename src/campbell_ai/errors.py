@@ -25,6 +25,20 @@ class CampbellSessionError(CampbellAIError):
     """Raised when a session identifier is invalid."""
 
 
+class CampbellTimeoutError(CampbellAIError):
+    """Raised when one answer exceeds its wall-clock budget.
+
+    Separate from `CampbellBusyError`: the service was not overloaded, this single
+    question took too long — usually a very broad time window, or a conversation whose
+    accumulated context makes every turn slow. The caller should narrow the question
+    rather than simply retry the identical one, so the guidance differs.
+    """
+
+    def __init__(self, message: str, elapsed_seconds: float = 0.0):
+        super().__init__(message)
+        self.elapsed_seconds = round(float(elapsed_seconds), 1)
+
+
 class CampbellBusyError(CampbellAIError):
     """Raised when the service cannot admit another request right now.
 

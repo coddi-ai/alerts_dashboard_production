@@ -72,6 +72,18 @@ _FAILURE_GUIDANCE: dict[str, tuple[str, bool, str]] = {
         "El asistente alcanzó su límite de consultas simultáneas. Espera unos segundos "
         "y reintenta: tu consulta se conservó.",
     ),
+    "expired": (
+        "La consulta ya no está en curso",
+        True,
+        "El asistente perdió el seguimiento de esta consulta. Si alcanzó a responder, "
+        "la respuesta está en la conversación; si no aparece, vuelve a preguntarla.",
+    ),
+    "too_slow": (
+        "La consulta tardó más de lo permitido",
+        True,
+        "Acota el periodo o divide la pregunta en partes: una consulta muy amplia, o "
+        "una conversación muy larga, hacen que el asistente supere su tiempo máximo.",
+    ),
     "unavailable": (
         "Campbell AI o sus datos no están disponibles",
         True,
@@ -121,8 +133,20 @@ class CampbellAPIClient:
         )
 
     def _request(
-        self, method: str, path: str, payload: dict[str, Any] | None = None
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None = None,
+        timeout: float | None = None,
     ) -> dict[str, Any]:
+        """Call the internal API.
+
+        `timeout` overrides the per-message budget for calls that are supposed to be
+        fast. Submitting and polling a background answer must never inherit the long
+        budget sized for a full agent run: if a submit has not been acknowledged in
+        seconds, the service is unhealthy and waiting a further minute only delays
+        telling the user so.
+        """
         if not self.internal_token:
             raise _failure("not_configured")
 
@@ -139,7 +163,9 @@ class CampbellAPIClient:
             f"{self.base_url}{path}", data=data, headers=headers, method=method
         )
         try:
-            with urlopen(request, timeout=self.timeout_seconds) as response:
+            with urlopen(
+                request, timeout=timeout if timeout is not None else self.timeout_seconds
+            ) as response:
                 body = response.read().decode("utf-8")
                 return json.loads(body) if body else {}
         except HTTPError as exc:
@@ -151,9 +177,16 @@ class CampbellAPIClient:
             kinds = {
                 401: "credentials",
                 403: "forbidden",
+                # A polled job the service no longer knows about. Distinct from a bad
+                # request: the answer may well exist, just in the history rather than
+                # in the job.
+                404: "expired",
                 422: "invalid_request",
                 # Load, not failure: the same request will work once a slot frees up.
                 429: "busy",
+                # The answer outran its budget on the server. Retrying the identical
+                # question is unlikely to help; narrowing it is.
+                504: "too_slow",
                 503: "unavailable",
             }
             kind = kinds.get(exc.code) or ("server_error" if exc.code >= 500 else "unknown")
@@ -204,6 +237,53 @@ class CampbellAPIClient:
         payload = self._identity(username, company_id)
         payload.update({"session_id": session_id, "message": message})
         return self._request("POST", "/api/v1/campbell-ai/message", payload)
+
+    # -- background answers ---------------------------------------------------
+    # Submitting and polling replace waiting inside one long request. Both calls are
+    # short, so neither can be killed by a proxy's idle timeout mid-answer, and a
+    # browser that reloads mid-question resumes by polling the same job id.
+
+    def submit_message(
+        self,
+        username: str,
+        company_id: str,
+        session_id: str,
+        message: str,
+        client_message_id: str,
+    ) -> dict[str, Any]:
+        """Queue the answer and return its job handle.
+
+        `client_message_id` makes this idempotent: resending the same one attaches to
+        the run already in progress rather than starting a second one.
+        """
+        payload = self._identity(username, company_id)
+        payload.update(
+            {
+                "session_id": session_id,
+                "message": message,
+                "client_message_id": client_message_id,
+            }
+        )
+        return self._request(
+            "POST", "/api/v1/campbell-ai/message/submit", payload, timeout=15.0
+        )
+
+    def message_status(self, job_id: str) -> dict[str, Any]:
+        """Poll a background answer. Raises kind='expired' once the job is unknown."""
+        return self._request(
+            "POST",
+            "/api/v1/campbell-ai/message/status",
+            {"job_id": job_id},
+            timeout=15.0,
+        )
+
+    def cancel_message(self, job_id: str) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            "/api/v1/campbell-ai/message/cancel",
+            {"job_id": job_id},
+            timeout=15.0,
+        )
 
     def history(
         self, username: str, company_id: str, session_id: str

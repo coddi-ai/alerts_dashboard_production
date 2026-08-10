@@ -20,6 +20,7 @@ from src.campbell_ai.errors import (
     CampbellConfigurationError,
     CampbellDataError,
     CampbellSessionError,
+    CampbellTimeoutError,
 )
 from src.campbell_ai.models import (
     CapabilitiesResponse,
@@ -30,9 +31,12 @@ from src.campbell_ai.models import (
     HistoryResponse,
     InitializeRequest,
     InitializeResponse,
+    JobStatusRequest,
+    JobStatusResponse,
     MessageRequest,
     MessageResponse,
     SessionRequest,
+    SubmitMessageRequest,
 )
 from src.campbell_ai.service import CampbellAIService
 from src.campbell_ai.temporal import current_temporal_context
@@ -81,6 +85,10 @@ def _translate_error(exc: Exception) -> HTTPException:
             detail=str(exc),
             headers={"Retry-After": str(exc.retry_after)},
         )
+    if isinstance(exc, CampbellTimeoutError):
+        # 504, not 500: the request was valid and nothing is broken, this one question
+        # simply outran its budget. The caller should narrow it, not just repeat it.
+        return HTTPException(status_code=504, detail=str(exc))
     if isinstance(exc, CampbellAuthenticationError):
         return HTTPException(status_code=401, detail=str(exc))
     if isinstance(exc, CampbellAuthorizationError):
@@ -108,8 +116,13 @@ async def health() -> dict[str, object]:
         "feedback": True,
         "five_whys": True,
         "streaming": settings.streaming_enabled,
+        # Background answers with polling. Advertised so the dashboard can fall back to
+        # the blocking endpoint when talking to an older API.
+        "async_messages": True,
+        "answer_timeout_seconds": settings.answer_timeout_seconds,
         # Surfaced so a deployment can assert it is not running several workers on
-        # the process-local session store.
+        # the process-local session store. The job registry is process-local too, so
+        # this is the single thing to check before scaling out.
         "session_backend": settings.session_backend,
         "persistence": settings.persistence_enabled,
         "conversation_history": settings.persistence_enabled,
@@ -194,6 +207,79 @@ async def send_message(
         )
     except Exception as exc:
         raise _translate_error(exc) from exc
+
+
+@app.post(
+    "/api/v1/campbell-ai/message/submit",
+    response_model=JobStatusResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(require_internal_token)],
+)
+async def submit_message(
+    body: SubmitMessageRequest,
+    service: CampbellAIService = Depends(resolve_service),
+) -> JobStatusResponse:
+    """Accept a question and answer it in the background.
+
+    Returns as soon as the job is registered, so no client is ever holding a connection
+    open for the length of an agent run. The answer is collected by polling `/status`,
+    and survives the caller disconnecting, reloading, or resubmitting: the work belongs
+    to the job, not to this request.
+    """
+    try:
+        payload = await service.submit_message(
+            body.username,
+            body.company_id,
+            body.session_id,
+            body.message,
+            body.client_message_id,
+        )
+        return JobStatusResponse(**payload)
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
+@app.post(
+    "/api/v1/campbell-ai/message/status",
+    response_model=JobStatusResponse,
+    dependencies=[Depends(require_internal_token)],
+)
+async def message_status(
+    body: JobStatusRequest,
+    service: CampbellAIService = Depends(resolve_service),
+) -> JobStatusResponse:
+    """Current state of a background answer.
+
+    A job that is unknown or has aged out answers 404 rather than an error state: the
+    distinction matters to the caller, because the recovery is to read the conversation
+    history — where a completed answer already is — and not to ask again.
+    """
+    try:
+        payload = await service.message_status(body.job_id)
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+    if payload is None:
+        raise HTTPException(
+            status_code=404,
+            detail="La consulta ya no está disponible; revisa el historial de la conversación",
+        )
+    return JobStatusResponse(**payload)
+
+
+@app.post(
+    "/api/v1/campbell-ai/message/cancel",
+    dependencies=[Depends(require_internal_token)],
+)
+async def cancel_message(
+    body: JobStatusRequest,
+    service: CampbellAIService = Depends(resolve_service),
+) -> dict[str, object]:
+    """Stop a running answer so its slot is freed for someone else."""
+    try:
+        cancelled = await service.cancel_message(body.job_id)
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+    return {"cancelled": cancelled, "job_id": body.job_id}
 
 
 @app.post(

@@ -10,11 +10,18 @@ from src.campbell_ai.concurrency import ConcurrencyGuard, ConcurrencyLimits
 from src.campbell_ai.config import CampbellSettings, get_campbell_settings
 from src.campbell_ai.data import DashboardDataRepository
 from src.campbell_ai.errors import CampbellConfigurationError, CampbellDataError
+from src.campbell_ai.errors import (
+    CampbellAuthorizationError,
+    CampbellBusyError,
+    CampbellSessionError,
+    CampbellTimeoutError,
+)
 from src.campbell_ai.grounding import GroundingReport
 from src.campbell_ai.identity import (
     normalize_session_id,
     resolve_dashboard_principal,
 )
+from src.campbell_ai.jobs import Job, JobRegistry
 from src.campbell_ai.models import (
     ConversationListResponse,
     FeedbackResponse,
@@ -41,6 +48,9 @@ class CampbellAIService:
         self.concurrency = ConcurrencyGuard(
             ConcurrencyLimits.from_settings(self.settings)
         )
+        # Background answers. The job owns the work, so a caller that disconnects,
+        # reloads or retries never orphans a run nor starts a duplicate one.
+        self.jobs = JobRegistry(retention_seconds=self.settings.job_retention_seconds)
 
     def _ensure_enabled(self) -> None:
         if not self.settings.enabled:
@@ -161,6 +171,101 @@ class CampbellAIService:
             messages=await self.runtime.history(principal, resolved_session),
             grounding=grounding.as_dict(),
         )
+
+    # -- background answers -------------------------------------------------
+
+    async def submit_message(
+        self,
+        username: str,
+        company_id: str,
+        session_id: str,
+        message: str,
+        client_message_id: str | None = None,
+    ) -> dict:
+        """Register the answer as a background job and return its handle immediately.
+
+        Everything that can be judged without running the agents — the service being
+        enabled, the identity, the message length — is validated here so the caller gets
+        a real HTTP error rather than a job that fails on its first poll.
+
+        `client_message_id` is the idempotency key. Two submissions carrying the same one
+        for the same session attach to a single run, so a double click, a retry after a
+        dead connection, or a reloaded tab re-dispatching its pending message cannot
+        produce two answers to one question.
+        """
+        self._ensure_enabled()
+        principal = resolve_dashboard_principal(username, company_id)
+        resolved_session = normalize_session_id(session_id)
+        normalized_message = str(message or "").strip()
+        if not normalized_message:
+            raise CampbellSessionError("La consulta está vacía")
+        if len(normalized_message) > self.settings.max_message_chars:
+            raise CampbellConfigurationError("La consulta supera el largo permitido")
+
+        dedup_key = "|".join(
+            [
+                principal.username,
+                principal.company_id,
+                resolved_session,
+                str(client_message_id or "").strip() or f"auto_{uuid.uuid4().hex}",
+            ]
+        )
+        job = await self.jobs.submit(
+            dedup_key,
+            lambda: self.send_message(
+                username, company_id, resolved_session, normalized_message
+            ),
+            to_result=lambda response: response.model_dump(mode="json"),
+            on_error=self._job_error,
+        )
+        return {**job.as_dict(), "session_id": resolved_session}
+
+    @staticmethod
+    def _job_error(exc: BaseException) -> dict:
+        """Translate a failed run into the shape the caller polls for.
+
+        `retryable` is the part that matters to the UI: the same question is worth
+        resending after a busy rejection, but not after it was blocked or rejected for
+        length, and after a timeout the user should narrow it rather than repeat it.
+        """
+        if isinstance(exc, CampbellBusyError):
+            return {
+                "detail": str(exc),
+                "kind": "busy",
+                "retryable": True,
+                "retry_after": exc.retry_after,
+            }
+        if isinstance(exc, CampbellTimeoutError):
+            return {
+                "detail": str(exc),
+                "kind": "timeout",
+                "retryable": True,
+                "elapsed_seconds": exc.elapsed_seconds,
+            }
+        if isinstance(exc, CampbellAuthorizationError):
+            return {"detail": str(exc), "kind": "forbidden", "retryable": False}
+        if isinstance(exc, CampbellDataError):
+            return {"detail": str(exc), "kind": "unavailable", "retryable": True}
+        if isinstance(exc, CampbellConfigurationError):
+            return {"detail": str(exc), "kind": "not_configured", "retryable": False}
+        return {
+            "detail": "Campbell AI no pudo completar la consulta",
+            "kind": "server_error",
+            "retryable": True,
+        }
+
+    async def message_status(self, job_id: str) -> dict | None:
+        """Current state of a background answer, or None once it is unknown.
+
+        None means the job is finished *and* past its retention window, or never
+        existed. Either way the caller's recovery is the same and does not involve
+        re-asking: the answer, if there was one, is in the conversation history.
+        """
+        job = await self.jobs.get(job_id)
+        return job.as_dict() if job is not None else None
+
+    async def cancel_message(self, job_id: str) -> bool:
+        return await self.jobs.cancel(job_id)
 
     async def stream_message(
         self,

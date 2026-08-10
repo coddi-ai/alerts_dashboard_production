@@ -32,10 +32,14 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Awaitable, Callable
 
-from src.campbell_ai.errors import CampbellBusyError
+from src.campbell_ai.errors import CampbellBusyError, CampbellTimeoutError
 
 
 logger = logging.getLogger("campbell_ai.concurrency")
+
+# Below this much time left, a retry is not worth attempting: an agent run needs at
+# least a few seconds of model round trips before it can produce anything.
+_MIN_RETRY_BUDGET_SECONDS = 5.0
 
 
 @dataclass(frozen=True)
@@ -222,6 +226,10 @@ def is_transient_failure(exc: BaseException) -> bool:
     if isinstance(exc, CampbellBusyError):
         # Our own admission control: retrying immediately would just be rejected again.
         return False
+    if isinstance(exc, CampbellTimeoutError):
+        # Our own budget, already spent. Checked before the text match below, which
+        # would otherwise see "timeout" in the class name and retry into the deadline.
+        return False
     text = f"{type(exc).__name__} {exc}".lower()
     return any(marker in text for marker in _TRANSIENT_MARKERS)
 
@@ -234,16 +242,48 @@ async def execute_with_retry(
     max_delay: float = 30.0,
     multiplier: float = 2.0,
     label: str = "operación",
+    deadline: float | None = None,
 ) -> Any:
-    """Run an awaitable, retrying only transient failures with exponential backoff."""
+    """Run an awaitable, retrying only transient failures with exponential backoff.
+
+    ``deadline`` is an absolute ``time.monotonic()`` instant bounding *all* attempts
+    together. Without it a three-attempt retry of a two-minute agent run can occupy a
+    worker for six minutes while the caller gave up after the first — the work still
+    completes and is persisted, so the user sees a dead UI and then finds the question
+    already answered after a refresh. With it, each attempt is capped at the time
+    actually left, and a retry that could not finish in time is never started.
+    """
     delay = max(0.0, initial_delay)
     last_error: BaseException | None = None
+
+    def _remaining() -> float:
+        return float("inf") if deadline is None else deadline - time.monotonic()
+
     for attempt in range(1, max(1, attempts) + 1):
+        remaining = _remaining()
+        if remaining <= 0:
+            raise CampbellTimeoutError(
+                f"Campbell AI agotó el tiempo disponible para {label}"
+            )
         try:
-            return await operation()
+            if deadline is None:
+                return await operation()
+            return await asyncio.wait_for(operation(), timeout=remaining)
+        except asyncio.TimeoutError as exc:
+            # The budget is spent. Retrying cannot help: the next attempt would have
+            # even less time than the one that just ran out.
+            raise CampbellTimeoutError(
+                f"Campbell AI agotó el tiempo disponible para {label}"
+            ) from exc
         except Exception as exc:  # noqa: BLE001 - re-raised below when not transient
             last_error = exc
             if attempt >= attempts or not is_transient_failure(exc):
+                raise
+            backoff = min(delay, max_delay)
+            # Only sleep-and-retry when the retry has a realistic chance of finishing.
+            # Burning the remaining budget on backoff just converts a transient error
+            # into a timeout.
+            if _remaining() - backoff <= _MIN_RETRY_BUDGET_SECONDS:
                 raise
             logger.warning(
                 "Campbell AI reintentará %s (intento %s/%s): %s",
@@ -252,7 +292,7 @@ async def execute_with_retry(
                 attempts,
                 type(exc).__name__,
             )
-            await asyncio.sleep(min(delay, max_delay))
+            await asyncio.sleep(backoff)
             delay = min(delay * multiplier, max_delay) if delay else initial_delay
     # Unreachable: the loop either returns or raises.
     raise last_error if last_error else RuntimeError("execute_with_retry sin resultado")

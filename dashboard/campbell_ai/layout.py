@@ -24,7 +24,7 @@ ACCENT_BORDER = "rgba(52, 152, 219, 0.22)"
 # colors — it defaults to the sidebar's blue-gray (dashboard/layout.py's left_menu).
 USER_BUBBLE_COLOR = "#2290ff"
 
-CAMPBELL_AI_VERSION = "1.1.6"
+CAMPBELL_AI_VERSION = "1.2.0"
 
 # Campbell AI typography. Tune these values to adjust normal UI text without
 # changing titles or section headers.
@@ -36,6 +36,20 @@ CHAT_MESSAGE_FONT_SIZE = CAMPBELL_AI_BODY_FONT_SIZE
 CHAT_MESSAGE_LINE_HEIGHT = "1.8"
 SUGGESTED_QUESTION_FONT_SIZE = CAMPBELL_AI_BODY_FONT_SIZE
 INPUT_FONT_SIZE = CAMPBELL_AI_BODY_FONT_SIZE
+
+# Background-answer polling.
+#
+# The browser no longer waits inside one long request; it submits the question and asks
+# for the result on this cadence. 1.5s is frequent enough that a finished answer appears
+# promptly, and cheap enough that five users polling cost far less than five users
+# holding connections open.
+JOB_POLL_INTERVAL_MS = 1500
+# How long an answer may run before the view offers a way out. Most answers land well
+# inside this; past it, the user has no way to tell "still working" from "hung", and
+# leaving them with a dead composer and no options is the freeze they reported.
+SLOW_ANSWER_SECONDS = 20
+# Each "seguir esperando" buys another stretch of this length before asking again.
+KEEP_WAITING_EXTENSION_SECONDS = 30
 
 ALERT_SUGGESTIONS = {
     "weekly-summary": (
@@ -121,6 +135,65 @@ def _retry_button() -> dbc.Button:
         n_clicks=0,
         className="mt-3",
         style={"display": "none"},
+    )
+
+
+def _waiting_panel() -> dbc.Alert:
+    """Escape hatch for an answer that is taking a long time.
+
+    Hidden until the wait crosses `SLOW_ANSWER_SECONDS`. Before that it would be noise —
+    most answers arrive well inside it. After it, the user needs to know the difference
+    between "still working" and "hung", and needs a way out either way. Both controls
+    are always mounted for the same reason as `_retry_button`: they are plain-id Inputs,
+    and Dash disables an entire callback whose plain Input never exists in the layout.
+    """
+    return dbc.Alert(
+        [
+            html.Div(
+                [
+                    dbc.Spinner(size="sm", color="info", spinner_class_name="me-2"),
+                    html.Span(id="campbell-ai-waiting-body", style={"fontWeight": "600"}),
+                ],
+                className="d-flex align-items-center",
+            ),
+            html.P(
+                "La consulta sigue procesándose en el servidor. Puedes esperar, o "
+                "cancelarla y reformularla de forma más acotada.",
+                className="mb-0 mt-2",
+                style={
+                    "fontSize": CAMPBELL_AI_AUX_FONT_SIZE,
+                    "lineHeight": CAMPBELL_AI_BODY_LINE_HEIGHT,
+                },
+            ),
+            html.Div(
+                [
+                    dbc.Button(
+                        [
+                            html.I(className="fas fa-hourglass-half me-2"),
+                            "Seguir esperando",
+                        ],
+                        id="campbell-ai-keep-waiting",
+                        color="info",
+                        outline=True,
+                        size="sm",
+                        n_clicks=0,
+                    ),
+                    dbc.Button(
+                        [html.I(className="fas fa-xmark me-2"), "Cancelar consulta"],
+                        id="campbell-ai-cancel-job",
+                        color="secondary",
+                        outline=True,
+                        size="sm",
+                        n_clicks=0,
+                    ),
+                ],
+                className="d-flex gap-2 mt-3",
+            ),
+        ],
+        id="campbell-ai-waiting",
+        color="info",
+        is_open=False,
+        className="mt-3 mb-0 campbell-ai-alert",
     )
 
 
@@ -363,6 +436,23 @@ def create_campbell_ai_layout(user_data: dict | None = None) -> html.Div:
                 disabled=True,
                 n_intervals=0,
             ),
+            # The background answer currently in flight: {job_id, question, ...}.
+            #
+            # Session storage, deliberately. The answer belongs to the job on the
+            # server, not to this page load, so a refresh mid-question must be able to
+            # pick the same job back up and collect its result. That is the difference
+            # between the old behaviour — reload, and discover the question was answered
+            # while the tab sat frozen — and simply resuming.
+            dcc.Store(id="campbell-ai-job-store", storage_type="session", data=None),
+            dcc.Interval(
+                id="campbell-ai-job-poll",
+                interval=JOB_POLL_INTERVAL_MS,
+                disabled=True,
+                n_intervals=0,
+            ),
+            # When the user last said "seguir esperando", so the panel can hide again
+            # and re-appear if the next stretch is also slow.
+            dcc.Store(id="campbell-ai-waiting-ack", storage_type="memory", data=0),
             # Dummy clientside-callback target: scrolling the chat to its newest
             # message is a pure DOM side effect with nothing meaningful to store.
             dcc.Store(id="campbell-ai-scroll-trigger", storage_type="memory", data=0),
@@ -412,6 +502,7 @@ def create_campbell_ai_layout(user_data: dict | None = None) -> html.Div:
                             dismissable=True,
                             className="mt-3 mb-0 campbell-ai-alert",
                         ),
+                        _waiting_panel(),
                         *_conversation_history_sidebar(),
                         dbc.Card(
                             [
