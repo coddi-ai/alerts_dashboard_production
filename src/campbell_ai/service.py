@@ -26,12 +26,15 @@ from src.campbell_ai.security import (
     UNSUPPORTED_CAPABILITY_MESSAGE,
     requests_unsupported_capability,
 )
+from src.campbell_ai.temporal import current_temporal_context
 
 
 class CampbellAIService:
     def __init__(self, settings: CampbellSettings | None = None):
         self.settings = settings or get_campbell_settings()
-        self.repository = DashboardDataRepository(self.settings.data_root)
+        self.repository = DashboardDataRepository(
+            self.settings.data_root, timezone=self.settings.timezone
+        )
         self.runtime = CampbellAgentRuntime(self.repository, self.settings)
         # Admission control lives at the service boundary, so both the blocking and the
         # streaming endpoint are bounded by the same counters.
@@ -46,6 +49,9 @@ class CampbellAIService:
     @staticmethod
     def _user_key(principal) -> str:
         return f"{principal.username}|{principal.company_id}"
+
+    def temporal_context(self) -> dict[str, str]:
+        return current_temporal_context(self.settings.timezone)
 
     @staticmethod
     def _public_data_status(validation: dict) -> dict:
@@ -91,6 +97,7 @@ class CampbellAIService:
             session_id=resolved_session,
             company_id=principal.company_id,
             username=principal.username,
+            temporal_context=self.temporal_context(),
             data_ready=True,
             datasets=self._public_data_status(validation),
             capabilities=self.repository.client_capabilities(principal.company_id),
@@ -146,6 +153,7 @@ class CampbellAIService:
             message_id=message_id,
             session_id=resolved_session,
             company_id=principal.company_id,
+            temporal_context=self.temporal_context(),
             request_type=request_type,
             # `messages` is the canonical render payload for Dash. Sending the same
             # figures again here doubles response size and transient memory.
@@ -217,6 +225,7 @@ class CampbellAIService:
             "visualizations": [],
             "session_id": resolved_session,
             "company_id": principal.company_id,
+            "temporal_context": self.temporal_context(),
             "messages": [message.model_dump(mode="json") for message in messages],
         }
 

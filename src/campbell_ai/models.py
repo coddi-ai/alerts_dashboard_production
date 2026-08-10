@@ -83,6 +83,7 @@ class InitializeResponse(BaseModel):
     session_id: str
     company_id: str
     username: str
+    temporal_context: dict[str, str] = Field(default_factory=dict)
     data_ready: bool
     datasets: dict[str, Any]
     # Which analyses this client's data supports. Surfaced at initialization so a
@@ -98,6 +99,7 @@ class MessageResponse(BaseModel):
     message_id: str
     session_id: str
     company_id: str
+    temporal_context: dict[str, str] = Field(default_factory=dict)
     request_type: str = "agents"
     visualizations: list[VisualizationArtifact] = Field(default_factory=list)
     # Full conversation after the exchange, so a consumer can render the thread without
@@ -150,3 +152,4 @@ class CapabilitiesResponse(BaseModel):
     conversation_history: bool = False
     # Current admission-control load. Counts only, no identities.
     concurrency: dict[str, Any] = Field(default_factory=dict)
+    temporal_context: dict[str, str] = Field(default_factory=dict)

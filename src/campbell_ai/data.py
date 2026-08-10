@@ -15,6 +15,7 @@ import pandas as pd
 
 from src.campbell_ai.errors import CampbellDataError
 from src.campbell_ai.identity import normalize_client_id
+from src.campbell_ai.temporal import DEFAULT_TIMEZONE, current_temporal_context
 from src.charts.signals import signal_label
 
 
@@ -293,22 +294,39 @@ def predictive_band(value: float) -> str:
 
 def predictive_module_allows(client: str) -> bool:
     """Honour the dashboard's Predictive module allowlist for the requested client."""
-    from config.settings import get_settings
+    normalized = normalize_client_id(client)
+    try:
+        from config.client_services import is_service_enabled
 
-    allowed = {
-        str(value).strip().lower() for value in get_settings().predictive_allowed_clients
-    }
-    return normalize_client_id(client) in allowed
+        return bool(is_service_enabled(normalized, "predictive"))
+    except Exception:
+        # Older deployments carried this as a Settings field. Keep the fallback
+        # tolerant so Campbell AI initialization does not fail if either config shape
+        # is absent or temporarily unreadable.
+        from config.settings import get_settings
+
+        allowed = {
+            str(value).strip().lower()
+            for value in getattr(get_settings(), "predictive_allowed_clients", [])
+        }
+        return normalized in allowed
 
 
 class DashboardDataRepository:
     """Access dashboard datasets in place; files are never copied or rewritten."""
 
-    def __init__(self, data_root: Path | str):
+    def __init__(self, data_root: Path | str, timezone: str = DEFAULT_TIMEZONE):
         self.data_root = Path(data_root).expanduser().resolve()
+        self.timezone = timezone or DEFAULT_TIMEZONE
         self._cache: dict[tuple[str, int], pd.DataFrame] = {}
         self._probe_cache: dict[tuple[str, int], dict[str, Any]] = {}
         self._cache_lock = threading.RLock()
+
+    def temporal_context(self) -> dict[str, str]:
+        return current_temporal_context(self.timezone)
+
+    def _today_timestamp(self) -> pd.Timestamp:
+        return pd.Timestamp(self.temporal_context()["today"])
 
     def dataset_path(self, key: str, client: str) -> Path:
         try:
@@ -634,11 +652,14 @@ class DashboardDataRepository:
         if start is not None and end is not None and start > end:
             raise CampbellDataError("start_date no puede ser posterior a end_date")
 
+        relative_end_exclusive = False
         if start is None and end is None:
             resolved_days = self._clamp(days, 1, 3650)
-            end = valid_dates.max()
+            today = self._today_timestamp().normalize()
+            end = today + pd.Timedelta(days=1)
             start = end - pd.Timedelta(days=resolved_days)
             mode = "relative"
+            relative_end_exclusive = True
         else:
             resolved_days = None
             mode = "explicit"
@@ -648,16 +669,27 @@ class DashboardDataRepository:
             mask &= dates >= start
         if end is not None:
             raw_end = str(end_date or "").strip()
-            if raw_end and len(raw_end) <= 10:
+            if relative_end_exclusive:
+                mask &= dates < end
+            elif raw_end and len(raw_end) <= 10:
                 mask &= dates < end + pd.Timedelta(days=1)
             else:
                 mask &= dates <= end
         filtered = frame.loc[mask].copy()
         filtered_dates = dates.loc[filtered.index]
+        temporal = self.temporal_context()
         metadata = {
             "mode": mode,
+            "today": temporal["today"],
+            "timezone": temporal["timezone"],
             "start_date": start.isoformat() if start is not None else None,
-            "end_date": end.isoformat() if end is not None else None,
+            "end_date": (
+                (end - pd.Timedelta(days=1)).isoformat()
+                if relative_end_exclusive and end is not None
+                else end.isoformat()
+                if end is not None
+                else None
+            ),
             "days": resolved_days,
             "data_min": (
                 filtered_dates.min().isoformat() if not filtered_dates.dropna().empty else None
@@ -923,6 +955,7 @@ class DashboardDataRepository:
         limit: int = 20,
     ) -> str:
         frame = self.load("alerts", client).copy()
+        source_frame = frame.copy(deep=False)
         date_col = self._resolve_column(frame, ("Timestamp", "Fecha", "event_ts"))
         unit_col = self._resolve_column(frame, ("UnitId", "Unit", "unit_id"))
         system_col = self._resolve_column(frame, ("sistema", "System", "system"))
@@ -1006,6 +1039,35 @@ class DashboardDataRepository:
                 record["trigger_var_label"] = self._translate_signal_list(
                     record.get(trigger_var_col)
                 )
+        if (
+            summary["total"] == 0
+            and window.get("mode") == "relative"
+            and date_col
+            and not start_date
+            and not end_date
+        ):
+            source_last = pd.to_datetime(
+                window.get("source_coverage", {}).get("last"), errors="coerce"
+            )
+            requested_start = pd.to_datetime(window.get("start_date"), errors="coerce")
+            if pd.notna(source_last) and pd.notna(requested_start) and source_last < requested_start:
+                fallback = self._latest_available_alert_summary(
+                    source_frame,
+                    date_col=date_col,
+                    unit_col=unit_col,
+                    system_col=system_col,
+                    subsystem_col=subsystem_col,
+                    component_col=component_col,
+                    trigger_col=trigger_col,
+                    trigger_var_col=trigger_var_col,
+                    alert_id_col=alert_id_col,
+                    days=int(window.get("days") or days),
+                    unit_id=unit_id,
+                    filters=filters,
+                    limit=limit,
+                )
+                if fallback.get("total", 0) > 0:
+                    summary["latest_available_window"] = fallback
         summary["note"] = (
             "records es una muestra ordenada de mas reciente a mas antigua; "
             "usa total y las distribuciones para conteos y rankings. "
@@ -1019,6 +1081,95 @@ class DashboardDataRepository:
             "es obligatorio para no mezclar equipos."
         )
         return json.dumps(summary, ensure_ascii=False, default=str)
+
+    def _latest_available_alert_summary(
+        self,
+        frame: pd.DataFrame,
+        *,
+        date_col: str,
+        unit_col: str | None,
+        system_col: str | None,
+        subsystem_col: str | None,
+        component_col: str | None,
+        trigger_col: str | None,
+        trigger_var_col: str | None,
+        alert_id_col: str | None,
+        days: int,
+        unit_id: str,
+        filters: tuple[tuple[str, str, str | None], ...],
+        limit: int,
+    ) -> dict[str, Any]:
+        source_dates = pd.to_datetime(frame[date_col], errors="coerce", utc=True).dt.tz_localize(None)
+        valid_dates = source_dates.dropna()
+        if valid_dates.empty:
+            return {}
+        latest_end = valid_dates.max().normalize()
+        latest_start = latest_end + pd.Timedelta(days=1) - pd.Timedelta(
+            days=self._clamp(days, 1, 3650)
+        )
+        latest, latest_dates, latest_window = self.filter_date_window(
+            frame,
+            date_col,
+            start_date=latest_start.date().isoformat(),
+            end_date=latest_end.date().isoformat(),
+        )
+        if unit_id and unit_col:
+            latest = self._filter_unit(latest, unit_col, unit_id)
+        for _, value, column in filters:
+            if value and column:
+                latest = self._filter_contains(latest, column, value)
+        if date_col:
+            latest = latest.sort_values(date_col, ascending=False)
+
+        latest_window["mode"] = "latest_available"
+        payload: dict[str, Any] = {
+            "total": int(len(latest)),
+            "window": latest_window,
+        }
+        for label, column in (
+            ("by_unit", unit_col),
+            ("by_system", system_col),
+            ("by_subsystem", subsystem_col),
+            ("by_component", component_col),
+            ("by_trigger_type", trigger_col),
+            ("by_trigger_var", trigger_var_col),
+            ("by_source_type", self._resolve_column(latest, ("SourceType", "source_type"))),
+        ):
+            if column:
+                payload[label] = self._distribution(latest, column)
+        if trigger_var_col and payload.get("by_trigger_var"):
+            payload["by_trigger_var_labels"] = {
+                code: self._translate_signal_list(code) or code
+                for code in payload["by_trigger_var"]
+            }
+        if date_col and latest_dates is not None and not latest.empty:
+            aligned = latest_dates.loc[latest.index].dropna()
+            if not aligned.empty:
+                payload["by_month"] = {
+                    str(key): int(value)
+                    for key, value in aligned.dt.to_period("M").astype(str).value_counts().sort_index().items()
+                }
+        record_columns = [
+            alert_id_col,
+            self._resolve_column(latest, ("TelemetryID", "telemetry_id")),
+            date_col,
+            unit_col,
+            system_col,
+            subsystem_col,
+            component_col,
+            trigger_col,
+            trigger_var_col,
+            self._resolve_column(latest, ("mensaje_ia", "Description", "Descripcion")),
+        ]
+        payload["records"] = self._records(
+            latest, [value for value in record_columns if value], self._clamp(limit, 1, 50)
+        )
+        if trigger_var_col:
+            for record in payload["records"]:
+                record["trigger_var_label"] = self._translate_signal_list(
+                    record.get(trigger_var_col)
+                )
+        return payload
 
     def query_maintenance(
         self,
@@ -1788,7 +1939,7 @@ class DashboardDataRepository:
         """
         if not unit_id:
             raise CampbellDataError("query_telemetry_series requiere unit_id")
-        end = pd.Timestamp.now().normalize() + pd.Timedelta(days=1)
+        end = self._today_timestamp().normalize() + pd.Timedelta(days=1)
         start = end - pd.Timedelta(days=self._clamp(days, 1, 90))
         if start_date:
             parsed = pd.to_datetime(start_date, errors="coerce")

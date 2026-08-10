@@ -35,6 +35,7 @@ from src.campbell_ai.models import (
 )
 from src.campbell_ai.prompts import load_prompt
 from src.campbell_ai.security import deterministic_guard
+from src.campbell_ai.temporal import current_temporal_context
 from src.campbell_ai.tool_errors import tool_failure
 from src.campbell_ai.grounding import GroundingReport, audit_response
 from src.campbell_ai.visualization import DashboardVisualizationService
@@ -896,15 +897,37 @@ class CampbellAgentRuntime:
             grounding,
         )
 
-    @staticmethod
     def _conversation_input(
-        messages: list[ConversationMessage], message: str
+        self, messages: list[ConversationMessage], message: str
     ) -> list[dict[str, str]]:
+        context = self._temporal_context()
         conversation = [
             {"role": item.role, "content": item.content} for item in messages
         ]
-        conversation.append({"role": "user", "content": message})
+        conversation.append(
+            {
+                "role": "user",
+                "content": (
+                    f"{self._temporal_context_prompt(context)}\n\n"
+                    f"Consulta del usuario: {message}"
+                ),
+            }
+        )
         return conversation
+
+    def _temporal_context(self) -> dict[str, str]:
+        return current_temporal_context(self.settings.timezone)
+
+    @staticmethod
+    def _temporal_context_prompt(context: dict[str, str]) -> str:
+        return (
+            "Contexto temporal obligatorio para esta consulta: "
+            f"hoy es {context.get('today')} ({context.get('weekday')}), "
+            f"zona horaria {context.get('timezone')}. Interpreta 'hoy', 'ayer', "
+            "'ultimos N dias', 'esta semana' y cualquier ventana relativa usando "
+            "esta fecha como referencia, salvo que el usuario entregue fechas "
+            "explicitas."
+        )
 
     @staticmethod
     def _normalized_response(final_output: Any) -> str:
@@ -1079,8 +1102,8 @@ class CampbellAgentRuntime:
             )
         return report
 
-    @staticmethod
     def _done_event(
+        self,
         response: str,
         request_type: str,
         message_id: str,
@@ -1094,4 +1117,5 @@ class CampbellAgentRuntime:
             "message_id": message_id,
             "visualizations": [item.model_dump(mode="json") for item in visualizations],
             "grounding": (grounding or GroundingReport()).as_dict(),
+            "temporal_context": self._temporal_context(),
         }

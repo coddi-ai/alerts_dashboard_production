@@ -136,6 +136,8 @@ def test_api_initialize_message_history_and_clear(monkeypatch):
     assert "pareto" in capabilities.json()["chart_types"]
     assert "heatmap" in capabilities.json()["chart_types"]
     assert capabilities.json()["explicit_time_windows"] is True
+    assert capabilities.json()["temporal_context"]["today"]
+    assert capabilities.json()["temporal_context"]["timezone"] == "America/Santiago"
     # The catalogue and session backend are declared so a deployment can assert them.
     assert "telemetry_fleet_status" in capabilities.json()["named_charts"]
     assert capabilities.json()["session_backend"] in {"memory", "redis"}

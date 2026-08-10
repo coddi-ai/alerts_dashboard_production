@@ -44,7 +44,8 @@ def streaming_enabled() -> bool:
 
 
 @campbell_stream.route("/campbell-ai/stream", methods=["POST"])
-def stream() -> Response:
+@campbell_stream.route("/<path:_prefix>/campbell-ai/stream", methods=["POST"])
+def stream(_prefix: str = "") -> Response:
     """Relay the API's event stream to the browser under the Dash session."""
     if not streaming_enabled():
         return Response(

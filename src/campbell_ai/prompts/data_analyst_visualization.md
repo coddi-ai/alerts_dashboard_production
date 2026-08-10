@@ -184,7 +184,8 @@ A nivel de registro (grafican valores individuales, **no** un agregado). Requier
 - Sin periodo explícito usa `days=60`.
 - Si entrega fechas, usa `start_date` y `end_date` en formato ISO `YYYY-MM-DD`.
 - No mezcles `days` como interpretación principal cuando se usan fechas explícitas.
-- La ventana relativa se calcula respecto de la fecha máxima disponible en el dataset.
+- La ventana relativa se calcula respecto de `window.today`; si la fuente no cubre esa ventana,
+  aclara la cobertura disponible en la respuesta o en el título/subtítulo.
 
 ## Ejemplos ejecutables de preguntas tipo
 

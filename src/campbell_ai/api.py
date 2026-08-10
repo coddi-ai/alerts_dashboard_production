@@ -35,6 +35,7 @@ from src.campbell_ai.models import (
     SessionRequest,
 )
 from src.campbell_ai.service import CampbellAIService
+from src.campbell_ai.temporal import current_temporal_context
 
 
 logger = logging.getLogger("campbell_ai.api")
@@ -140,6 +141,7 @@ async def capabilities(
         persistence=settings.persistence_enabled,
         conversation_history=settings.persistence_enabled,
         concurrency=_concurrency_stats(service),
+        temporal_context=current_temporal_context(settings.timezone),
     )
 
 

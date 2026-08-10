@@ -426,8 +426,10 @@ existe en los datos pero su equivalencia en horas la puso el modelo.
 
 Notas de contrato que evitan conclusiones incorrectas:
 
-- Las ventanas relativas se anclan en la fecha máxima de **cada** fuente, no en hoy, y la respuesta
-  incluye `window.source_coverage` para advertir cuando dos fuentes terminan en fechas distintas.
+- Las ventanas relativas se anclan en `window.today`; la respuesta incluye
+  `window.source_coverage` para advertir cuando una fuente no cubre la ventana solicitada. Cuando
+  una consulta de alertas queda vacia y existe `latest_available_window`, esa sección se usa solo
+  como fallback explicito sobre la última data disponible.
 - Los filtros de texto ignoran mayúsculas y acentos; cuando un filtro deja el resultado vacío, la
   respuesta incluye `filter_hints` con los valores que sí existen.
 - Los identificadores de equipo se normalizan entre técnicas (`T_9`, `T_09`, `T9`).

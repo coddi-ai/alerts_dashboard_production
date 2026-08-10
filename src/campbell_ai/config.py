@@ -43,6 +43,7 @@ class CampbellSettings:
     redis_namespace: str
     session_lock_timeout_seconds: int
     streaming_enabled: bool
+    timezone: str = "America/Santiago"
     # Durable conversation and feedback backup. The bucket and its credentials are read
     # from the environment by the storage backend, never carried in settings.
     #
@@ -109,6 +110,8 @@ class CampbellSettings:
                 os.getenv("CAMPBELL_AI_SESSION_LOCK_TIMEOUT_SECONDS", "300")
             ),
             streaming_enabled=_env_bool("CAMPBELL_AI_STREAMING", False),
+            timezone=os.getenv("CAMPBELL_AI_TIMEZONE", "America/Santiago").strip()
+            or "America/Santiago",
             persistence_enabled=_env_bool("CAMPBELL_AI_PERSISTENCE", True),
             # One owned folder inside the bucket the dashboard already uses, so backups
             # and logs never mix with the analytics data.

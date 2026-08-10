@@ -25,6 +25,14 @@
 
   var PLACEHOLDER_ID = "campbell-ai-stream-placeholder";
 
+  function streamUrl() {
+    var path = window.location.pathname || "/";
+    var marker = "/agents/campbell-ai";
+    var index = path.indexOf(marker);
+    var prefix = index >= 0 ? path.slice(0, index) : "";
+    return (prefix || "") + "/campbell-ai/stream";
+  }
+
   function setPlaceholderText(text) {
     var node = document.getElementById(PLACEHOLDER_ID);
     if (!node) {
@@ -101,7 +109,7 @@
       state.result = null;
       setPlaceholderText("");
 
-      fetch("campbell-ai/stream", {
+      fetch(streamUrl(), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
