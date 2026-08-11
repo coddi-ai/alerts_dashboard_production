@@ -10,11 +10,16 @@ from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# Fixed categorical color order (never cycled) for deploy_status values.
+# Raw deploy_status values (from the DEPLOY_STATUS env var) mapped to display labels.
+DEPLOY_STATUS_LABELS = {
+    'POC': 'Producción',
+    'test': 'Desarrollo',
+}
+
+# Fixed categorical color order (never cycled) for deploy_status display labels.
 DEPLOY_STATUS_COLORS = {
-    'production': '#2a78d6',
-    'staging': '#eb6834',
-    'development': '#1baf7a',
+    'Producción': '#109618',
+    'Desarrollo': '#3366CC',
     'unknown': '#898781',
 }
 
@@ -37,6 +42,10 @@ def create_login_events_chart(counts_df: pd.DataFrame) -> go.Figure:
             x=0.5, y=0.5, showarrow=False
         )
 
+    counts_df = counts_df.assign(
+        deploy_status=counts_df['deploy_status'].map(DEPLOY_STATUS_LABELS).fillna(counts_df['deploy_status'])
+    )
+
     fig = px.bar(
         counts_df,
         y='username',
@@ -45,11 +54,14 @@ def create_login_events_chart(counts_df: pd.DataFrame) -> go.Figure:
         orientation='h',
         title=None,
         template='plotly_white',
-        height=max(400, 30 * counts_df['username'].nunique()),
         labels={'count': 'Número de inicios de sesión', 'username': 'Usuario', 'deploy_status': 'Ambiente'},
         color_discrete_map=DEPLOY_STATUS_COLORS,
+        text='count',
+        barmode='group',
     )
+    fig.update_traces(textposition='inside')
     fig.update_layout(
+        autosize=True,
         yaxis={'categoryorder': 'total ascending'},
         showlegend=True,
         legend=dict(

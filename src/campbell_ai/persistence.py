@@ -599,16 +599,34 @@ class ConversationArchive:
         return messages
 
     def list_conversations(
-        self, principal: DashboardPrincipal, limit: int | None = None
+        self,
+        principal: DashboardPrincipal,
+        limit: int | None = None,
+        *,
+        refresh: bool = False,
     ) -> list[ConversationSummary]:
-        """List the user's conversations for the active company, newest first."""
+        """List the user's conversations for the active company, newest first.
+
+        The normal path reads a per-user index document, which is cheap and is what
+        every page load uses. `refresh=True` ignores that index and rebuilds the listing
+        from the conversations that actually exist in the primary backend — what the
+        sidebar's refresh button is for, and the only way a deletion made directly in S3
+        becomes visible here.
+        """
         if not self.enabled:
             return []
-        document = self._get(self.index_key(principal)) or {}
-        entries = document.get("sessions")
-        rows = self._parse_index(entries if isinstance(entries, list) else [])
-        if not rows:
-            rows = self._rebuild_index(principal)
+        if refresh:
+            rows = self._reconcile_index(principal)
+        else:
+            document = self._get(self.index_key(principal))
+            entries = (document or {}).get("sessions")
+            rows = self._parse_index(entries if isinstance(entries, list) else [])
+            # Rebuild only when there is no index at all. An index that exists and lists
+            # nothing is an answer — "this user has no conversations" — and rebuilding
+            # over it would walk the disk mirror and resurrect every conversation the
+            # last refresh just established was gone.
+            if not rows and document is None:
+                rows = self._rebuild_index(principal)
         company = str(principal.company_id or "").strip().lower()
         rows = [
             row
@@ -637,48 +655,115 @@ class ConversationArchive:
             )
         return rows
 
+    def _reconcile_index(
+        self, principal: DashboardPrincipal
+    ) -> list[ConversationSummary]:
+        """Rebuild the listing from what the primary backend actually holds.
+
+        Two things kept deleted conversations alive in the sidebar, and this addresses
+        both.
+
+        The listing is served from an index document, so deleting a conversation
+        directly in S3 left its row in the index and the entry stayed clickable. Reading
+        the objects themselves is the only way to notice.
+
+        And `_get` returns the first backend that answers, with the local mirror as a
+        fallback — a design that cannot tell "S3 is empty" from "S3 is unreachable". So
+        emptying the bucket just meant the disk copy started answering instead, and the
+        deleted conversations came straight back. Reconciling therefore trusts the
+        *primary* backend only. If the primary cannot be listed it is treated as a
+        transport failure, not as emptiness, and the existing index is left alone: a
+        momentary S3 outage must never be mistaken for the user deleting everything.
+
+        The rebuilt index is written back to every backend, so the mirror converges
+        instead of shadowing the next read.
+        """
+        if not self.backends:
+            return []
+        primary = self.backends[0]
+        prefix = f"{self.user_prefix(principal)}/"
+        try:
+            keys = primary.list_keys(prefix)
+        except Exception:
+            logger.warning(
+                "Campbell AI no pudo listar %s para refrescar; se conserva el índice",
+                primary.name,
+                exc_info=True,
+            )
+            return self.list_conversations(principal)
+
+        rows = self._summaries_from_keys(keys)
+        result = ArchiveWriteResult()
+        self._put(
+            self.index_key(principal),
+            {
+                "username": principal.username,
+                "company_id": principal.company_id,
+                "sessions": [row.as_dict() for row in rows],
+                "rebuilt_from": primary.name,
+            },
+            result,
+        )
+        if result.failed:
+            logger.warning(
+                "Campbell AI refrescó el listado pero no pudo reescribir el índice en %s",
+                ", ".join(result.failed),
+            )
+        logger.info(
+            "Campbell AI reconcilió %s conversaciones desde %s", len(rows), primary.name
+        )
+        return rows
+
+    def _summaries_from_keys(self, keys: Iterable[str]) -> list[ConversationSummary]:
+        """Build listing rows from conversation object keys."""
+        seen: set[str] = set()
+        rows: list[ConversationSummary] = []
+        for key in keys:
+            if not key.endswith(f"/{CONVERSATION_FILE}"):
+                continue
+            session_id = key.split("/")[-2]
+            if session_id in seen:
+                continue
+            seen.add(session_id)
+            document = self._get(key) or {}
+            meta = document.get("metadata")
+            meta = meta if isinstance(meta, dict) else {}
+            conversation = document.get("conversation")
+            count = len(conversation) if isinstance(conversation, list) else 0
+            if not count:
+                continue
+            rows.append(
+                ConversationSummary(
+                    session_id=str(document.get("session_id") or session_id),
+                    company_id=str(document.get("company_id", "")),
+                    title=str(meta.get("title", "")) or session_id,
+                    summary=str(meta.get("summary", "")),
+                    created_at=str(meta.get("created_at", "")),
+                    updated_at=str(meta.get("updated_at") or document.get("saved_at", "")),
+                    message_count=count,
+                )
+            )
+        return rows
+
     def _rebuild_index(
         self, principal: DashboardPrincipal
     ) -> list[ConversationSummary]:
-        """Recover the listing from stored conversations when the index is missing."""
+        """Recover the listing from stored conversations when the index is missing.
+
+        Unlike `_reconcile_index` this will fall through to the mirror, because it only
+        runs when there is no index at all — a first run, or a lost index — where
+        recovering something from disk beats showing nothing.
+        """
         prefix = self.user_prefix(principal)
-        seen: set[str] = set()
-        rows: list[ConversationSummary] = []
         for backend in self.backends:
             try:
                 keys = backend.list_keys(f"{prefix}/")
             except Exception:
                 continue
-            for key in keys:
-                if not key.endswith(f"/{CONVERSATION_FILE}"):
-                    continue
-                session_id = key.split("/")[-2]
-                if session_id in seen:
-                    continue
-                seen.add(session_id)
-                document = self._get(key) or {}
-                meta = document.get("metadata")
-                meta = meta if isinstance(meta, dict) else {}
-                conversation = document.get("conversation")
-                count = len(conversation) if isinstance(conversation, list) else 0
-                if not count:
-                    continue
-                rows.append(
-                    ConversationSummary(
-                        session_id=str(document.get("session_id") or session_id),
-                        company_id=str(document.get("company_id", "")),
-                        title=str(meta.get("title", "")) or session_id,
-                        summary=str(meta.get("summary", "")),
-                        created_at=str(meta.get("created_at", "")),
-                        updated_at=str(
-                            meta.get("updated_at") or document.get("saved_at", "")
-                        ),
-                        message_count=count,
-                    )
-                )
+            rows = self._summaries_from_keys(keys)
             if rows:
-                break
-        return rows
+                return rows
+        return []
 
     def _update_index(
         self,

@@ -5,7 +5,7 @@ Uses Pydantic Settings for configuration management with environment variable su
 """
 
 from pathlib import Path
-from typing import List
+from typing import Dict, List
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -70,16 +70,30 @@ class Settings(BaseSettings):
     # Clients
     clients: List[str] = Field(default=["CDA", "EMIN", "ENEX", "CAPSTONE"], description="List of client names")
     
-    # Module access control - clients allowed to access specific modules
-    predictive_allowed_clients: List[str] = Field(
-        default=["CDA", "CAPSTONE"],
-        description="Clients with access to the Predictive module"
-    )
+    # Module access control - clients allowed to access specific modules.
+    # Predictive module access is now centralized in config/client_services.json
+    # (service id 'predictive') - see config/client_services.py::is_service_enabled.
     component_hours_allowed_clients: List[str] = Field(
         default=["CDA", "ENEX"],
         description="Clients with access to the Component Hours (Horómetro) module"
     )
-    
+
+    # Laboratory Compliance - per-client threshold (days) for the compliance window
+    lab_compliance_default_threshold_days: float = Field(
+        default=2.0,
+        description="Default laboratory compliance threshold (days) when a client has no override"
+    )
+    lab_compliance_threshold_days_by_client: Dict[str, float] = Field(
+        default_factory=dict,
+        description="Per-client laboratory compliance threshold (days), keyed by uppercase client id"
+    )
+
+    def get_lab_compliance_threshold_days(self, client: str) -> float:
+        """Get the laboratory compliance threshold (days) for a client, falling back to the default."""
+        return self.lab_compliance_threshold_days_by_client.get(
+            str(client or "").upper(), self.lab_compliance_default_threshold_days
+        )
+
     @field_validator("logs_dir", mode="before")
     @classmethod
     def ensure_path(cls, v):

@@ -20,6 +20,7 @@ from urllib.request import Request, urlopen
 from flask import Blueprint, Response, request
 
 from dashboard.auth import resolve_authenticated_username
+from src.campbell_ai.config import DEFAULT_INTERNAL_TOKEN
 
 
 logger = logging.getLogger(__name__)
@@ -44,7 +45,8 @@ def streaming_enabled() -> bool:
 
 
 @campbell_stream.route("/campbell-ai/stream", methods=["POST"])
-def stream() -> Response:
+@campbell_stream.route("/<path:_prefix>/campbell-ai/stream", methods=["POST"])
+def stream(_prefix: str = "") -> Response:
     """Relay the API's event stream to the browser under the Dash session."""
     if not streaming_enabled():
         return Response(
@@ -72,7 +74,8 @@ def stream() -> Response:
             status=200,
         )
 
-    token = os.getenv("CAMPBELL_AI_INTERNAL_TOKEN", "").strip()
+    # Same default as the API and the blocking client; see DEFAULT_INTERNAL_TOKEN.
+    token = os.getenv("CAMPBELL_AI_INTERNAL_TOKEN", "").strip() or DEFAULT_INTERNAL_TOKEN
     base_url = os.getenv("CAMPBELL_AI_API_URL", "http://127.0.0.1:8000").rstrip("/")
     if not token:
         return Response(

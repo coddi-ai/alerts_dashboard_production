@@ -11,6 +11,9 @@ navigation, whether the requested page can be shown:
 - "/admin/*" requires the admin role, independent of client services.
 - any other known service route requires the currently selected client to
   have that service enabled (config/client_services.py::is_service_enabled).
+- a service enabled but marked "dummy" for the client redirects to the
+  shared placeholder page (/sin-servicios) instead of its real content
+  (config/client_services.py::is_service_dummy).
 
 Hiding a nav link is not authorization - this callback is what actually
 enforces it against direct URL access, per spec 2.6.
@@ -22,7 +25,7 @@ from dash.exceptions import PreventUpdate
 
 from dashboard.auth import is_admin
 from dashboard.services_registry import first_enabled_service_path, resolve_service_id_for_pathname
-from config.client_services import is_service_enabled
+from config.client_services import is_service_dummy, is_service_enabled
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -72,5 +75,8 @@ def register_access_control_callbacks(app: dash.Dash) -> None:
                 f"(user {user_data.get('username')})"
             )
             return _fallback()
+
+        if is_service_dummy(effective_client, service_id):
+            return dash.get_relative_path("/sin-servicios")
 
         raise PreventUpdate

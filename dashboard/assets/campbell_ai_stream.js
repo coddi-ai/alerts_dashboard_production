@@ -21,9 +21,36 @@
     result: null,
     controller: null,
     requestId: 0,
+    startedAt: 0,
+    lastEventAt: 0,
+    running: false,
   });
 
   var PLACEHOLDER_ID = "campbell-ai-stream-placeholder";
+
+  /*
+   * A stream that goes quiet is the failure this watchdog exists for.
+   *
+   * `fetch` only rejects when the connection breaks. A connection that stays open
+   * while the server sends nothing — a stalled worker, a proxy holding the socket —
+   * leaves `pump()` waiting forever: nothing is parked, the polling callback keeps
+   * returning no_update, and the composer that was disabled when the message was sent
+   * is never re-enabled. The tab sits on "Pensando..." with no way out while the answer
+   * completes server-side and is quietly persisted, which is exactly the "se pega, y al
+   * refrescar ya estaba respondida" report.
+   *
+   * So prolonged silence is treated as a failure, and the answer is recovered through
+   * the fallback path rather than waited on forever.
+   */
+  var STALL_TIMEOUT_MS = 45000;
+
+  function streamUrl() {
+    var path = window.location.pathname || "/";
+    var marker = "/agents/campbell-ai";
+    var index = path.indexOf(marker);
+    var prefix = index >= 0 ? path.slice(0, index) : "";
+    return (prefix || "") + "/campbell-ai/stream";
+  }
 
   function setPlaceholderText(text) {
     var node = document.getElementById(PLACEHOLDER_ID);
@@ -43,6 +70,12 @@
       return;
     }
     state.result = payload;
+    state.running = false;
+  }
+
+  /* Any sign of life from the server, used by the stall watchdog. */
+  function touch() {
+    state.lastEventAt = Date.now();
   }
 
   function consume(response, onEvent) {
@@ -99,9 +132,12 @@
       var settled = false;
       state.controller = controller;
       state.result = null;
+      state.startedAt = Date.now();
+      state.running = true;
+      touch();
       setPlaceholderText("");
 
-      fetch("campbell-ai/stream", {
+      fetch(streamUrl(), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -117,6 +153,7 @@
             throw new Error("stream unavailable");
           }
           return consume(response, function (event) {
+            touch();
             if (event.type === "delta") {
               text += event.text || "";
               setPlaceholderText(text);
@@ -148,8 +185,32 @@
       return window.dash_clientside.no_update;
     },
 
-    /* Polled by a dcc.Interval; hands the parked payload to a dcc.Store once. */
+    /*
+     * Polled by a dcc.Interval. Returns one of three things:
+     *
+     *   - the parked terminal payload, once;
+     *   - a `running` tick carrying elapsed seconds, so the view can count the wait up
+     *     and offer a way out when it gets long — previously the browser knew how long
+     *     it had been waiting and never told anyone;
+     *   - no_update when there is nothing in flight.
+     */
     collect: function () {
+      if (!state.result && state.running) {
+        var silentFor = Date.now() - state.lastEventAt;
+        if (silentFor > STALL_TIMEOUT_MS) {
+          /* The connection is open but dead. Give up on it so the fallback runs. */
+          if (state.controller) {
+            state.controller.abort();
+          }
+          state.running = false;
+          state.controller = null;
+          return { ok: false, detail: "", stalled: true };
+        }
+        return {
+          running: true,
+          elapsed: Math.round((Date.now() - state.startedAt) / 1000),
+        };
+      }
       if (!state.result) {
         return window.dash_clientside.no_update;
       }
@@ -157,6 +218,18 @@
       state.result = null;
       state.controller = null;
       return payload;
+    },
+
+    /* Abort an in-flight stream because the user cancelled it. */
+    stop: function () {
+      if (state.controller) {
+        state.controller.abort();
+      }
+      state.running = false;
+      state.controller = null;
+      state.result = null;
+      state.requestId += 1;
+      return window.dash_clientside.no_update;
     },
   };
 })();

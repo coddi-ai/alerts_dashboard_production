@@ -14,6 +14,7 @@ def create_layout() -> html.Div:
     start_date, end_date = _default_alert_dates()
     return html.Div([
         dcc.Store(id="alerts-selected-alert-id"),
+        dcc.Store(id="alerts-general-active-filters", data={}),
         html.Div(id="alerts-summary-stats", className="mb-3"),
         dbc.Card([
             dbc.CardBody([
@@ -46,9 +47,24 @@ def create_layout() -> html.Div:
                     ], width="auto"),
                 ], align="center", className="g-2"),
                 html.Div(id="alerts-general-filter-summary", className="small text-muted mt-2"),
+                html.Div([
+                    html.Div(id="alerts-general-active-filter-badges", className="d-flex flex-wrap align-items-center"),
+                    dbc.Button(
+                        [html.I(className="fas fa-eraser me-1"), "Limpiar filtros"],
+                        id="alerts-general-filter-clear-all",
+                        color="link",
+                        size="sm",
+                        className="p-0 ms-1 align-baseline",
+                        style={"display": "none"},
+                    ),
+                ], className="mt-2 d-flex flex-wrap align-items-center"),
             ])
         ], className="shadow-sm mb-3"),
         html.H4([html.I(className="fas fa-chart-bar me-2"), "Análisis semanal de alertas"], className="text-primary mb-3 mt-4"),
+        html.P(
+            "Haga clic en una barra o segmento para filtrar el resto de la vista. Haga clic de nuevo para quitar el filtro.",
+            className="small text-muted mb-3",
+        ),
         dbc.Row([
             dbc.Col([
                 dbc.Card([
@@ -104,3 +120,50 @@ def create_summary_stats_display(total_alerts: int, total_units: int, telemetry_
             ) for label, value, icon, color, background in cards
         ], className="g-3"),
     ])
+
+
+_ACTIVE_FILTER_LABELS = {
+    "unit": ("Unidad", "fas fa-truck"),
+    "week": ("Semana", "fas fa-calendar-week"),
+    "system": ("Sistema", "fas fa-cogs"),
+}
+
+
+def _format_active_filter_value(key: str, value: str) -> str:
+    if key == "week":
+        try:
+            return date.fromisoformat(value).strftime("%d/%m/%Y")
+        except (TypeError, ValueError):
+            return str(value)
+    return str(value)
+
+
+def create_active_filter_badges(active_filters: dict | None) -> list:
+    """Render one removable chip per active cross-filter.
+
+    The "Limpiar filtros" button lives permanently in the static layout
+    (just hidden/shown) rather than here: a literal (non-pattern-matching)
+    Dash Input must reference a component that exists in the layout at all
+    times, and this function's output is only mounted conditionally.
+    """
+    active_filters = active_filters or {}
+    chips = []
+    for key, value in active_filters.items():
+        if not value:
+            continue
+        label, icon = _ACTIVE_FILTER_LABELS.get(key, (key.title(), "fas fa-filter"))
+        chips.append(
+            dbc.Badge(
+                [
+                    html.I(className=f"{icon} me-1"),
+                    f"{label}: {_format_active_filter_value(key, value)}",
+                    html.I(className="fas fa-times ms-2"),
+                ],
+                id={"type": "alerts-general-filter-chip", "key": key},
+                color="primary",
+                pill=True,
+                className="me-2 mb-1",
+                style={"cursor": "pointer", "fontSize": "0.85rem"},
+            )
+        )
+    return chips

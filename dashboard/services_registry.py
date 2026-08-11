@@ -12,7 +12,7 @@ client-service-gated, and are kept separate from KNOWN_SERVICE_IDS.
 
 from typing import Optional
 
-from config.client_services import KNOWN_SERVICE_IDS, is_service_enabled
+from config.client_services import KNOWN_SERVICE_IDS, is_service_dummy, is_service_enabled
 
 # Nav sections in display order. Each service id here must be one of
 # config.client_services.KNOWN_SERVICE_IDS. 'predictive' is a section on its
@@ -57,6 +57,7 @@ SERVICE_LABELS = {
     "monitoring-alerts": "Alertas",
     "monitoring-telemetry": "Telemetría",
     "monitoring-oil": "Aceite",
+    "predictive": "Predictivo",
     "agents-campbell-ai": "Campbell AI",
     "integration-validacion-avisos": "Validación de Avisos",
     "integration-seguimiento-avisos": "Seguimiento de Avisos",
@@ -121,8 +122,13 @@ def resolve_service_id_for_pathname(rel_path: str) -> Optional[str]:
 
 
 def first_enabled_service_path(client_id: str) -> Optional[str]:
-    """First enabled service's path for a client, in canonical order, or None if none enabled."""
+    """
+    First enabled, non-dummy service's path for a client, in canonical
+    order, or None if none qualify. Dummy services are skipped here since
+    landing on one would just bounce straight to /sin-servicios anyway (see
+    access_control_callbacks.py).
+    """
     for service_id in KNOWN_SERVICE_IDS:
-        if is_service_enabled(client_id, service_id):
+        if is_service_enabled(client_id, service_id) and not is_service_dummy(client_id, service_id):
             return NAV_PATHS[service_id]
     return None

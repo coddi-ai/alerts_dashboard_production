@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import functools
+import inspect
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass
 from typing import Any, AsyncIterator
 
@@ -17,6 +20,7 @@ from src.campbell_ai.errors import (
     CampbellAIError,
     CampbellConfigurationError,
     CampbellSessionError,
+    CampbellTimeoutError,
 )
 from src.campbell_ai.feedback import FeedbackStore
 from src.campbell_ai.identity import known_dashboard_clients
@@ -35,6 +39,7 @@ from src.campbell_ai.models import (
 )
 from src.campbell_ai.prompts import load_prompt
 from src.campbell_ai.security import deterministic_guard
+from src.campbell_ai.temporal import current_temporal_context
 from src.campbell_ai.tool_errors import tool_failure
 from src.campbell_ai.grounding import GroundingReport, audit_response
 from src.campbell_ai.visualization import DashboardVisualizationService
@@ -42,6 +47,36 @@ from src.charts.signals import describe_signals as describe_signal_catalog
 
 
 logger = logging.getLogger("campbell_ai.runtime")
+
+
+def _offloading(function_tool):
+    """Wrap the SDK's tool decorator so synchronous tool bodies leave the event loop.
+
+    The Agents SDK calls a non-async tool body inline (``agents/tool.py``: if the
+    function is not a coroutine function it is simply invoked). Every data tool here is
+    a plain ``def`` doing pandas filtering, and the chart tools build Plotly figures, so
+    that inline call blocks the *whole* uvicorn worker: while one user's query scans a
+    frame, no other user's request is even read off the socket. With five people asking
+    at once the answers stop overlapping and start queueing, which is the freeze this
+    guards against.
+
+    ``functools.wraps`` copies ``__annotations__``, ``__doc__`` and ``__wrapped__``, and
+    ``inspect.signature`` follows ``__wrapped__``, so the generated tool schema is
+    identical to the one the bare decorator would have produced. Async tool bodies (the
+    agents-as-tools) already yield to the loop and are passed through untouched.
+    """
+
+    def decorator(func):
+        if inspect.iscoroutinefunction(func):
+            return function_tool(func)
+
+        @functools.wraps(func)
+        async def offloaded(*args, **kwargs):
+            return await asyncio.to_thread(func, *args, **kwargs)
+
+        return function_tool(offloaded)
+
+    return decorator
 
 
 @dataclass
@@ -164,11 +199,14 @@ class CampbellAgentRuntime:
             await self.sessions.write(key, list(messages)[-max_items:])
 
     async def archived_conversations(
-        self, principal: DashboardPrincipal
+        self, principal: DashboardPrincipal, refresh: bool = False
     ) -> list[ConversationSummary]:
+        """Archived conversations. `refresh` re-reads the objects instead of the index."""
         if not self.archive.enabled:
             return []
-        return await asyncio.to_thread(self.archive.list_conversations, principal)
+        return await asyncio.to_thread(
+            lambda: self.archive.list_conversations(principal, refresh=refresh)
+        )
 
     async def archived_conversation(
         self, principal: DashboardPrincipal, session_id: str
@@ -198,6 +236,42 @@ class CampbellAgentRuntime:
         ]
         max_items = max(2, self.settings.max_history_messages)
         return updated[-max_items:], assistant.message_id
+
+    async def _snapshot(self, key: tuple[str, str, str]) -> list[ConversationMessage]:
+        """The conversation as it stands, for use as context in one answer.
+
+        Held under the lock only for the read itself. Two questions asked at the same
+        moment therefore see the same history and neither waits for the other — which is
+        what the user asking them expects, since they asked both before seeing either
+        answer.
+        """
+        async with self.sessions.lock(key):
+            return await self.sessions.read(key)
+
+    async def _commit_exchange(
+        self,
+        key: tuple[str, str, str],
+        user_message: str,
+        assistant_message: str,
+        visualizations: list[VisualizationArtifact] | None = None,
+    ) -> tuple[list[ConversationMessage], str]:
+        """Append one exchange to whatever the conversation holds *now*.
+
+        Deliberately re-reads inside the lock rather than appending to the snapshot the
+        answer started from. Two answers running in parallel both began from the same
+        history; appending to that stale copy would make whichever finished second
+        overwrite the first, and the user would watch one of their questions vanish from
+        the thread.
+
+        The lock is held for a read and a write — microseconds — not for an agent run.
+        """
+        async with self.sessions.lock(key):
+            current = await self.sessions.read(key)
+            updated, message_id = self._appended(
+                current, user_message, assistant_message, visualizations
+            )
+            await self.sessions.write(key, updated)
+        return updated, message_id
 
     async def record_exchange(
         self,
@@ -261,6 +335,9 @@ class CampbellAgentRuntime:
         self, principal: DashboardPrincipal
     ) -> tuple[_AgentBundle, Any, list[VisualizationArtifact], list[str], list[str]]:
         Agent, ModelSettings, Runner, function_tool = self._load_sdk()
+        # Every `@function_tool` below is registered through the offloading wrapper, so
+        # a blocking tool body never runs on the event loop. See `_offloading`.
+        function_tool = _offloading(function_tool)
         client = principal.company_id
         repository = self.repository
         generated_visualizations: list[VisualizationArtifact] = []
@@ -846,48 +923,63 @@ class CampbellAgentRuntime:
 
         key = self._session_key(principal, session_id)
         await self.initialize(principal, session_id)
-        async with self.sessions.lock(key):
-            messages = await self.sessions.read(key)
-            (
-                bundle,
-                Runner,
-                generated_visualizations,
-                executed_tools,
-                tool_outputs,
-            ) = self._build_bundle(principal)
+        # One wall-clock budget for the whole exchange, gatekeeper and retries included.
+        # Without it a run has no upper bound at all, and the only thing that ever ends
+        # it is the caller hanging up — after which the answer still completes and is
+        # persisted, which is precisely how a question ends up "already answered" on the
+        # next page load.
+        deadline = time.monotonic() + self.settings.answer_timeout_seconds
 
-            blocked = await self._gatekeeper_refusal(Runner, bundle, message)
-            if blocked is not None:
-                updated, message_id = self._appended(messages, message, blocked)
-                await self.sessions.write(key, updated)
-                blocked_result = blocked, "blocked", message_id, [], GroundingReport()
-            else:
-                # A model-side throttle or a transient upstream error would otherwise
-                # surface as a failed question the user has to retype.
-                result = await execute_with_retry(
-                    lambda: Runner.run(
-                        starting_agent=bundle.head,
-                        input=self._conversation_input(messages, message),
-                        max_turns=self.settings.max_turns_head,
-                    ),
-                    attempts=self.settings.retry_attempts,
-                    initial_delay=self.settings.retry_initial_delay,
-                    max_delay=self.settings.retry_max_delay,
-                    label="la consulta a los agentes",
-                )
-                response = self._normalized_response(result.final_output)
-                grounding = self._audit(response, tool_outputs, question=message)
-                updated, message_id = self._appended(
-                    messages, message, response, generated_visualizations
-                )
-                await self.sessions.write(key, updated)
-                blocked_result = None
+        # Read the conversation under the lock, then let go of it. The agent run below
+        # is NOT serialized per session, and that is the point: holding the lock across
+        # a run meant a second question in the same conversation waited the full
+        # `queue_timeout_seconds` and was then rejected, however much headroom the
+        # service had. Someone who fires several questions at once got one answer and a
+        # row of "la sesión está ocupada".
+        #
+        # The lock only ever protected the read-modify-write of the message list, and
+        # `_commit_exchange` still holds it for that — re-reading before appending, so
+        # two answers finishing together cannot overwrite each other.
+        messages = await self._snapshot(key)
+        (
+            bundle,
+            Runner,
+            generated_visualizations,
+            executed_tools,
+            tool_outputs,
+        ) = self._build_bundle(principal)
 
-        # Archiving happens after the session lock is released so a slow backup cannot
+        blocked = await self._gatekeeper_refusal(
+            Runner, bundle, message, deadline=deadline
+        )
+        if blocked is not None:
+            updated, message_id = await self._commit_exchange(key, message, blocked)
+            await self._archive_exchange(principal, session_id, updated)
+            return blocked, "blocked", message_id, [], GroundingReport()
+
+        # A model-side throttle or a transient upstream error would otherwise
+        # surface as a failed question the user has to retype.
+        result = await execute_with_retry(
+            lambda: Runner.run(
+                starting_agent=bundle.head,
+                input=self._conversation_input(messages, message),
+                max_turns=self.settings.max_turns_head,
+            ),
+            attempts=self.settings.retry_attempts,
+            initial_delay=self.settings.retry_initial_delay,
+            max_delay=self.settings.retry_max_delay,
+            label="la consulta a los agentes",
+            deadline=deadline,
+        )
+        response = self._normalized_response(result.final_output)
+        grounding = self._audit(response, tool_outputs, question=message)
+        updated, message_id = await self._commit_exchange(
+            key, message, response, generated_visualizations
+        )
+
+        # Archiving happens outside the session lock so a slow backup cannot
         # delay the next question in the same conversation.
         await self._archive_exchange(principal, session_id, updated)
-        if blocked_result is not None:
-            return blocked_result
         return (
             response,
             self._request_type(generated_visualizations, executed_tools),
@@ -896,15 +988,84 @@ class CampbellAgentRuntime:
             grounding,
         )
 
-    @staticmethod
-    def _conversation_input(
-        messages: list[ConversationMessage], message: str
+    _TRUNCATION_NOTE = "\n\n[...respuesta anterior recortada por longitud...]"
+
+    def _budgeted_history(
+        self, messages: list[ConversationMessage]
     ) -> list[dict[str, str]]:
-        conversation = [
-            {"role": item.role, "content": item.content} for item in messages
-        ]
-        conversation.append({"role": "user", "content": message})
+        """Replay the most recent conversation that fits the character budget.
+
+        `max_history_messages` alone does not bound prompt size: a data answer can be a
+        multi-kilobyte markdown table, so twenty of them replay an enormous prompt into
+        every subsequent turn — and into each sub-agent the head hands off to. Latency
+        then climbs with conversation length until an ordinary question crosses the
+        answer timeout, which is exactly the "it hangs once the chat gets long" report.
+
+        Two bounds, applied newest-first because recent turns carry the context the user
+        is actually referring to:
+
+        - each individual message is capped, so one huge table cannot evict everything
+          else in the thread;
+        - the total is capped, and older messages are dropped once it is reached.
+
+        Truncation is marked in the text rather than done silently, so the model treats
+        a shortened answer as incomplete instead of as the whole story.
+        """
+        per_message = max(500, int(self.settings.max_history_message_chars))
+        budget = max(1000, int(self.settings.max_history_chars))
+        note = self._TRUNCATION_NOTE
+
+        selected: list[dict[str, str]] = []
+        used = 0
+        for item in reversed(messages):
+            content = item.content or ""
+            if len(content) > per_message:
+                content = content[: per_message - len(note)] + note
+            if used + len(content) > budget and selected:
+                # Budget spent. Everything older than this is dropped; `selected` is
+                # non-empty, so the most recent turn always survives.
+                break
+            selected.append({"role": item.role, "content": content})
+            used += len(content)
+        selected.reverse()
+        if len(selected) < len(messages):
+            logger.info(
+                "Campbell AI recortó el historial replicado: %s de %s mensajes, %s caracteres",
+                len(selected),
+                len(messages),
+                used,
+            )
+        return selected
+
+    def _conversation_input(
+        self, messages: list[ConversationMessage], message: str
+    ) -> list[dict[str, str]]:
+        context = self._temporal_context()
+        conversation = self._budgeted_history(messages)
+        conversation.append(
+            {
+                "role": "user",
+                "content": (
+                    f"{self._temporal_context_prompt(context)}\n\n"
+                    f"Consulta del usuario: {message}"
+                ),
+            }
+        )
         return conversation
+
+    def _temporal_context(self) -> dict[str, str]:
+        return current_temporal_context(self.settings.timezone)
+
+    @staticmethod
+    def _temporal_context_prompt(context: dict[str, str]) -> str:
+        return (
+            "Contexto temporal obligatorio para esta consulta: "
+            f"hoy es {context.get('today')} ({context.get('weekday')}), "
+            f"zona horaria {context.get('timezone')}. Interpreta 'hoy', 'ayer', "
+            "'ultimos N dias', 'esta semana' y cualquier ventana relativa usando "
+            "esta fecha como referencia, salvo que el usuario entregue fechas "
+            "explicitas."
+        )
 
     @staticmethod
     def _normalized_response(final_output: Any) -> str:
@@ -921,13 +1082,35 @@ class CampbellAgentRuntime:
             return "five_whys"
         return "agents"
 
-    async def _gatekeeper_refusal(self, Runner, bundle, message: str) -> str | None:
-        """Return the refusal text when the gatekeeper blocks, otherwise None."""
-        validation_result = await Runner.run(
-            starting_agent=bundle.gatekeeper,
-            input=message,
-            max_turns=1,
-        )
+    async def _gatekeeper_refusal(
+        self, Runner, bundle, message: str, deadline: float | None = None
+    ) -> str | None:
+        """Return the refusal text when the gatekeeper blocks, otherwise None.
+
+        Bounded by its own slice of the exchange budget: this is a single-turn call, so
+        if it has not answered in that time the upstream is unhealthy and spending the
+        rest of the budget waiting only delays the error the user is going to get.
+        """
+        budget = self.settings.gatekeeper_timeout_seconds
+        if deadline is not None:
+            budget = min(budget, max(0.0, deadline - time.monotonic()))
+        if budget <= 0:
+            raise CampbellTimeoutError(
+                "Campbell AI agotó el tiempo disponible antes de validar la consulta"
+            )
+        try:
+            validation_result = await asyncio.wait_for(
+                Runner.run(
+                    starting_agent=bundle.gatekeeper,
+                    input=message,
+                    max_turns=1,
+                ),
+                timeout=budget,
+            )
+        except asyncio.TimeoutError as exc:
+            raise CampbellTimeoutError(
+                "Campbell AI no alcanzó a validar la consulta a tiempo"
+            ) from exc
         decision = validation_result.final_output
         if isinstance(decision, SecurityDecision):
             if decision.safe:
@@ -968,63 +1151,76 @@ class CampbellAgentRuntime:
 
         key = self._session_key(principal, session_id)
         await self.initialize(principal, session_id)
-        async with self.sessions.lock(key):
-            messages = await self.sessions.read(key)
-            (
-                bundle,
-                Runner,
-                generated_visualizations,
-                executed_tools,
-                tool_outputs,
-            ) = self._build_bundle(principal)
+        deadline = time.monotonic() + self.settings.answer_timeout_seconds
 
-            yield {"type": "status", "stage": "validating"}
-            blocked = await self._gatekeeper_refusal(Runner, bundle, message)
-            if blocked is not None:
-                updated, message_id = self._appended(messages, message, blocked)
-                await self.sessions.write(key, updated)
-                await self._archive_exchange(principal, session_id, updated)
-                yield self._done_event(
-                    blocked, "blocked", message_id, [], GroundingReport()
-                )
-                return
+        # Same shape as `answer`: snapshot under the lock, stream without it, commit
+        # under it again. Holding the lock for the length of a stream is even worse than
+        # for a blocking run, because a stream lives as long as its consumer keeps
+        # reading — one slow browser could lock a conversation for minutes.
+        messages = await self._snapshot(key)
+        (
+            bundle,
+            Runner,
+            generated_visualizations,
+            executed_tools,
+            tool_outputs,
+        ) = self._build_bundle(principal)
 
-            yield {"type": "status", "stage": "analyzing"}
-            streamed = Runner.run_streamed(
-                starting_agent=bundle.head,
-                input=self._conversation_input(messages, message),
-                max_turns=self.settings.max_turns_head,
-            )
-            chunks: list[str] = []
-            async for event in streamed.stream_events():
-                # Most of the wall clock is spent calling tools before any text
-                # exists, so surface which step is running or the user stares at a
-                # spinner for most of the answer.
-                step = self._tool_progress(event)
-                if step:
-                    yield {"type": "status", "stage": "tool", "detail": step}
-                    continue
-                text = self._delta_text(event)
-                if text:
-                    chunks.append(text)
-                    yield {"type": "delta", "text": text}
-
-            response = self._normalized_response(
-                getattr(streamed, "final_output", None) or "".join(chunks)
-            )
-            grounding = self._audit(response, tool_outputs, question=message)
-            updated, message_id = self._appended(
-                messages, message, response, generated_visualizations
-            )
-            await self.sessions.write(key, updated)
+        yield {"type": "status", "stage": "validating"}
+        blocked = await self._gatekeeper_refusal(
+            Runner, bundle, message, deadline=deadline
+        )
+        if blocked is not None:
+            updated, message_id = await self._commit_exchange(key, message, blocked)
             await self._archive_exchange(principal, session_id, updated)
             yield self._done_event(
-                response,
-                self._request_type(generated_visualizations, executed_tools),
-                message_id,
-                generated_visualizations,
-                grounding,
+                blocked, "blocked", message_id, [], GroundingReport()
             )
+            return
+
+        yield {"type": "status", "stage": "analyzing"}
+        streamed = Runner.run_streamed(
+            starting_agent=bundle.head,
+            input=self._conversation_input(messages, message),
+            max_turns=self.settings.max_turns_head,
+        )
+        chunks: list[str] = []
+        async for event in streamed.stream_events():
+            if time.monotonic() > deadline:
+                # Checked per event rather than with wait_for: the iteration is the
+                # only place the stream yields control, and abandoning it here still
+                # lets the caller keep whatever text already arrived.
+                raise CampbellTimeoutError(
+                    "Campbell AI agotó el tiempo disponible para esta consulta",
+                    elapsed_seconds=self.settings.answer_timeout_seconds,
+                )
+            # Most of the wall clock is spent calling tools before any text
+            # exists, so surface which step is running or the user stares at a
+            # spinner for most of the answer.
+            step = self._tool_progress(event)
+            if step:
+                yield {"type": "status", "stage": "tool", "detail": step}
+                continue
+            text = self._delta_text(event)
+            if text:
+                chunks.append(text)
+                yield {"type": "delta", "text": text}
+
+        response = self._normalized_response(
+            getattr(streamed, "final_output", None) or "".join(chunks)
+        )
+        grounding = self._audit(response, tool_outputs, question=message)
+        updated, message_id = await self._commit_exchange(
+            key, message, response, generated_visualizations
+        )
+        await self._archive_exchange(principal, session_id, updated)
+        yield self._done_event(
+            response,
+            self._request_type(generated_visualizations, executed_tools),
+            message_id,
+            generated_visualizations,
+            grounding,
+        )
 
     # User-facing labels for the head agent's tools. Internal tool names are never
     # shown; anything unmapped falls back to a generic label.
@@ -1079,8 +1275,8 @@ class CampbellAgentRuntime:
             )
         return report
 
-    @staticmethod
     def _done_event(
+        self,
         response: str,
         request_type: str,
         message_id: str,
@@ -1094,4 +1290,5 @@ class CampbellAgentRuntime:
             "message_id": message_id,
             "visualizations": [item.model_dump(mode="json") for item in visualizations],
             "grounding": (grounding or GroundingReport()).as_dict(),
+            "temporal_context": self._temporal_context(),
         }

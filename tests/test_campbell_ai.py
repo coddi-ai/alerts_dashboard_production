@@ -10,12 +10,14 @@ import pytest
 
 from src.charts.theme import BRAND_ACCENT, BRAND_TITLE, STATUS_COLORS
 from src.campbell_ai.config import CampbellSettings
+from src.campbell_ai.agents_runtime import CampbellAgentRuntime
 from src.campbell_ai.data import DashboardDataRepository
 from src.campbell_ai.errors import CampbellAuthorizationError, CampbellDataError
 from src.campbell_ai.identity import resolve_dashboard_principal
 from src.campbell_ai.prompts import load_prompt
 from src.campbell_ai.security import deterministic_guard, requests_unsupported_capability
 from src.campbell_ai.service import CampbellAIService
+from src.campbell_ai.temporal import current_temporal_context
 from src.campbell_ai.visualization import DashboardVisualizationService
 
 
@@ -59,7 +61,37 @@ def _settings(data_root) -> CampbellSettings:
         redis_namespace="campbell:test",
         session_lock_timeout_seconds=300,
         streaming_enabled=False,
+        timezone="America/Santiago",
     )
+
+
+def test_temporal_context_uses_configured_timezone():
+    context = current_temporal_context("America/Santiago")
+
+    assert context["today"]
+    assert context["now"]
+    assert context["timezone"] == "America/Santiago"
+    assert context["weekday"] in {
+        "lunes",
+        "martes",
+        "miercoles",
+        "jueves",
+        "viernes",
+        "sabado",
+        "domingo",
+    }
+
+
+def test_agent_input_includes_today_context(tmp_path):
+    settings = _settings(tmp_path)
+    runtime = CampbellAgentRuntime(DashboardDataRepository(tmp_path), settings)
+
+    payload = runtime._conversation_input([], "Que paso hoy?")
+
+    assert payload[-1]["role"] == "user"
+    assert "Contexto temporal obligatorio" in payload[-1]["content"]
+    assert current_temporal_context(settings.timezone)["today"] in payload[-1]["content"]
+    assert "Consulta del usuario: Que paso hoy?" in payload[-1]["content"]
 
 
 def test_dashboard_identity_rejects_unauthorized_company(monkeypatch):
@@ -472,6 +504,39 @@ def test_alert_query_accepts_an_explicit_date_window(tmp_path):
     assert result["total"] == 1
     assert result["window"]["mode"] == "explicit"
     assert result["records"][0]["Timestamp"].startswith("2026-06-15")
+
+
+def test_alert_relative_window_uses_today_and_returns_latest_available_fallback(tmp_path):
+    today = pd.Timestamp(current_temporal_context("America/Santiago")["today"])
+    target = tmp_path / "alerts" / "golden" / "cda"
+    target.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "UnitId": "T_18",
+                "Timestamp": (today - pd.Timedelta(days=20)).isoformat(),
+                "sistema": "Motor",
+            },
+            {
+                "UnitId": "T_15",
+                "Timestamp": (today - pd.Timedelta(days=21)).isoformat(),
+                "sistema": "Frenos",
+            },
+        ]
+    ).to_csv(target / "consolidated_alerts.csv", index=False)
+
+    result = json.loads(
+        DashboardDataRepository(tmp_path, timezone="America/Santiago").query_alerts(
+            "CDA", days=7, limit=10
+        )
+    )
+
+    assert result["total"] == 0
+    assert result["window"]["mode"] == "relative"
+    assert result["window"]["today"] == today.date().isoformat()
+    assert result["latest_available_window"]["total"] == 2
+    assert result["latest_available_window"]["window"]["mode"] == "latest_available"
+    assert result["latest_available_window"]["by_system"] == {"Motor": 1, "Frenos": 1}
 
 
 def test_pareto_and_heatmap_are_generated_from_alert_dimensions(tmp_path):

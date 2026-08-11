@@ -8,6 +8,7 @@ from dash import Input, Output, State, html, dash_table
 from dash.exceptions import PreventUpdate
 import pandas as pd
 import json
+import re
 from pathlib import Path
 from config.settings import get_settings
 from src.utils.file_utils import safe_read_parquet
@@ -259,7 +260,7 @@ def register_reports_callbacks(app):
             df = df[df['machineName'] == familia]
             
             equipos = sorted(df['unitId'].dropna().unique().tolist())
-            options = [{'label': e.title(), 'value': e} for e in equipos]
+            options = [{'label': e.upper(), 'value': e} for e in equipos]
             
             # Check if navigation state provides an equipo
             if nav_state and nav_state.get('equipo'):
@@ -1188,7 +1189,7 @@ def create_report_identity_display(sample):
         dbc.Col([
             html.Div([
                 html.Small("Equipo", className="text-muted d-block"),
-                html.Strong(str(sample.get('unitId', 'N/A')).title())
+                html.Strong(str(sample.get('unitId', 'N/A')).upper())
             ])
         ], width=2),
         dbc.Col([
@@ -1505,28 +1506,74 @@ def create_evidence_tables(sample, limits, df):
 create_evidence_tables_only = create_evidence_tables
 
 
+def _parse_oil_ai_sections(ai_rec: str) -> dict:
+    """
+    Split an oil AI comment into Diagnóstico / Acción sections.
+
+    Oil comments always follow "Diagnóstico: ... \nAcción: ..." order/format
+    (unlike alerts' free-form mensaje_ia, which needs parse_ia_message_sections'
+    broader JSON/keyword handling).
+    """
+    sections = {'diagnostico': '', 'accion': ''}
+    if not ai_rec:
+        return sections
+
+    diag_match = re.search(
+        r'Diagn[oó]stico\s*:\s*(.+?)(?=Acci[oó]n\s*:|$)',
+        ai_rec, re.IGNORECASE | re.DOTALL
+    )
+    if diag_match:
+        sections['diagnostico'] = diag_match.group(1).strip()
+
+    accion_match = re.search(
+        r'Acci[oó]n\s*:\s*(.+?)$',
+        ai_rec, re.IGNORECASE | re.DOTALL
+    )
+    if accion_match:
+        sections['accion'] = accion_match.group(1).strip()
+
+    # Fallback: comment didn't match the expected labeled format — show it
+    # verbatim under Diagnóstico rather than silently dropping content.
+    if not sections['diagnostico'] and not sections['accion']:
+        sections['diagnostico'] = ai_rec.strip()
+
+    return sections
+
+
 def create_ai_diagnosis_and_action(sample):
     """
-    Create AI analysis with plain text display (OIL-R-04).
-    
+    Create AI analysis display, matching the "Análisis Inteligente" styling
+    used in Alertas → Detalle (dashboard/callbacks/alerts_callbacks.py::_alert_case_header):
+    the comment is split into labeled boxes rather than shown as one paragraph.
+
     Returns: (full_recommendation_element, empty_element)
     """
     ai_rec = sample.get('ai_recommendation', '')
-    
+
     # Handle NaN, None, or empty string
     if ai_rec is None or (isinstance(ai_rec, float) and pd.isna(ai_rec)) or ai_rec == '' or not isinstance(ai_rec, str):
         return html.P("No hay recomendación de IA disponible para este reporte.", className="text-muted"), html.Div()
-    
-    # Display full AI recommendation as plain text
-    recommendation = html.Div([
-        html.P(ai_rec, style={
-            'whiteSpace': 'pre-wrap',
-            'fontSize': '1rem',
-            'lineHeight': '1.6',
-            'color': '#333'
-        })
-    ])
-    
+
+    sections = _parse_oil_ai_sections(ai_rec)
+
+    def _section_box(title, icon, text):
+        return dbc.Col([
+            html.Div([
+                html.H6([html.I(className=f'fas {icon} me-2'), title], className='text-dark mb-2'),
+                html.P(text or 'No disponible', className='mb-0', style={
+                    'whiteSpace': 'pre-wrap',
+                    'fontSize': '1rem',
+                    'lineHeight': '1.6',
+                    'color': '#333'
+                })
+            ], className='p-3 bg-light rounded h-100')
+        ], md=6)
+
+    recommendation = dbc.Row([
+        _section_box('Diagnóstico', 'fa-search', sections['diagnostico']),
+        _section_box('Acción', 'fa-wrench', sections['accion']),
+    ], className='g-3')
+
     return recommendation, html.Div()
 
 

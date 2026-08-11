@@ -62,6 +62,35 @@ class MessageRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
 
 
+class SubmitMessageRequest(MessageRequest):
+    """A message to answer in the background.
+
+    `client_message_id` is chosen by the caller and is the idempotency key: resending
+    the same one for the same session attaches to the run already in progress instead of
+    starting a second one. Optional so an ad-hoc consumer need not care, but the
+    dashboard always sends it — it is what stops a refresh or a double click from
+    producing two answers to one question.
+    """
+
+    client_message_id: str | None = Field(default=None, max_length=100)
+
+
+class JobStatusRequest(BaseModel):
+    job_id: str = Field(min_length=1, max_length=100)
+
+
+class JobStatusResponse(BaseModel):
+    job_id: str
+    # queued | running | done | error | cancelled
+    status: str
+    # Time the answer has been running, so a consumer can decide when to offer the user
+    # a way out without having to track the wait itself.
+    elapsed_seconds: float = 0.0
+    session_id: str | None = None
+    result: MessageResponse | None = None
+    error: dict[str, Any] | None = None
+
+
 class SessionRequest(BaseModel):
     username: str = Field(min_length=1, max_length=100)
     company_id: str = Field(min_length=1, max_length=80)
@@ -77,12 +106,18 @@ class FeedbackRequest(SessionRequest):
 class ConversationsRequest(BaseModel):
     username: str = Field(min_length=1, max_length=100)
     company_id: str = Field(min_length=1, max_length=80)
+    # Re-read the stored conversations instead of the cached index. What the sidebar's
+    # refresh button asks for, and the only way a deletion made directly in the bucket
+    # shows up here. Off by default: every page load lists conversations, and that path
+    # should stay a single cheap read.
+    refresh: bool = False
 
 
 class InitializeResponse(BaseModel):
     session_id: str
     company_id: str
     username: str
+    temporal_context: dict[str, str] = Field(default_factory=dict)
     data_ready: bool
     datasets: dict[str, Any]
     # Which analyses this client's data supports. Surfaced at initialization so a
@@ -98,6 +133,7 @@ class MessageResponse(BaseModel):
     message_id: str
     session_id: str
     company_id: str
+    temporal_context: dict[str, str] = Field(default_factory=dict)
     request_type: str = "agents"
     visualizations: list[VisualizationArtifact] = Field(default_factory=list)
     # Full conversation after the exchange, so a consumer can render the thread without
@@ -150,3 +186,4 @@ class CapabilitiesResponse(BaseModel):
     conversation_history: bool = False
     # Current admission-control load. Counts only, no identities.
     concurrency: dict[str, Any] = Field(default_factory=dict)
+    temporal_context: dict[str, str] = Field(default_factory=dict)

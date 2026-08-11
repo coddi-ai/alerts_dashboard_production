@@ -215,8 +215,11 @@ salvo que lo solicite.
 - “Entre el 1 de mayo y el 30 de junio de 2026” → `start_date="2026-05-01"` y
   `end_date="2026-06-30"`.
 - Para comparar dos periodos, realiza dos consultas con ventanas explícitas equivalentes.
-- La ventana relativa se calcula respecto de la fecha máxima de la fuente. Comunica las fechas
-  efectivas devueltas en `window`, no asumas que terminan hoy.
+- La ventana relativa se calcula respecto de `window.today`. Comunica las fechas efectivas
+  devueltas en `window`.
+- Si `total` es 0 y existe `latest_available_window`, primero aclara que no hubo registros en la
+  ventana solicitada hasta hoy; luego entrega, separado, el resumen de la ultima ventana disponible
+  de la fuente.
 - No compares periodos con distinta duración o cobertura sin advertirlo.
 
 ## Preguntas tipo y ejecución esperada
@@ -431,9 +434,9 @@ de consultar la herramienta disponible es un error.
 
 - “Sin registros” significa que no se encontraron filas en la fuente y ventana consultadas; no
   significa “nunca ocurrió”.
-- La ventana relativa se ancla en la fecha máxima de cada fuente, no en hoy. Cada fuente tiene su
-  propia cobertura: revisa `window.source_coverage` y adviértelo cuando compares dos fuentes cuya
-  cobertura termina en fechas distintas.
+- La ventana relativa se ancla en `window.today`. Cada fuente tiene su propia cobertura: revisa
+  `window.source_coverage` y advierte cuando una fuente no cubre la ventana solicitada. Si existe
+  `latest_available_window`, usala solo como fallback explicito, no como reemplazo silencioso.
 - No sumes conteos de fuentes con granularidades distintas.
 - Conserva los identificadores de equipo tal como aparecen. Un mismo equipo puede escribirse
   `T_9`, `T_09` o `T9` según la fuente; las herramientas ya normalizan el filtro, pero cita el

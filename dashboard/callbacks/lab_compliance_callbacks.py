@@ -198,11 +198,17 @@ def update_weekly_chart(start_date, end_date, client, active_tab):
 
         fig.add_trace(go.Bar(
             x=weekly['week'], y=weekly['transit'],
-            name='Tiempo de Tránsito', marker_color='#0d6efd'
+            name='Tiempo de Tránsito', marker_color='#0d6efd',
+            text=weekly['transit'], texttemplate='%{text:.1f}',
+            textposition='inside', insidetextanchor='end',
+            textfont=dict(color='white', size=10)
         ))
         fig.add_trace(go.Bar(
             x=weekly['week'], y=weekly['lab'],
-            name='Tiempo de Laboratorio', marker_color='#6610f2'
+            name='Tiempo de Laboratorio', marker_color='#6610f2',
+            text=weekly['lab'], texttemplate='%{text:.1f}',
+            textposition='inside', insidetextanchor='end',
+            textfont=dict(color='white', size=10)
         ))
         title = "Comparación Semanal: Tiempo de Tránsito vs Tiempo de Laboratorio"
     else:
@@ -212,9 +218,21 @@ def update_weekly_chart(start_date, end_date, client, active_tab):
 
         fig.add_trace(go.Bar(
             x=weekly['week'], y=weekly['diagnostic'],
-            name='Tiempo Diagnóstico', marker_color='#fd7e14'
+            name='Tiempo Diagnóstico', marker_color='#fd7e14',
+            text=weekly['diagnostic'], texttemplate='%{text:.1f}',
+            textposition='inside', insidetextanchor='end',
+            textfont=dict(color='white', size=10)
         ))
         title = "Evolución Semanal: Tiempo Diagnóstico (reportDate - sampleDate)"
+
+    threshold_days = get_settings().get_lab_compliance_threshold_days(client)
+    fig.add_hline(
+        y=threshold_days,
+        line=dict(color='#dc3545', width=1.5, dash='dash'),
+        annotation_text=f"Umbral de cumplimiento ({threshold_days:g} días)",
+        annotation_position="top left",
+        annotation_font=dict(size=10, color='#dc3545'),
+    )
 
     fig.update_layout(
         barmode='group',
@@ -271,8 +289,21 @@ def update_unit_chart(start_date, end_date, client, active_tab):
     fig = go.Figure()
     fig.add_trace(go.Bar(
         x=by_unit.index, y=by_unit.values,
-        marker_color='#0d6efd'
+        marker_color='#0d6efd',
+        text=by_unit.values, texttemplate='%{text:.1f}',
+        textposition='inside', insidetextanchor='end',
+        textfont=dict(color='white', size=10)
     ))
+
+    threshold_days = get_settings().get_lab_compliance_threshold_days(client)
+    fig.add_hline(
+        y=threshold_days,
+        line=dict(color='#dc3545', width=1.5, dash='dash'),
+        annotation_text=f"Umbral de cumplimiento ({threshold_days:g} días)",
+        annotation_position="top left",
+        annotation_font=dict(size=10, color='#dc3545'),
+    )
+
     fig.update_layout(
         xaxis_title="Unidad",
         yaxis_title=ylabel,

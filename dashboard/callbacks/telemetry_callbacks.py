@@ -163,6 +163,16 @@ def _priority_table(rows: list[dict]):
     )
 
 
+# Status color conventions mirrored from the oil fleet heatmap
+# (dashboard/callbacks/machines_callbacks.py: _STATUS_BG/_STATUS_FG for
+# component-level cells, _MACHINE_STATUS_BG/_MACHINE_STATUS_FG for the
+# machine-level summary column) so both general tables read the same way.
+_SYSTEM_STATUS_BG = {'Normal': '#d4edda', 'Alerta': '#fff3cd', 'Anormal': '#f8d7da', 'InsufficientData': '#eef0f2'}
+_SYSTEM_STATUS_FG = {'Normal': '#155724', 'Alerta': '#856404', 'Anormal': '#721c24', 'InsufficientData': '#657174'}
+_OVERALL_STATUS_BG = {'Normal': '#28a745', 'Alerta': '#ffc107', 'Anormal': '#dc3545', 'InsufficientData': '#6c757d'}
+_OVERALL_STATUS_FG = {'Normal': '#ffffff', 'Alerta': '#000000', 'Anormal': '#ffffff', 'InsufficientData': '#ffffff'}
+
+
 def _fleet_status_table(rows: list[dict], systems: list[str]):
     """Render one fleet matrix with a system action tooltip per cell."""
     if not rows:
@@ -182,24 +192,31 @@ def _fleet_status_table(rows: list[dict], systems: list[str]):
             }
             for system in systems
         })
-    conditional = [
-        {"if": {"column_id": "unit"}, "textAlign": "left", "fontWeight": "600"},
+    cell_conditional = [
+        {"if": {"column_id": "unit"}, "textAlign": "left", "fontWeight": "600", "minWidth": "80px"},
         {"if": {"column_id": "model"}, "textAlign": "left"},
+        {"if": {"column_id": "overall_status"}, "minWidth": "110px"},
     ]
-    colors = {
-        "Normal": ("#e8f5e9", "#247a3d"),
-        "Alerta": ("#fff4d6", "#8a5a00"),
-        "Anormal": ("#fde8e8", "#b42318"),
-        "InsufficientData": ("#eef0f2", "#657174"),
-    }
-    for column_id in [*systems, "overall_status"]:
-        for state, (background, color) in colors.items():
-            conditional.append({
+    data_conditional = []
+    for column_id in systems:
+        for state, background in _SYSTEM_STATUS_BG.items():
+            data_conditional.append({
                 "if": {"filter_query": f'{{{column_id}}} = "{state}"', "column_id": column_id},
                 "backgroundColor": background,
-                "color": color,
-                "fontWeight": "600",
+                "color": _SYSTEM_STATUS_FG[state],
+                "fontWeight": "bold",
+                "textAlign": "center",
             })
+    for state, background in _OVERALL_STATUS_BG.items():
+        data_conditional.append({
+            "if": {"filter_query": f'{{overall_status}} = "{state}"', "column_id": "overall_status"},
+            "backgroundColor": background,
+            "color": _OVERALL_STATUS_FG[state],
+            "fontWeight": "bold",
+            "textAlign": "center",
+            "fontSize": "13px",
+            "borderLeft": f"3px solid {background}",
+        })
     return dash_table.DataTable(
         id="telemetry-fleet-status-table",
         columns=columns,
@@ -208,17 +225,17 @@ def _fleet_status_table(rows: list[dict], systems: list[str]):
         cell_selectable=True,
         tooltip_data=tooltip_data,
         tooltip_duration=None,
+        css=[{'selector': '.dash-table-tooltip', 'rule': 'max-width: 400px; white-space: normal;'}],
         sort_action="native",
         page_action="native",
-        page_size=15,
+        page_size=25,
         style_table={"overflowX": "auto"},
-        style_header={"backgroundColor": "#34495e", "color": "white", "fontWeight": "bold", "textAlign": "center"},
-        style_cell={"padding": "9px", "fontSize": "13px", "whiteSpace": "normal", "height": "auto", "textAlign": "center", "minWidth": "90px"},
-        style_cell_conditional=conditional,
-        style_data_conditional=[
-            {"if": {"row_index": "odd"}, "backgroundColor": "#f8fafc"},
-            {"if": {"state": "active"}, "border": "2px solid #2f80ed"},
-        ],
+        style_header={'backgroundColor': '#343a40', 'color': 'white', 'fontWeight': 'bold',
+                      'textAlign': 'center', 'fontSize': '11px'},
+        style_cell={'textAlign': 'center', 'padding': '6px 10px', 'fontSize': '11px',
+                    'minWidth': '75px', 'whiteSpace': 'nowrap'},
+        style_cell_conditional=cell_conditional,
+        style_data_conditional=data_conditional,
     )
 
 

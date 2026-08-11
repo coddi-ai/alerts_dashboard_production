@@ -57,7 +57,8 @@ def register_auth_callbacks(app):
         
         if user:
             logger.info(f"Login successful for user: {username}")
-            log_authentication_event(username)
+            user_clients = user.get('clients') or []
+            log_authentication_event(username, client_id=user_clients[0] if user_clients else None)
             flask_session["dashboard_user"] = username
             return add_identity_proof(user), "", False
         else:

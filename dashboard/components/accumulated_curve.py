@@ -245,7 +245,12 @@ def build_reference_band(df_acum, component="motor", k=K_SIGMA, n_grid=N_GRID):
     if not np.isfinite(h_max) or h_max <= 0:
         return None
 
-    grid = np.linspace(0, float(h_max), n_grid)
+    # Redondear hacia arriba al millar mas cercano para que el fondo de
+    # zonas (Normal/Alerta/Anormal) termine en un numero limpio en vez de
+    # cortar en un percentil arbitrario (p.ej. 23500 -> 24000).
+    h_max = float(np.ceil(h_max / 1000.0) * 1000.0)
+
+    grid = np.linspace(0, h_max, n_grid)
     paso = grid[1] - grid[0]
 
     # Tasa de acumulacion por hora de cada curva, interpolada sobre la grilla

@@ -13,6 +13,9 @@ from dashboard.auth import resolve_authenticated_username
 from dashboard.campbell_ai.client import CampbellAPIClient, CampbellAPIClientError
 from dashboard.campbell_ai.layout import (
     ALERT_SUGGESTIONS,
+    CAMPBELL_AI_VERSION,
+    KEEP_WAITING_EXTENSION_SECONDS,
+    SLOW_ANSWER_SECONDS,
     render_chat_history,
     render_conversation_list,
     service_error_content,
@@ -140,10 +143,149 @@ def _status_label(exc: CampbellAPIClientError) -> str:
     return labels.get(getattr(exc, "kind", ""), "No disponible")
 
 
+def _state_stamp(username: str | None) -> dict:
+    """Identity of whoever owns this tab's stored conversation, plus the build.
+
+    `sessionStorage` is scoped to the tab and to nothing else, so it survives both a
+    logout and a redeploy. Both need to invalidate it, for different reasons, and one
+    comparison covers both.
+    """
+    return {"user": str(username or ""), "version": CAMPBELL_AI_VERSION}
+
+
+def _stale_browser_state(stamp, username: str | None) -> str | None:
+    """Why the stored conversation cannot be trusted, or None when it can.
+
+    Three real failures, all of them reported from production:
+
+    - **a different user.** Nothing scoped this state to an account, so logging out and
+      back in as someone else left the previous user's thread in the tab. The dashboard
+      would even re-render it, because when the API has no history for a session id the
+      view falls back to the copy the browser is holding.
+    - **a different build.** A tab left open across a deploy keeps feeding state written
+      by the old code into the new code. The stores gained fields over this work
+      (`client_message_id`, `job_id`); older values flowing into newer callbacks is a
+      whole class of bug that is miserable to reproduce.
+    - **no stamp at all**, which is any tab that predates this mechanism.
+
+    Returning a reason rather than a bool so the log says which of the three it was.
+    """
+    current = _state_stamp(username)
+    if not isinstance(stamp, dict):
+        return "sin sello previo"
+    if stamp.get("user") != current["user"]:
+        return "cambio de usuario"
+    if stamp.get("version") != current["version"]:
+        return f"cambio de version ({stamp.get('version')} -> {current['version']})"
+    return None
+
+
 def _stored_session_company(session_company) -> str | None:
     """Company the session-storage conversation belongs to."""
     normalized = str(session_company or "").strip().lower()
     return normalized or None
+
+
+# Status-badge text for a background answer that ended badly.
+_JOB_ERROR_LABELS = {
+    "busy": "Servicio ocupado",
+    "timeout": "Tiempo excedido",
+    "forbidden": "Sin acceso",
+    "unavailable": "Datos no disponibles",
+    "not_configured": "Sin configurar",
+    "server_error": "Error del servicio",
+}
+
+# What the user can actually do about each. A timeout is the one worth spelling out:
+# repeating the identical question will hit the same budget, so the advice is to make
+# it smaller rather than to try again.
+_JOB_ERROR_GUIDANCE = {
+    "busy": (
+        "El asistente alcanzó su límite de consultas simultáneas. Espera unos segundos "
+        "y reintenta: tu consulta se conservó."
+    ),
+    "timeout": (
+        "La consulta superó el tiempo máximo. Acota el periodo o divídela en partes; "
+        "si la conversación es muy larga, inicia una nueva para reducir el contexto."
+    ),
+    "unavailable": (
+        "El servicio respondió pero no pudo atender la consulta, normalmente por datos "
+        "faltantes para esta empresa."
+    ),
+    "server_error": (
+        "El servicio falló procesando la consulta. Reintenta; si persiste, avisa al "
+        "equipo de plataforma."
+    ),
+}
+
+
+def _answers(history: list[dict] | None, question: str) -> bool:
+    """Whether the thread already contains an answer to `question`.
+
+    Used to decide what a lost job actually means. The messages arrive as user/assistant
+    pairs, so the question having a message after it is what makes it answered.
+    """
+    messages = [
+        message
+        for message in (history or [])
+        if not str(message.get("message_id", "")).startswith("pending-")
+    ]
+    for index, message in enumerate(messages):
+        if message.get("role") == "user" and str(message.get("content", "")).strip() == (
+            question.strip()
+        ):
+            if index + 1 < len(messages) and messages[index + 1].get("role") == "assistant":
+                return True
+    return False
+
+
+def _recover_expired_job(client, username, company_id, job, history, question):
+    """Decide what a forgotten job means by reading the conversation.
+
+    A job the service no longer knows about has two very different explanations, and
+    guessing wrong is what produced the original complaint. Either it finished and aged
+    out — in which case the answer is in the thread and showing it is all that is needed
+    — or it was lost with the question unanswered, and the user must be told so plainly
+    rather than left looking at a bubble that will never be replied to.
+    """
+    try:
+        restored = client.history(
+            username, company_id, str(job.get("session_id") or "")
+        ).get("messages", [])
+    except CampbellAPIClientError as exc:
+        logger.warning("Campbell AI history recovery failed (%s): %s", exc.kind, exc)
+        restored = []
+
+    if _answers(restored, question):
+        logger.info("Campbell AI recovered an answer from history for an expired job")
+        return (
+            restored,
+            no_update,
+            f"Listo · {company_id.upper()}" if company_id else "Listo",
+            "success",
+            None,
+            None,
+            None,
+            False,
+            "",
+        )
+    return (
+        restored or _strip_pending_messages(history),
+        no_update,
+        "Consulta perdida",
+        "warning",
+        _failure_state(
+            "expired",
+            "El asistente perdió el seguimiento de esta consulta",
+            "No quedó registro de una respuesta. Vuelve a enviarla; se conservó abajo.",
+            retryable=True,
+            question=question,
+        ),
+        None,
+        None,
+        False,
+        "",
+    )
 
 
 # Kinds where sending another message cannot possibly work, so the composer is
@@ -171,6 +313,7 @@ def register_campbell_ai_callbacks(app: dash.Dash) -> None:
         Output("campbell-ai-company-store", "data"),
         Output("campbell-ai-pending-message-store", "data"),
         Output("campbell-ai-session-company", "data"),
+        Output("campbell-ai-state-stamp", "data"),
         Input("client-selector", "value"),
         Input("campbell-ai-send", "n_clicks"),
         Input("campbell-ai-input", "n_submit"),
@@ -189,6 +332,7 @@ def register_campbell_ai_callbacks(app: dash.Dash) -> None:
         State("campbell-ai-company-store", "data"),
         State("campbell-ai-failure-store", "data"),
         State("campbell-ai-session-company", "data"),
+        State("campbell-ai-state-stamp", "data"),
     )
     def synchronize_chat(
         selected_client,
@@ -203,9 +347,21 @@ def register_campbell_ai_callbacks(app: dash.Dash) -> None:
         session_company,
         failure,
         stored_session_company,
+        state_stamp,
     ):
         username = _current_username(session_company)
         company_id = str(selected_client or "").strip().lower()
+
+        # Drop a conversation this tab has no business showing, before anything reads
+        # it. Discarding rather than clearing the stores separately: this callback
+        # already owns the session, history and company outputs, so overwriting them
+        # below is enough and there is no second callback to race.
+        stale = _stale_browser_state(state_stamp, username)
+        if stale and (session_id or history):
+            logger.info("Campbell AI descarta el estado del navegador: %s", stale)
+        if stale:
+            session_id, history, stored_session_company = None, [], None
+        stamp = _state_stamp(username)
         if not username:
             return (
                 session_id,
@@ -221,6 +377,7 @@ def register_campbell_ai_callbacks(app: dash.Dash) -> None:
                 session_company,
                 None,
                 stored_session_company,
+                stamp,
             )
         if not company_id:
             return (
@@ -237,6 +394,7 @@ def register_campbell_ai_callbacks(app: dash.Dash) -> None:
                 _updated_company_state(session_company, None),
                 None,
                 None,
+                stamp,
             )
 
         client = CampbellAPIClient.from_env()
@@ -266,9 +424,13 @@ def register_campbell_ai_callbacks(app: dash.Dash) -> None:
                         "message": saved,
                         "company_id": company_id,
                         "session_id": session_id,
+                        # A fresh key: the previous attempt is over, and reusing its key
+                        # would attach this retry to a job that already failed.
+                        "client_message_id": uuid4().hex,
                         "stream": bool(streaming_enabled() and session_id),
                     },
                     company_id,
+                    stamp,
                 )
         try:
             company_changed = bool(
@@ -290,6 +452,7 @@ def register_campbell_ai_callbacks(app: dash.Dash) -> None:
                     _updated_company_state(session_company, company_id),
                     None,
                     company_id,
+                    stamp,
                 )
 
             normalized_message = _resolve_outgoing_message(triggered_id, message)
@@ -309,6 +472,7 @@ def register_campbell_ai_callbacks(app: dash.Dash) -> None:
                         _updated_company_state(session_company, company_id),
                         None,
                         company_id,
+                        stamp,
                     )
                 if not session_id or company_changed:
                     session_id = None
@@ -327,11 +491,16 @@ def register_campbell_ai_callbacks(app: dash.Dash) -> None:
                         "message": normalized_message,
                         "company_id": company_id,
                         "session_id": session_id,
+                        # Minted here, at the one place a question enters the system, so
+                        # everything downstream that resubmits it carries the same key
+                        # and attaches to one run instead of starting another.
+                        "client_message_id": uuid4().hex,
                         # Streaming needs an existing session id, because the browser
                         # cannot create one; the first message of a thread stays blocking.
                         "stream": bool(streaming_enabled() and session_id),
                     },
                     company_id,
+                    stamp,
                 )
 
 
@@ -363,6 +532,7 @@ def register_campbell_ai_callbacks(app: dash.Dash) -> None:
                 _updated_company_state(session_company, company_id),
                 None,
                 company_id,
+                stamp,
             )
         except CampbellAPIClientError as exc:
             logger.warning(
@@ -380,6 +550,7 @@ def register_campbell_ai_callbacks(app: dash.Dash) -> None:
                 session_company,
                 None,
                 stored_session_company,
+                stamp,
             )
         except Exception:
             logger.exception("Unexpected Campbell AI Dash callback error")
@@ -398,6 +569,7 @@ def register_campbell_ai_callbacks(app: dash.Dash) -> None:
                 session_company,
                 None,
                 stored_session_company,
+                stamp,
             )
 
     @app.callback(
@@ -409,6 +581,7 @@ def register_campbell_ai_callbacks(app: dash.Dash) -> None:
         Output("campbell-ai-pending-message-store", "data", allow_duplicate=True),
         Output("campbell-ai-company-store", "data", allow_duplicate=True),
         Output("campbell-ai-session-company", "data", allow_duplicate=True),
+        Output("campbell-ai-job-store", "data", allow_duplicate=True),
         Input("campbell-ai-pending-message-store", "data"),
         State("campbell-ai-session-store", "data"),
         State("campbell-ai-history-store", "data"),
@@ -416,11 +589,27 @@ def register_campbell_ai_callbacks(app: dash.Dash) -> None:
         prevent_initial_call=True,
     )
     def process_pending_message(pending, session_id, history, session_company):
+        """Hand the question to the API as a background job and return immediately.
+
+        This callback used to block for the whole agent run. That was the freeze: Dash
+        holds a worker thread for the duration, the composer it disabled is only
+        re-enabled when the callback returns, and if the HTTP request died in between —
+        a proxy idle timeout, a reload, a network blip — it never returned at all. The
+        run carried on regardless, persisted its answer, and the user found the question
+        already answered the next time the page loaded.
+
+        Now the only thing that happens here is a submit, which takes milliseconds. The
+        answer is collected by `poll_pending_job`.
+        """
         if not isinstance(pending, dict) or not pending.get("message"):
             raise PreventUpdate
         if pending.get("stream"):
             # The browser is streaming this one; finalize_stream re-dispatches here
             # with stream=False if the stream fails.
+            raise PreventUpdate
+        if pending.get("job_id"):
+            # Already submitted; the poll owns it from here. Without this guard the
+            # store update we make below would re-enter this callback and submit again.
             raise PreventUpdate
 
         company_id = str(
@@ -442,6 +631,7 @@ def register_campbell_ai_callbacks(app: dash.Dash) -> None:
                 None,
                 session_company,
                 no_update,
+                None,
             )
         if not company_id:
             return (
@@ -457,48 +647,62 @@ def register_campbell_ai_callbacks(app: dash.Dash) -> None:
                 None,
                 _updated_company_state(session_company, None),
                 None,
+                None,
             )
 
         client = CampbellAPIClient.from_env()
+        question = str(pending["message"])
         try:
             active_session_id = str(pending.get("session_id") or session_id or "").strip()
             # Initialization validates data availability and mints a session id; once a
-            # session exists, /message alone is enough and avoids two extra round trips.
+            # session exists, /message/submit alone is enough.
             if not active_session_id:
                 active_session_id = client.initialize(username, company_id)["session_id"]
-            result = client.send_message(
-                username,
-                company_id,
-                active_session_id,
-                str(pending["message"]),
+            # Reuse the id the dispatcher minted rather than making a new one: a retry
+            # of the same question carries the same key, so the API attaches it to the
+            # run already in progress instead of answering it twice.
+            client_message_id = str(pending.get("client_message_id") or uuid4().hex)
+            submitted = client.submit_message(
+                username, company_id, active_session_id, question, client_message_id
             )
-            updated_history = result.get("messages")
-            if not updated_history:
-                updated_history = client.history(
-                    username, company_id, result["session_id"]
-                ).get("messages", [])
             return (
-                result["session_id"],
-                updated_history,
-                f"Listo · {company_id.upper()}",
-                "success",
+                submitted.get("session_id") or active_session_id,
+                no_update,
+                "Pensando...",
+                "info",
                 None,
-                None,
+                {
+                    **pending,
+                    "session_id": active_session_id,
+                    "client_message_id": client_message_id,
+                    "job_id": submitted["job_id"],
+                },
                 _updated_company_state(session_company, company_id),
                 company_id,
+                {
+                    "job_id": submitted["job_id"],
+                    "session_id": active_session_id,
+                    "company_id": company_id,
+                    "question": question,
+                    "client_message_id": client_message_id,
+                    # Stamped so a tab that changes hands does not poll — or display —
+                    # an answer belonging to whoever was logged in before.
+                    "username": username,
+                },
             )
         except CampbellAPIClientError as exc:
-            logger.warning("Campbell AI message failed (%s): %s", exc.kind, exc)
+            logger.warning("Campbell AI submit failed (%s): %s", exc.kind, exc)
             return (
                 session_id,
                 # Drop the optimistic bubble: the exchange did not happen.
                 _strip_pending_messages(history),
                 _status_label(exc),
                 "danger",
-                _failure_from_client_error(exc, question=str(pending.get("message") or "")),
+                _failure_from_client_error(exc, question=question),
                 None,
                 session_company,
                 no_update,
+                None,
             )
         except Exception:
             logger.exception("Unexpected Campbell AI pending callback error")
@@ -512,12 +716,269 @@ def register_campbell_ai_callbacks(app: dash.Dash) -> None:
                     "Ocurrió un error inesperado al procesar la consulta",
                     "Reintenta. Si persiste, avisa al equipo de plataforma.",
                     retryable=True,
-                    question=str(pending.get("message") or ""),
+                    question=question,
                 ),
                 None,
                 session_company,
                 no_update,
+                None,
             )
+
+    # --- Background answers ------------------------------------------------------
+    # A question is submitted, then polled. The job lives on the server, so none of
+    # this depends on a single HTTP request surviving for the length of an answer.
+
+    @app.callback(
+        Output("campbell-ai-job-poll", "disabled"),
+        Input("campbell-ai-job-store", "data"),
+    )
+    def toggle_job_poll(job):
+        """Poll only while an answer is outstanding.
+
+        Note the absent `prevent_initial_call`: this must run on mount. The job store is
+        session-scoped, so a page that reloaded mid-question starts with a job id
+        already in it, and polling has to resume on its own for the answer to be
+        collected rather than abandoned.
+        """
+        return not (isinstance(job, dict) and job.get("job_id"))
+
+    @app.callback(
+        Output("campbell-ai-history-store", "data", allow_duplicate=True),
+        Output("campbell-ai-session-store", "data", allow_duplicate=True),
+        Output("campbell-ai-status", "children", allow_duplicate=True),
+        Output("campbell-ai-status", "color", allow_duplicate=True),
+        Output("campbell-ai-failure-store", "data", allow_duplicate=True),
+        Output("campbell-ai-pending-message-store", "data", allow_duplicate=True),
+        Output("campbell-ai-job-store", "data", allow_duplicate=True),
+        Output("campbell-ai-waiting", "is_open"),
+        Output("campbell-ai-waiting-body", "children"),
+        Input("campbell-ai-job-poll", "n_intervals"),
+        State("campbell-ai-job-store", "data"),
+        State("campbell-ai-history-store", "data"),
+        State("campbell-ai-company-store", "data"),
+        State("campbell-ai-waiting-ack", "data"),
+        prevent_initial_call=True,
+    )
+    def poll_pending_job(_ticks, job, history, session_company, waiting_ack):
+        """Collect a background answer, or explain why it is still running.
+
+        Every branch here ends in a definite state — answered, failed, or still running
+        with a visible way out. There is no path that leaves the composer disabled with
+        nothing happening, which is what the old blocking callback did whenever its
+        request died.
+        """
+        if not (isinstance(job, dict) and job.get("job_id")):
+            raise PreventUpdate
+
+        job_id = str(job["job_id"])
+        question = str(job.get("question") or "")
+        company_id = str(
+            job.get("company_id") or _company_id_from_state(session_company) or ""
+        ).strip().lower()
+        username = _current_username(session_company)
+
+        # The job handle lives in sessionStorage so a reload can resume it, which also
+        # means it outlives a logout. Polling someone else's job would at best show
+        # their answer in this tab; drop it instead. `synchronize_chat` clears the rest
+        # of the stale state, but it cannot own this store as well (Dash forbids a
+        # duplicate output on a callback that must run on mount), so the check lives
+        # here where the job is actually used.
+        owner = job.get("username")
+        if owner and username and owner != username:
+            logger.info("Campbell AI descarta un job de otro usuario tras el cambio")
+            return (
+                no_update, no_update, no_update, no_update,
+                None, None, None, False, "",
+            )
+
+        client = CampbellAPIClient.from_env()
+
+        try:
+            status = client.message_status(job_id)
+        except CampbellAPIClientError as exc:
+            if exc.kind == "expired":
+                # The service no longer knows this job. It may well have answered before
+                # forgetting it, so read the conversation before concluding anything —
+                # this is the exact case that used to surface as "it was answered all
+                # along" only after a manual refresh.
+                return _recover_expired_job(
+                    client, username, company_id, job, history, question
+                )
+            logger.warning("Campbell AI job poll failed (%s): %s", exc.kind, exc)
+            return (
+                _strip_pending_messages(history),
+                no_update,
+                _status_label(exc),
+                "danger",
+                _failure_from_client_error(exc, question=question),
+                None,
+                None,
+                False,
+                "",
+            )
+
+        state = str(status.get("status") or "")
+        elapsed = float(status.get("elapsed_seconds") or 0.0)
+
+        if state in {"queued", "running"}:
+            # Still working. Show the way out once the wait becomes unreasonable, and
+            # again each time an extension the user asked for runs out.
+            threshold = SLOW_ANSWER_SECONDS + float(waiting_ack or 0)
+            show_panel = elapsed >= threshold
+            return (
+                no_update,
+                no_update,
+                f"Pensando… {int(elapsed)}s",
+                "info",
+                no_update,
+                no_update,
+                no_update,
+                show_panel,
+                f"La consulta lleva {int(elapsed)} segundos" if show_panel else "",
+            )
+
+        if state == "done":
+            result = status.get("result") or {}
+            messages = result.get("messages") or []
+            if not messages:
+                # Defensive: the answer exists, so read the thread rather than dropping
+                # the optimistic bubble and pretending nothing happened.
+                try:
+                    messages = client.history(
+                        username, company_id, result.get("session_id") or job["session_id"]
+                    ).get("messages", [])
+                except CampbellAPIClientError:
+                    messages = _strip_pending_messages(history)
+            return (
+                messages,
+                result.get("session_id") or job.get("session_id") or no_update,
+                f"Listo · {company_id.upper()}" if company_id else "Listo",
+                "success",
+                None,
+                None,
+                None,
+                False,
+                "",
+            )
+
+        if state == "cancelled":
+            return (
+                _strip_pending_messages(history),
+                no_update,
+                "Cancelada",
+                "secondary",
+                _failure_state(
+                    "cancelled",
+                    "Cancelaste la consulta",
+                    "Puedes reformularla de forma más acotada y volver a enviarla.",
+                    retryable=True,
+                    question=question,
+                ),
+                None,
+                None,
+                False,
+                "",
+            )
+
+        # state == "error"
+        error = status.get("error") or {}
+        kind = str(error.get("kind") or "server_error")
+        return (
+            _strip_pending_messages(history),
+            no_update,
+            _JOB_ERROR_LABELS.get(kind, "Error del servicio"),
+            "danger",
+            _failure_state(
+                kind,
+                str(error.get("detail") or "Campbell AI no pudo completar la consulta"),
+                _JOB_ERROR_GUIDANCE.get(kind, ""),
+                retryable=bool(error.get("retryable", True)),
+                question=question,
+            ),
+            None,
+            None,
+            False,
+            "",
+        )
+
+    @app.callback(
+        Output("campbell-ai-waiting-ack", "data"),
+        Input("campbell-ai-keep-waiting", "n_clicks"),
+        Input("campbell-ai-pending-message-store", "data"),
+        State("campbell-ai-waiting-ack", "data"),
+        prevent_initial_call=True,
+    )
+    def extend_the_wait(_clicks, pending, waiting_ack):
+        """"Seguir esperando" buys another stretch before the panel returns.
+
+        Reset whenever a new question starts, so the extension a user granted one slow
+        answer does not silently apply to the next.
+        """
+        if ctx.triggered_id == "campbell-ai-pending-message-store":
+            return 0
+        return float(waiting_ack or 0) + KEEP_WAITING_EXTENSION_SECONDS
+
+    # Cancelling must also tear down a live SSE stream, or the browser keeps consuming
+    # a stream for an answer the user has already walked away from.
+    app.clientside_callback(
+        "function(_clicks) { return window.dash_clientside.campbellAiStream.stop(); }",
+        Output("campbell-ai-stream-store", "data", allow_duplicate=True),
+        Input("campbell-ai-cancel-job", "n_clicks"),
+        prevent_initial_call=True,
+    )
+
+    @app.callback(
+        Output("campbell-ai-job-store", "data", allow_duplicate=True),
+        Output("campbell-ai-pending-message-store", "data", allow_duplicate=True),
+        Output("campbell-ai-history-store", "data", allow_duplicate=True),
+        Output("campbell-ai-status", "children", allow_duplicate=True),
+        Output("campbell-ai-status", "color", allow_duplicate=True),
+        Output("campbell-ai-failure-store", "data", allow_duplicate=True),
+        Output("campbell-ai-waiting", "is_open", allow_duplicate=True),
+        Output("campbell-ai-input", "value", allow_duplicate=True),
+        Input("campbell-ai-cancel-job", "n_clicks"),
+        State("campbell-ai-job-store", "data"),
+        State("campbell-ai-history-store", "data"),
+        State("campbell-ai-pending-message-store", "data"),
+        prevent_initial_call=True,
+    )
+    def cancel_pending_answer(_clicks, job, history, pending):
+        """Abandon a running answer and give the user their question back.
+
+        Covers both paths: a background job is cancelled on the server, and a streamed
+        answer is torn down by the clientside callback above. Cancelling server-side
+        matters as much as clearing the view — the run holds a concurrency slot, and
+        with five users sharing ten of them, an answer nobody will ever read is a slot
+        taken from someone still waiting.
+
+        The question goes back into the composer rather than being discarded, since the
+        usual reason to cancel is wanting to narrow it and ask again.
+        """
+        has_job = isinstance(job, dict) and bool(job.get("job_id"))
+        has_stream = isinstance(pending, dict) and bool(pending.get("message"))
+        if not (has_job or has_stream):
+            raise PreventUpdate
+
+        question = str(
+            (job or {}).get("question") or (pending or {}).get("message") or ""
+        )
+        if has_job:
+            try:
+                CampbellAPIClient.from_env().cancel_message(str(job["job_id"]))
+            except CampbellAPIClientError as exc:
+                # The view still clears: the user asked to stop waiting, and refusing to
+                # release the UI because the cancel call failed helps nobody.
+                logger.warning("Campbell AI cancel failed (%s): %s", exc.kind, exc)
+        return (
+            None,
+            None,
+            _strip_pending_messages(history),
+            "Cancelada",
+            "secondary",
+            None,
+            False,
+            question,
+        )
 
     @app.callback(
         Output("campbell-ai-error-body", "children"),
@@ -580,7 +1041,11 @@ def register_campbell_ai_callbacks(app: dash.Dash) -> None:
         kind = failure.get("kind") if isinstance(failure, dict) else None
         blocked = kind in _BLOCKING_FAILURES
         in_flight = isinstance(pending, dict) and bool(pending.get("message"))
-        disabled = blocked or in_flight
+        # A failure always wins over "in flight". The pending store is cleared on every
+        # terminal outcome, but if one ever slipped through, a live failure means this
+        # question is over — re-enabling the composer is the right call, and leaving it
+        # dead is the exact state users described as the page being stuck.
+        disabled = blocked or (in_flight and kind is None)
         placeholder = (
             "Campbell AI no está disponible en este momento"
             if blocked
@@ -657,26 +1122,91 @@ def register_campbell_ai_callbacks(app: dash.Dash) -> None:
         Output("campbell-ai-status", "children", allow_duplicate=True),
         Output("campbell-ai-status", "color", allow_duplicate=True),
         Output("campbell-ai-pending-message-store", "data", allow_duplicate=True),
+        Output("campbell-ai-waiting", "is_open", allow_duplicate=True),
+        Output("campbell-ai-waiting-body", "children", allow_duplicate=True),
         Input("campbell-ai-stream-store", "data"),
         State("campbell-ai-pending-message-store", "data"),
         State("campbell-ai-history-store", "data"),
         State("campbell-ai-session-store", "data"),
+        State("campbell-ai-company-store", "data"),
+        State("campbell-ai-waiting-ack", "data"),
         prevent_initial_call=True,
     )
-    def finalize_stream(result, pending, history, session_id):
-        """Apply a finished stream, or hand the message back to the blocking path."""
+    def finalize_stream(result, pending, history, session_id, company_state, waiting_ack):
+        """Apply a finished stream, report its progress, or fall back to a job.
+
+        Three inputs arrive on this one store, because the browser is the only thing
+        that knows what the stream is doing: a terminal payload, a periodic `running`
+        tick, or a failure.
+        """
         if not isinstance(result, dict):
             raise PreventUpdate
+
+        if result.get("running"):
+            # Progress tick. Count the wait up and, once it stops being reasonable,
+            # open the panel that offers a way out. Without this the browser knew how
+            # long it had been waiting and never said so.
+            elapsed = int(result.get("elapsed") or 0)
+            threshold = SLOW_ANSWER_SECONDS + float(waiting_ack or 0)
+            show_panel = elapsed >= threshold
+            return (
+                no_update,
+                no_update,
+                f"Pensando… {elapsed}s",
+                "info",
+                no_update,
+                show_panel,
+                f"La consulta lleva {elapsed} segundos" if show_panel else "",
+            )
+
         if not result.get("ok"):
             if not (isinstance(pending, dict) and pending.get("message")):
                 raise PreventUpdate
-            logger.info("Campbell AI stream unavailable; using the blocking request")
+            question = str(pending.get("message") or "")
+            if result.get("stalled"):
+                logger.warning("Campbell AI stream stalled; recovering the answer")
+            else:
+                logger.info("Campbell AI stream unavailable; falling back to a job")
+
+            # The stream may well have died *after* the server finished answering — a
+            # stall is most likely exactly that. Re-sending the question would run the
+            # whole thing a second time and append a duplicate exchange, so read the
+            # thread first and adopt the answer if it is already there.
+            username = _current_username(company_state)
+            company_id = str(
+                pending.get("company_id") or _company_id_from_state(company_state) or ""
+            ).strip().lower()
+            active_session = str(pending.get("session_id") or session_id or "")
+            if username and company_id and active_session:
+                try:
+                    restored = CampbellAPIClient.from_env().history(
+                        username, company_id, active_session
+                    ).get("messages", [])
+                except CampbellAPIClientError as exc:
+                    logger.warning("Campbell AI stream recovery failed: %s", exc.kind)
+                    restored = []
+                if _answers(restored, question):
+                    logger.info("Campbell AI adopted the answer a broken stream missed")
+                    return (
+                        restored,
+                        active_session,
+                        f"Listo · {company_id.upper()}",
+                        "success",
+                        None,
+                        False,
+                        "",
+                    )
+
+            # Genuinely unanswered: hand it to the background job path, which does not
+            # depend on a connection staying alive.
             return (
                 no_update,
                 no_update,
                 "Pensando...",
                 "info",
                 {**pending, "stream": False},
+                False,
+                "",
             )
 
         event = result.get("event") or {}
@@ -688,6 +1218,8 @@ def register_campbell_ai_callbacks(app: dash.Dash) -> None:
             f"Listo · {company_id}" if company_id else "Listo",
             "success",
             None,
+            False,
+            "",
         )
 
     @app.callback(
@@ -819,14 +1351,25 @@ def register_campbell_ai_callbacks(app: dash.Dash) -> None:
         State("campbell-ai-conversations-store", "data"),
     )
     def refresh_conversations(_session_id, _history, _clicks, company_state, current):
-        """Reload the archived list after every exchange, so titles stay current."""
+        """Reload the archived list after every exchange, so titles stay current.
+
+        The button is the only caller that asks for a real re-read. The other two
+        triggers fire after every exchange, where the cached index is both correct and
+        much cheaper — reconciling on each message would list the bucket constantly.
+
+        Pressing the button is how a conversation deleted straight from S3 disappears
+        from the sidebar: the listing is served from an index document, so until
+        something re-reads the stored objects the deleted rows keep showing, and
+        clicking one opens nothing.
+        """
         company_id = _company_id_from_state(company_state)
         username = _current_username(company_state)
         if not username or not company_id:
             return []
+        asked_for_it = ctx.triggered_id == "campbell-ai-refresh-conversations"
         try:
             payload = CampbellAPIClient.from_env().list_conversations(
-                username, company_id
+                username, company_id, refresh=asked_for_it
             )
         except CampbellAPIClientError as exc:
             # The list is a convenience; a failure here must not disturb the chat.

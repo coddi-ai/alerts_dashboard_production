@@ -582,7 +582,7 @@ def create_app_layout() -> html.Div:
         
         # Store for alerts internal navigation
         dcc.Store(id='alerts-navigation-state', storage_type='memory', data=None),
-        
+
         # Page content (initialized with login page, will be replaced by callback)
         html.Div(id='page-content', children=create_login_page())
     ])

@@ -3,12 +3,12 @@ Admin-only callbacks (login events chart for "Registro de usuarios").
 """
 
 import dash
-from dash import Input, Output, State
+from dash import Input, Output
 import plotly.graph_objects as go
 
-from dashboard.auth import is_admin
 from dashboard.components.user_registry_charts import create_login_events_chart
 from src.data.auth_events_repository import (
+    AuthEventsUnavailableError,
     get_login_counts_by_user_and_status,
     list_login_events,
 )
@@ -22,16 +22,19 @@ def register_admin_callbacks(app: dash.Dash) -> None:
 
     @app.callback(
         Output("user-registry-login-events-chart", "figure"),
+        Output("user-registry-load-error", "children"),
+        Output("user-registry-load-error", "is_open"),
         Input("user-registry-page-load", "data"),
-        State("user-info-store", "data"),
     )
-    def load_user_registry_chart(_page_load, user_data):
-        # Defense in depth: the route guard already redirects non-admin
-        # users away from this page before this callback can fire.
-        if not user_data or not is_admin(user_data):
-            logger.warning("Blocked non-admin access to user registry chart data")
-            return go.Figure()
+    def load_user_registry_chart(_page_load):
+        # The route guard (access_control_callbacks.py) already keeps
+        # non-admin users off this page entirely - reaching this callback
+        # means the current user is an admin, so just load the data.
+        try:
+            events_df = list_login_events()
+        except AuthEventsUnavailableError as e:
+            logger.error(f"User registry chart: events repository unavailable: {e}")
+            return go.Figure(), "No se pudo cargar el registro de inicios de sesión.", True
 
-        events_df = list_login_events()
         counts_df = get_login_counts_by_user_and_status(events_df)
-        return create_login_events_chart(counts_df)
+        return create_login_events_chart(counts_df), "", False
