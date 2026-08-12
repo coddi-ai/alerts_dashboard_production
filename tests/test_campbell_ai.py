@@ -19,6 +19,7 @@ from src.campbell_ai.security import deterministic_guard, requests_unsupported_c
 from src.campbell_ai.service import CampbellAIService
 from src.campbell_ai.temporal import current_temporal_context
 from src.campbell_ai.visualization import DashboardVisualizationService
+from src.campbell_ai.resources import FrameCache
 
 
 def _write_alerts(data_root, client: str = "cda") -> None:
@@ -447,12 +448,15 @@ def test_validation_reports_row_counts_without_materializing_datasets(tmp_path):
             }
         ]
     ).to_csv(target / "consolidated_alerts.csv", index=False)
-    repository = DashboardDataRepository(tmp_path)
+    # An isolated cache, so the assertion below is about what validation did and not
+    # about what another test left in the process-wide one.
+    frames = FrameCache(budget_bytes=8 * 1024 * 1024, name="test.validate")
+    repository = DashboardDataRepository(tmp_path, frame_cache=frames)
 
     status = repository.validate_client("CDA")
 
     assert status["datasets"]["alerts"]["rows"] == 1
-    assert repository._cache == {}
+    assert frames.stats()["entries"] == 0, "validation must not materialize a frame"
 
 
 def test_visualization_uses_dashboard_data_without_creating_files(tmp_path):

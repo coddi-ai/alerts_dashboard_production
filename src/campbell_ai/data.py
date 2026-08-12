@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import threading
 import unicodedata
@@ -15,8 +16,80 @@ import pandas as pd
 
 from src.campbell_ai.errors import CampbellDataError
 from src.campbell_ai.identity import normalize_client_id
+from src.campbell_ai.resources import CACHES, FrameCache, budget_from_env
 from src.campbell_ai.temporal import DEFAULT_TIMEZONE, current_temporal_context
 from src.charts.signals import signal_label
+
+logger = logging.getLogger("campbell_ai.data")
+
+# Read size for the row counter below. Measured across the largest datasets here, going
+# above ~512 KB buys no speed (the cost is the byte scan, not syscalls) while each read
+# allocates a buffer this size, so the smaller value is strictly better. Peak stays under
+# a megabyte regardless of file size.
+_COUNT_CHUNK_BYTES = 512 * 1024
+
+
+def count_csv_data_rows(file_path: Path, chunk_bytes: int = _COUNT_CHUNK_BYTES) -> int:
+    """Count data rows in a CSV without parsing it, in constant memory.
+
+    Row counts are needed for dataset validation and catalogue descriptions, and the
+    obvious way to get one - ``len(pd.read_csv(path, usecols=[0]))`` - is a trap: CSV is
+    not columnar, so pandas tokenizes *every* field of every row to find the column
+    boundaries, and under ``low_memory=False`` holds the whole file as one block. On the
+    largest file here (25 MB, 128 columns) that is a full parse to answer a question about
+    file structure. Measured across these datasets, scanning bytes instead is ~9x faster
+    (0.47s to 0.05s for CDA's three large CSVs) with a flat ~1 MB peak.
+
+    Newlines inside quoted fields are excluded, which is the reason a plain
+    ``.count(b'\\n')`` was not already being used. Chunks are split on the quote character
+    and only segments outside quotes are counted, with the quote state carried across
+    chunk boundaries; RFC 4180 escaped quotes ('""') flip parity twice and net out
+    correctly.
+
+    Args:
+        file_path: Path to the CSV file
+        chunk_bytes: Read size; only affects the memory/syscall trade-off
+
+    Returns:
+        Number of data rows, excluding the header. 0 for a missing, empty or header-only
+        file.
+    """
+    try:
+        total_lines = 0
+        inside_quotes = False
+        last_byte = b""
+
+        with open(file_path, "rb") as handle:
+            while True:
+                chunk = handle.read(chunk_bytes)
+                if not chunk:
+                    break
+                last_byte = chunk[-1:]
+
+                if b'"' not in chunk and not inside_quotes:
+                    # Overwhelmingly the common case; let the C implementation do it.
+                    total_lines += chunk.count(b"\n")
+                    continue
+
+                for index, segment in enumerate(chunk.split(b'"')):
+                    # Even segments sit outside quotes once `inside_quotes` is folded in.
+                    if (index % 2 == 0) != inside_quotes:
+                        total_lines += segment.count(b"\n")
+                # An odd number of quotes in this chunk leaves the state flipped.
+                if chunk.count(b'"') % 2 == 1:
+                    inside_quotes = not inside_quotes
+
+        if not last_byte:
+            return 0
+        # A final line with no trailing newline still holds a row.
+        if last_byte != b"\n":
+            total_lines += 1
+        # The header is a line but not a row.
+        return max(0, total_lines - 1)
+
+    except OSError as exc:
+        logger.warning("Could not count rows in %s: %s", file_path, exc)
+        return 0
 
 
 @dataclass(frozen=True)
@@ -312,15 +385,107 @@ def predictive_module_allows(client: str) -> bool:
         return normalized in allowed
 
 
+# Default budget for the frame cache, chosen against measured working sets rather than
+# picked round: loading all 11 datasets holds 112 MB for CDA, 25 MB for ENEX, 12 MB for
+# CAPSTONE and 6 MB for EMIN - 155 MB for all four, which is what the previous unbounded
+# dict retained once a day's traffic had touched every client.
+#
+# 192 MB therefore holds the largest single client's entire working set with headroom,
+# which is the property that matters: a budget below it would evict CDA's own frames
+# while answering CDA's questions, trading memory for the repeated cold reads this is
+# meant to prevent.
+#
+# Retune with CAMPBELL_AI_FRAME_CACHE_MB as the data grows. The diagnostics endpoint
+# reports `fill_pct`, `evictions` and `hits` for exactly this: many evictions with few
+# hits means the working set no longer fits and the budget should go up.
+DEFAULT_FRAME_CACHE_MB = 192
+
+# Probes are two small lists; the cap only exists so a long-lived process cannot
+# accumulate them without limit if the dataset registry ever grows or files are
+# re-synced under new mtimes all day.
+_MAX_PROBE_ENTRIES = 256
+
+_SHARED_FRAME_CACHE: FrameCache | None = None
+_SHARED_PROBE_CACHE: dict[tuple[str, int], dict[str, Any]] | None = None
+_SHARED_CACHE_LOCK = threading.Lock()
+
+# Guards every mutation of the probe cache. Module-level, not per-repository, because the
+# cache it protects is process-wide: a lock held on the instance would let two repositories
+# interleave their read-modify-write, and - the real exposure - the janitor's `clear()`
+# runs on its own thread and would race the trim loop below while a request is probing.
+_PROBE_LOCK = threading.RLock()
+
+
+def shared_frame_cache() -> FrameCache:
+    """The process-wide frame cache, created and registered once.
+
+    Shared rather than per-instance on purpose. Every repository instance holding its
+    own cache is how a bounded cache stops being bounded: the registry would only be
+    able to clear the most recently registered one, and any earlier instance's frames
+    would be unreclaimable for the life of the process. Cache keys carry the absolute
+    path, so sharing across repositories with different roots is safe.
+    """
+    global _SHARED_FRAME_CACHE
+    with _SHARED_CACHE_LOCK:
+        if _SHARED_FRAME_CACHE is None:
+            _SHARED_FRAME_CACHE = CACHES.register_cache(
+                FrameCache(
+                    budget_from_env(
+                        "CAMPBELL_AI_FRAME_CACHE_MB", DEFAULT_FRAME_CACHE_MB
+                    ),
+                    name="campbell_ai.frames",
+                )
+            )
+        return _SHARED_FRAME_CACHE
+
+
+def shared_probe_cache() -> dict[tuple[str, int], dict[str, Any]]:
+    """The process-wide probe cache, created and registered once.
+
+    Shared for the same reason as the frame cache: registering a per-instance clear
+    callback under a fixed name means every new repository silently makes the previous
+    one's cache unreclaimable. These entries are two small lists each, so the stake is
+    lower - but a leak that only leaks a little is still the pattern this fix exists to
+    remove, and having one of each is simpler than reasoning about which is which.
+    """
+    global _SHARED_PROBE_CACHE
+    with _SHARED_CACHE_LOCK:
+        if _SHARED_PROBE_CACHE is None:
+            cache: dict[tuple[str, int], dict[str, Any]] = {}
+
+            def clear() -> int:
+                # Called by the janitor from its own thread, so it takes the same lock
+                # the probe path takes.
+                with _PROBE_LOCK:
+                    count = len(cache)
+                    cache.clear()
+                    return count
+
+            CACHES.register(
+                "campbell_ai.probes", clear, lambda: {"entries": len(cache)}
+            )
+            _SHARED_PROBE_CACHE = cache
+        return _SHARED_PROBE_CACHE
+
+
 class DashboardDataRepository:
     """Access dashboard datasets in place; files are never copied or rewritten."""
 
-    def __init__(self, data_root: Path | str, timezone: str = DEFAULT_TIMEZONE):
+    def __init__(
+        self,
+        data_root: Path | str,
+        timezone: str = DEFAULT_TIMEZONE,
+        frame_cache: FrameCache | None = None,
+        probe_cache: dict[tuple[str, int], dict[str, Any]] | None = None,
+    ):
         self.data_root = Path(data_root).expanduser().resolve()
         self.timezone = timezone or DEFAULT_TIMEZONE
-        self._cache: dict[tuple[str, int], pd.DataFrame] = {}
-        self._probe_cache: dict[tuple[str, int], dict[str, Any]] = {}
-        self._cache_lock = threading.RLock()
+        # Both caches are injection points for tests that need isolation (or a tiny
+        # budget to exercise eviction) without touching the process-wide ones.
+        self._frames = frame_cache if frame_cache is not None else shared_frame_cache()
+        self._probe_cache = (
+            probe_cache if probe_cache is not None else shared_probe_cache()
+        )
 
     def temporal_context(self) -> dict[str, str]:
         return current_temporal_context(self.timezone)
@@ -347,10 +512,9 @@ class DashboardDataRepository:
             raise CampbellDataError(f"Fuente de datos no disponible: {path.name}")
         mtime_ns = path.stat().st_mtime_ns
         cache_key = (str(path), mtime_ns)
-        with self._cache_lock:
-            cached = self._cache.get(cache_key)
-            if cached is not None:
-                return cached.copy(deep=False)
+        cached = self._frames.get(cache_key)
+        if cached is not None:
+            return cached.copy(deep=False)
 
         if path.suffix.lower() == ".csv":
             frame = pd.read_csv(path, low_memory=False)
@@ -359,11 +523,14 @@ class DashboardDataRepository:
         else:
             raise CampbellDataError(f"Formato no soportado: {path.suffix}")
 
-        with self._cache_lock:
-            stale = [key for key in self._cache if key[0] == str(path) and key != cache_key]
-            for key in stale:
-                self._cache.pop(key, None)
-            self._cache[cache_key] = frame
+        # Retire the previous generation of this file before inserting the new one, so a
+        # re-synced dataset does not keep its stale copy resident until LRU pressure
+        # happens to reach it.
+        path_prefix = str(path)
+        self._frames.invalidate_where(
+            lambda key: key[0] == path_prefix and key != cache_key
+        )
+        self._frames.put(cache_key, frame)
         return frame.copy(deep=False)
 
     def load(self, key: str, client: str) -> pd.DataFrame:
@@ -373,11 +540,11 @@ class DashboardDataRepository:
         """Read only columns and row count so validation never materializes a dataset."""
         mtime_ns = path.stat().st_mtime_ns
         cache_key = (str(path), mtime_ns)
-        with self._cache_lock:
+        with _PROBE_LOCK:
             cached = self._probe_cache.get(cache_key)
             if cached is not None:
                 return cached
-            frame = self._cache.get(cache_key)
+        frame = self._frames.get(cache_key)
         if frame is not None:
             probe = {
                 "columns": [str(column) for column in frame.columns],
@@ -394,17 +561,26 @@ class DashboardDataRepository:
         elif path.suffix.lower() == ".csv":
             header = pd.read_csv(path, nrows=0, low_memory=False)
             columns = [str(column) for column in header.columns]
-            # Parse a single column so quoted newlines are counted correctly without
-            # materializing every field of a wide dataset.
-            counted = pd.read_csv(path, usecols=[0], low_memory=False) if columns else header
-            probe = {"columns": columns, "rows": int(len(counted))}
+            # Count rows by scanning bytes rather than parsing a column. `read_csv`
+            # with `usecols=[0]` still tokenizes every field of every row to find the
+            # boundaries and allocates the whole file as one block under
+            # `low_memory=False`; measured across these datasets that is ~9x slower and
+            # holds the file in memory to answer a question about its shape. See
+            # `count_csv_data_rows` for how quoted newlines stay correct.
+            probe = {
+                "columns": columns,
+                "rows": count_csv_data_rows(path) if columns else 0,
+            }
         else:
             raise CampbellDataError(f"Formato no soportado: {path.suffix}")
 
-        with self._cache_lock:
+        with _PROBE_LOCK:
             stale = [key for key in self._probe_cache if key[0] == str(path) and key != cache_key]
             for key in stale:
                 self._probe_cache.pop(key, None)
+            # Oldest-first trim; insertion order is good enough for entries this small.
+            while len(self._probe_cache) >= _MAX_PROBE_ENTRIES:
+                self._probe_cache.pop(next(iter(self._probe_cache)))
             self._probe_cache[cache_key] = probe
         return probe
 

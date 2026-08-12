@@ -40,6 +40,20 @@ from src.campbell_ai.models import (
 )
 from src.campbell_ai.service import CampbellAIService
 from src.campbell_ai.temporal import current_temporal_context
+from src.campbell_ai.diagnostics import snapshot as diagnostics_snapshot, tail_log
+from src.campbell_ai.janitor import (
+    get_janitor,
+    reset_janitor,
+    start_janitor,
+    touch_activity,
+)
+from src.campbell_ai.log_archive import (
+    get_log_archiver,
+    reset_log_archiver,
+    start_log_archiver,
+)
+from src.campbell_ai.logging_setup import configure_api_logging
+from src.campbell_ai.resources import reclaim
 
 
 logger = logging.getLogger("campbell_ai.api")
@@ -125,6 +139,40 @@ async def warn_about_internal_auth() -> None:
         )
 
 
+@app.on_event("startup")
+async def start_background_maintenance() -> None:
+    """Bring up this service's own log file, its archival and the memory janitor.
+
+    All three run on a startup hook rather than at import time, and that is the reason
+    this package can own its logging without affecting anything else: importing
+    ``src.campbell_ai.*`` acquires no file handler and starts no thread, so only the
+    process that actually serves this app - `uvicorn src.campbell_ai.api:app` - gets
+    them. Tests and the dashboard import parts of this package and are untouched.
+    """
+    configure_api_logging()
+    start_log_archiver()
+    start_janitor()
+
+
+@app.on_event("shutdown")
+async def stop_background_maintenance() -> None:
+    """Stop the helper threads so a container stop is not waiting on them."""
+    reset_janitor()
+    reset_log_archiver()
+
+
+@app.middleware("http")
+async def record_activity(request: Request, call_next):
+    """Mark the process active so idle reclamation only fires when it truly is.
+
+    Placed in middleware rather than in each endpoint so a route added later cannot
+    forget to do it and quietly make the janitor believe the service is asleep while
+    it is answering questions.
+    """
+    touch_activity()
+    return await call_next(request)
+
+
 @app.get("/api/v1/campbell-ai/health")
 async def health() -> dict[str, object]:
     settings = get_campbell_settings()
@@ -183,6 +231,82 @@ async def capabilities(
         concurrency=_concurrency_stats(service),
         temporal_context=current_temporal_context(settings.timezone),
     )
+
+
+@app.get(
+    "/api/v1/campbell-ai/diagnostics",
+    dependencies=[Depends(require_internal_token)],
+)
+async def diagnostics(
+    service: CampbellAIService = Depends(resolve_service),
+) -> dict[str, object]:
+    """Memory, caches, threads, logs and job counts in one payload.
+
+    The endpoint that replaces console access. Read it when the service has been up for
+    a while and feels slower than it did after a restart: `memory.rss_pct_of_limit`
+    against `caches` tells you whether the footprint is cache (tunable) or not (a leak),
+    and `janitor.last_reclaim.freed_mb` says whether dropping the caches even helped.
+    """
+    payload = diagnostics_snapshot()
+    payload["concurrency"] = _concurrency_stats(service)
+    payload["jobs"] = _job_stats(service)
+    payload["session_backend"] = get_campbell_settings().session_backend
+    return payload
+
+
+@app.get(
+    "/api/v1/campbell-ai/diagnostics/logs",
+    dependencies=[Depends(require_internal_token)],
+)
+async def diagnostics_logs(lines: int = 200) -> dict[str, object]:
+    """Tail of this process's log file, so an incident can be read from a browser."""
+    return tail_log(lines)
+
+
+@app.post(
+    "/api/v1/campbell-ai/diagnostics/reclaim",
+    dependencies=[Depends(require_internal_token)],
+)
+async def diagnostics_reclaim() -> dict[str, object]:
+    """Drop every cache now and report what it freed.
+
+    An escape hatch for the case where memory is high, the watermark has not tripped,
+    and restarting the container is the only other option. Costs the next few requests
+    a cold read; it is not destructive and touches no conversation state.
+    """
+    janitor = get_janitor()
+    if janitor is not None:
+        return janitor.force_reclaim("manual_endpoint")
+    # No janitor (disabled by configuration): the caches are still reclaimable.
+    return reclaim("manual_endpoint")
+
+
+@app.post(
+    "/api/v1/campbell-ai/diagnostics/archive-logs",
+    dependencies=[Depends(require_internal_token)],
+)
+async def diagnostics_archive_logs() -> dict[str, object]:
+    """Seal and ship the current log file to S3 immediately."""
+    archiver = get_log_archiver()
+    if archiver is None:
+        return {"archived": 0, "detail": "log archiver is not running"}
+    return archiver.run_cycle()
+
+
+def _job_stats(service: object) -> dict[str, object]:
+    """Job registry counts when the service exposes one; empty dict otherwise.
+
+    Read defensively for the same reason as `_concurrency_stats`: a test double is not
+    required to own a job registry to answer a diagnostics call.
+    """
+    registry = getattr(service, "jobs", None)
+    stats = getattr(registry, "stats", None)
+    if not callable(stats):
+        return {}
+    try:
+        return dict(stats())
+    except Exception:  # pragma: no cover - diagnostics must not break the endpoint
+        return {}
 
 
 def _concurrency_stats(service: object) -> dict[str, object]:

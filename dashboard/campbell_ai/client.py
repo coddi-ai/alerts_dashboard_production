@@ -3,13 +3,26 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+import time
 from dataclasses import dataclass
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from src.campbell_ai.config import DEFAULT_INTERNAL_TOKEN
+
+
+# Under `campbell_ai.ui` so these lines land in the frontend's own rotating, archived
+# file (see src/campbell_ai/logging_setup.py::configure_ui_logging) instead of only in
+# the dashboard's unrotated log.
+logger = logging.getLogger("campbell_ai.ui.client")
+
+# Above this, a call is worth a WARNING rather than an INFO line. Chosen so that grepping
+# for the warning finds the calls a user would describe as "se queda pegado", without
+# flagging a normal agent run - which legitimately takes tens of seconds.
+SLOW_CALL_WARN_SECONDS = float(os.getenv("CAMPBELL_AI_SLOW_CALL_WARN_SECONDS", "10"))
 
 
 class CampbellAPIClientError(RuntimeError):
@@ -169,11 +182,45 @@ class CampbellAPIClient:
         request = Request(
             f"{self.base_url}{path}", data=data, headers=headers, method=method
         )
+        # Wall-clock around the call, recorded on every path including the failures.
+        #
+        # This is the only place in the system that measures what a *user* waited. The
+        # API can report that it answered in 200 ms and still leave somebody staring at a
+        # spinner for a minute, because the wait also contains this process's queueing,
+        # the socket, and whatever else the dashboard is doing with its threads. Without
+        # it, "the API is slow" and "the dashboard is slow" produce identical evidence -
+        # which is exactly the ambiguity that made the original complaint hard to place.
+        #
+        # `company` is logged because the symptom was client-specific: CDA slow, ENEX
+        # fast. A duration without it cannot show that pattern.
+        # Lowercased so one grep finds every line for a client. The caller passes whatever
+        # the selector held ("CDA"), the API normalizes it internally, and a log that
+        # preserved the caller's casing would need a case-insensitive search to be
+        # trusted - which is a worse diagnostic than a consistent one.
+        company = str((payload or {}).get("company_id") or "-").strip().lower() or "-"
+        started = time.perf_counter()
+
+        def _elapsed_ms() -> int:
+            return int((time.perf_counter() - started) * 1000)
+
+        def _record(outcome: str) -> None:
+            elapsed = _elapsed_ms()
+            # One structured, greppable line per call. `path` and not the full URL: the
+            # base is fixed per deployment and would only pad every line.
+            message = (
+                "api call path=%s company=%s outcome=%s ms=%s"
+            )
+            if elapsed >= SLOW_CALL_WARN_SECONDS * 1000 or outcome != "ok":
+                logger.warning(message, path, company, outcome, elapsed)
+            else:
+                logger.info(message, path, company, outcome, elapsed)
+
         try:
             with urlopen(
                 request, timeout=timeout if timeout is not None else self.timeout_seconds
             ) as response:
                 body = response.read().decode("utf-8")
+                _record("ok")
                 return json.loads(body) if body else {}
         except HTTPError as exc:
             detail = ""
@@ -197,13 +244,23 @@ class CampbellAPIClient:
                 503: "unavailable",
             }
             kind = kinds.get(exc.code) or ("server_error" if exc.code >= 500 else "unknown")
+            # `http_<code>_<kind>` rather than just the kind: how long a 503 took says
+            # whether the service refused immediately or died after holding the request,
+            # and those are different faults with the same user-visible message.
+            _record(f"http_{exc.code}_{kind}")
             raise _failure(kind, detail) from exc
         except TimeoutError as exc:
+            # The duration here is the timeout budget, not a measurement - but which
+            # budget was exhausted is the useful part, since the submit/poll calls run on
+            # a deliberately shorter one than a full answer.
+            _record("timeout")
             raise _failure("timeout") from exc
         except URLError as exc:
             # A socket timeout arrives wrapped in URLError, so the cause decides.
             if isinstance(getattr(exc, "reason", None), TimeoutError):
+                _record("timeout")
                 raise _failure("timeout") from exc
+            _record("unreachable")
             raise _failure("unreachable") from exc
 
     @staticmethod
