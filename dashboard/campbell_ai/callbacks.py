@@ -22,9 +22,11 @@ from dashboard.campbell_ai.layout import (
     unavailable_placeholder,
 )
 from dashboard.campbell_ai.stream import streaming_enabled
+from src.campbell_ai.log_archive import start_ui_log_archiver
+from src.campbell_ai.logging_setup import configure_ui_logging
 
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("campbell_ai.ui.callbacks")
 
 _HISTORY_PANEL_ID = "campbell-ai-history-offcanvas"
 
@@ -301,7 +303,21 @@ _BLOCKING_FAILURES = {
 
 
 def register_campbell_ai_callbacks(app: dash.Dash) -> None:
-    """Register state, API and rendering callbacks for Campbell AI."""
+    """Register state, API and rendering callbacks for Campbell AI.
+
+    Also brings up the frontend's own rotating log file and its S3 archival. This is the
+    hook the dashboard already calls, which is what lets Campbell AI own its observability
+    without any change to `dashboard/app.py`: the frontend's failures and call durations
+    are Campbell AI's to keep, and they used to exist only in a log nobody rotates.
+
+    Both are best-effort. A frontend that will not register its callbacks because it could
+    not open a log file would be a worse outcome than missing logs.
+    """
+    try:
+        configure_ui_logging()
+        start_ui_log_archiver()
+    except Exception:  # pragma: no cover - observability must never block the UI
+        logger.exception("Campbell AI no pudo configurar su registro de frontend")
 
     @app.callback(
         Output("campbell-ai-session-store", "data"),
@@ -1116,6 +1132,32 @@ def register_campbell_ai_callbacks(app: dash.Dash) -> None:
         prevent_initial_call=True,
     )
 
+    # Progress reporting, in the browser. The same interval drives it, but nothing leaves
+    # the tab: counting seconds and deciding a wait has become unreasonable are pure
+    # functions of the clock and two values the browser already holds.
+    #
+    # This used to arrive at `finalize_stream` as a `running` payload on the store above.
+    # That store is the input of a *server* callback which declares the whole conversation
+    # as State, so every tick uploaded the entire history for the server to answer with
+    # no_update plus a new status string - about one wasted round trip per second for the
+    # length of every answer, each holding a dashboard worker thread. The interval itself
+    # was never the problem and stays at 350 ms, because `collect()` above is also what
+    # delivers the finished answer.
+    #
+    # SLOW_ANSWER_SECONDS is interpolated rather than duplicated in JavaScript, so the
+    # threshold has one definition (layout.py) for both the streaming and the job path.
+    app.clientside_callback(
+        "function(_ticks, ack) { return window.dash_clientside.campbellAiStream"
+        f".progress(ack, {SLOW_ANSWER_SECONDS}); }}",
+        Output("campbell-ai-status", "children", allow_duplicate=True),
+        Output("campbell-ai-status", "color", allow_duplicate=True),
+        Output("campbell-ai-waiting", "is_open", allow_duplicate=True),
+        Output("campbell-ai-waiting-body", "children", allow_duplicate=True),
+        Input("campbell-ai-stream-poll", "n_intervals"),
+        State("campbell-ai-waiting-ack", "data"),
+        prevent_initial_call=True,
+    )
+
     @app.callback(
         Output("campbell-ai-history-store", "data", allow_duplicate=True),
         Output("campbell-ai-session-store", "data", allow_duplicate=True),
@@ -1143,9 +1185,14 @@ def register_campbell_ai_callbacks(app: dash.Dash) -> None:
             raise PreventUpdate
 
         if result.get("running"):
-            # Progress tick. Count the wait up and, once it stops being reasonable,
-            # open the panel that offers a way out. Without this the browser knew how
-            # long it had been waiting and never said so.
+            # Legacy path, kept deliberately. Progress is now reported entirely in the
+            # browser (see the `progress` clientside callback), so current JavaScript
+            # never puts a `running` payload on this store.
+            #
+            # It stays because a tab left open across a deploy still runs the previous
+            # asset: without this branch its progress ticks would fall through to the
+            # failure handling below and turn a perfectly healthy answer into a fallback.
+            # Costs one comparison; buys a deploy nobody has to reload through.
             elapsed = int(result.get("elapsed") or 0)
             threshold = SLOW_ANSWER_SECONDS + float(waiting_ack or 0)
             show_panel = elapsed >= threshold

@@ -23,7 +23,7 @@ from dashboard.auth import resolve_authenticated_username
 from src.campbell_ai.config import DEFAULT_INTERNAL_TOKEN
 
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("campbell_ai.ui.stream")
 
 campbell_stream = Blueprint("campbell_ai_stream", __name__)
 

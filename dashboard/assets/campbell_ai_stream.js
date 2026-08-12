@@ -24,6 +24,12 @@
     startedAt: 0,
     lastEventAt: 0,
     running: false,
+    /*
+     * Last whole second already reported by `progress()`. The interval ticks about three
+     * times a second while `elapsed` only changes once, so this collapses the surplus
+     * ticks into no_update instead of re-rendering the same string.
+     */
+    lastReportedElapsed: -1,
   });
 
   var PLACEHOLDER_ID = "campbell-ai-stream-placeholder";
@@ -134,6 +140,9 @@
       state.result = null;
       state.startedAt = Date.now();
       state.running = true;
+      /* Without this a second question would start at the previous one's second count
+       * and report nothing until it happened to pass it. */
+      state.lastReportedElapsed = -1;
       touch();
       setPlaceholderText("");
 
@@ -189,10 +198,19 @@
      * Polled by a dcc.Interval. Returns one of three things:
      *
      *   - the parked terminal payload, once;
-     *   - a `running` tick carrying elapsed seconds, so the view can count the wait up
-     *     and offer a way out when it gets long — previously the browser knew how long
-     *     it had been waiting and never told anyone;
-     *   - no_update when there is nothing in flight.
+     *   - a stall verdict, which is also terminal and starts the fallback;
+     *   - no_update when there is nothing to hand over.
+     *
+     * Progress deliberately does NOT come through here. This store feeds a *server*
+     * callback, and that callback declares the whole conversation as State - so every
+     * progress tick used to upload the entire history for the server to answer with
+     * no_update and a new status string. Roughly one wasted round trip per second for
+     * the length of every answer, each one occupying a dashboard worker thread. The
+     * counter is presentation and never needed the server; see `progress()`.
+     *
+     * The interval stays short precisely because this function is also what delivers the
+     * finished answer: widening it would add that much dead time to the end of every
+     * response, which is the one moment a user is watching.
      */
     collect: function () {
       if (!state.result && state.running) {
@@ -206,10 +224,7 @@
           state.controller = null;
           return { ok: false, detail: "", stalled: true };
         }
-        return {
-          running: true,
-          elapsed: Math.round((Date.now() - state.startedAt) / 1000),
-        };
+        return window.dash_clientside.no_update;
       }
       if (!state.result) {
         return window.dash_clientside.no_update;
@@ -218,6 +233,43 @@
       state.result = null;
       state.controller = null;
       return payload;
+    },
+
+    /*
+     * Report the wait, entirely in the browser.
+     *
+     * Returns [status text, status colour, panel open, panel text], or no_update for all
+     * four when there is nothing new to say. Counting seconds and deciding that a wait
+     * has become unreasonable are both pure functions of the clock and two numbers the
+     * browser already holds, so none of it justifies a request.
+     *
+     * `slowAfterSeconds` is passed in from Python rather than duplicated here, so
+     * SLOW_ANSWER_SECONDS stays defined once, in layout.py.
+     */
+    progress: function (waitingAck, slowAfterSeconds) {
+      var nu = window.dash_clientside.no_update;
+      var idle = [nu, nu, nu, nu];
+      if (!state.running || state.result) {
+        return idle;
+      }
+      var elapsed = Math.round((Date.now() - state.startedAt) / 1000);
+      if (elapsed === state.lastReportedElapsed) {
+        return idle;
+      }
+      state.lastReportedElapsed = elapsed;
+      /*
+       * `waitingAck` is how much extra time the user asked for by clicking "seguir
+       * esperando", so it raises the bar rather than dismissing the panel permanently:
+       * the panel reappears if the next stretch is also slow.
+       */
+      var threshold = (slowAfterSeconds || 0) + (waitingAck || 0);
+      var show = elapsed >= threshold;
+      return [
+        "Pensando… " + elapsed + "s",
+        "info",
+        show,
+        show ? "La consulta lleva " + elapsed + " segundos" : "",
+      ];
     },
 
     /* Abort an in-flight stream because the user cancelled it. */
@@ -229,6 +281,7 @@
       state.controller = null;
       state.result = null;
       state.requestId += 1;
+      state.lastReportedElapsed = -1;
       return window.dash_clientside.no_update;
     },
   };
