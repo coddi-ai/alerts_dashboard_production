@@ -534,6 +534,23 @@ class DashboardDataRepository:
         return frame.copy(deep=False)
 
     def load(self, key: str, client: str) -> pd.DataFrame:
+        """Return a dataset the caller may filter and modify freely.
+
+        **Do not add a defensive `.copy()` on the result.** Every query method used to open
+        with `self.load(...).copy()`, and `.copy()` with no argument means `deep=True`: that
+        duplicated the entire dataset before any filter narrowed it, to return twenty rows.
+        Measured on this data, three concurrent queries over `alerts_detail` held an extra
+        59.8 MB for nothing - which was the whole per-user cost of concurrency.
+
+        It protected nothing. What comes back here is already a distinct object (a shallow
+        copy, so it owns its own column index), and pandas 3 enforces Copy-on-Write
+        unconditionally, so writing to it copies the affected column lazily and leaves the
+        cached frame untouched. Verified against the cache for column replacement, new
+        columns and positional `.iloc` writes.
+
+        The one thing CoW cannot protect is mutation through the underlying numpy buffer
+        (`frame.values[0, 0] = x` and friends). Nothing here does that, and nothing should.
+        """
         return self._read_frame(self.dataset_path(key, client))
 
     def _probe_frame(self, path: Path) -> dict[str, Any]:
@@ -1130,7 +1147,7 @@ class DashboardDataRepository:
         end_date: str = "",
         limit: int = 20,
     ) -> str:
-        frame = self.load("alerts", client).copy()
+        frame = self.load("alerts", client)
         source_frame = frame.copy(deep=False)
         date_col = self._resolve_column(frame, ("Timestamp", "Fecha", "event_ts"))
         unit_col = self._resolve_column(frame, ("UnitId", "Unit", "unit_id"))
@@ -1359,7 +1376,7 @@ class DashboardDataRepository:
         end_date: str = "",
         limit: int = 20,
     ) -> str:
-        frame = self.load("maintenance_actions", client).copy()
+        frame = self.load("maintenance_actions", client)
         date_col = self._resolve_column(frame, ("change_date", "event_ts", "Timestamp"))
         unit_col = self._resolve_column(frame, ("machine_code", "machine_id", "UnitId"))
         system_col = self._resolve_column(frame, ("action_system_name", "job_system_name"))
@@ -1413,7 +1430,7 @@ class DashboardDataRepository:
         return json.dumps(payload, ensure_ascii=False, default=str)
 
     def query_oil_status(self, client: str, unit_id: str = "", limit: int = 20) -> str:
-        frame = self.load("oil_machine_status", client).copy()
+        frame = self.load("oil_machine_status", client)
         unit_col = self._resolve_column(frame, ("unit_id", "unitId", "UnitId"))
         if unit_id and unit_col:
             frame = self._filter_unit(frame, unit_col, unit_id)
@@ -1460,7 +1477,7 @@ class DashboardDataRepository:
         limit: int = 20,
     ) -> str:
         """Return telemetry machine health, by default only the latest evaluated week."""
-        frame = self.load("telemetry_machine_status", client).copy()
+        frame = self.load("telemetry_machine_status", client)
         unit_col = self._resolve_column(frame, ("unit_id", "unitId", "UnitId"))
         week_col = self._resolve_column(frame, ("evaluation_week",))
         year_col = self._resolve_column(frame, ("evaluation_year",))
@@ -1539,7 +1556,7 @@ class DashboardDataRepository:
         limit: int = 25,
     ) -> str:
         """Component-level telemetry condition including the signals that triggered it."""
-        frame = self.load("telemetry_classified", client).copy()
+        frame = self.load("telemetry_classified", client)
         unit_col = self._resolve_column(frame, ("unit_id", "unitId", "UnitId"))
         component_col = self._resolve_column(frame, ("component", "componentName"))
         status_col = self._resolve_column(frame, ("component_status", "overall_status"))
@@ -1618,7 +1635,7 @@ class DashboardDataRepository:
         limit: int = 25,
     ) -> str:
         """Component-level oil condition with breached essays and severity."""
-        frame = self.load("oil_classified", client).copy()
+        frame = self.load("oil_classified", client)
         unit_col = self._resolve_column(frame, ("unitId", "unit_id", "UnitId"))
         component_col = self._resolve_column(frame, ("componentName", "component"))
         normalized_col = self._resolve_column(frame, ("componentNameNormalized",))
@@ -1697,7 +1714,7 @@ class DashboardDataRepository:
         limit: int = 10,
     ) -> str:
         """Measured value and applicable limit for the signal that raised an alert."""
-        frame = self.load("alerts_detail", client).copy()
+        frame = self.load("alerts_detail", client)
         alert_col = self._resolve_column(frame, ("AlertID", "alert_id"))
         unit_col = self._resolve_column(frame, ("Unit", "UnitId", "unit_id"))
         trigger_col = self._resolve_column(frame, ("Trigger", "trigger"))
@@ -1878,7 +1895,7 @@ class DashboardDataRepository:
         the caller may name more; `signals_available` lists what actually has values so
         the choice is informed rather than guessed.
         """
-        frame = self.load("alerts_detail", client).copy()
+        frame = self.load("alerts_detail", client)
         alert_col = self._resolve_column(frame, ("AlertID", "alert_id"))
         unit_col = self._resolve_column(frame, ("Unit", "UnitId", "unit_id"))
         trigger_col = self._resolve_column(frame, ("Trigger", "trigger"))
@@ -2222,7 +2239,7 @@ class DashboardDataRepository:
         self, client: str, unit_id: str = "", limit: int = 10
     ) -> str:
         """Weekly natural-language maintenance summaries per unit."""
-        frame = self.load("maintenance_summary", client).copy()
+        frame = self.load("maintenance_summary", client)
         unit_col = self._resolve_column(frame, ("UnitId", "machine_code", "machine_id"))
         week_col = self._resolve_column(frame, ("Semana", "Week", "week"))
         summary_col = self._resolve_column(frame, ("Summary", "Resumen"))
@@ -2273,7 +2290,7 @@ class DashboardDataRepository:
             raise CampbellDataError(
                 "El modulo predictivo no esta habilitado para el cliente activo"
             )
-        frame = self.load(key, client).copy()
+        frame = self.load(key, client)
         unit_col = self._resolve_column(frame, ("Unit", "unitId", "unit_id"))
         date_col = self._resolve_column(frame, ("Fecha", "sampleDate"))
         ranking_col = self._resolve_column(frame, ("ranking",))

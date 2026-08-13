@@ -90,9 +90,15 @@ class CampbellAIService:
     ) -> InitializeResponse:
         self._ensure_enabled()
         principal = resolve_dashboard_principal(username, company_id)
-        resolved_session = normalize_session_id(
-            session_id or f"campbell_{uuid.uuid4().hex}"
-        )
+        # Whether the caller is resuming a thread it already knows about, or starting a new
+        # one. The distinction decides if the archive is worth consulting at all, below.
+        # A supplied id is still validated exactly as before and rejects a malformed value.
+        if session_id:
+            resolved_session = normalize_session_id(session_id)
+            resuming = True
+        else:
+            resolved_session = normalize_session_id(f"campbell_{uuid.uuid4().hex}")
+            resuming = False
         validation = self.repository.validate_client(principal.company_id)
         if not validation["data_ready"]:
             raise CampbellDataError(
@@ -102,7 +108,14 @@ class CampbellAIService:
         # A session that expired, or a worker that restarted, must not take the
         # conversation with it: if the live thread is empty and the archive holds one for
         # this exact session, restore it before answering anything.
-        restored = await self._rehydrate(principal, resolved_session)
+        #
+        # Only when resuming. The archive is keyed by session id, so a lookup for an id
+        # this method just minted from `uuid4` cannot match anything - it was a storage
+        # round trip guaranteed to miss, paid inside the blocking call the user is waiting
+        # on. It happened on every first page load and on every new tab (the browser store
+        # is session-scoped, so it arrives empty), and on every client switch for a user
+        # with more than one client.
+        restored = await self._rehydrate(principal, resolved_session) if resuming else 0
         return InitializeResponse(
             session_id=resolved_session,
             company_id=principal.company_id,

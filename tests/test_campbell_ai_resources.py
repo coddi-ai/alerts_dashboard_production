@@ -1436,3 +1436,74 @@ def test_tail_log_caps_the_request():
         assert tail_log(MAX_TAIL_LINES + 500, log_file=path)["requested_lines"] == (
             MAX_TAIL_LINES
         )
+
+
+# --------------------------------------------------------------------------------------
+# 11. The query path must not deep-copy the dataset
+#
+# Every query method used to open with `self.load(...).copy()`, and `.copy()` with no
+# argument is `deep=True`: the whole dataset was duplicated before any filter narrowed it,
+# to return twenty rows. Measured at +59.8 MB for three concurrent queries over
+# `alerts_detail` - the entire per-user cost of concurrency.
+#
+# It protected nothing: pandas 3 enforces Copy-on-Write unconditionally, and `load()`
+# already returns a distinct object.
+# --------------------------------------------------------------------------------------
+
+
+def test_copy_on_write_is_enforced_by_this_pandas():
+    """The premise the whole optimization rests on, asserted rather than assumed.
+
+    If a future pandas made CoW optional again, the defensive copies would have to come
+    back - so this fails loudly instead of letting the cache be silently corruptible.
+    """
+    assert int(pd.__version__.split(".")[0]) >= 3, (
+        "below pandas 3 Copy-on-Write can be disabled, and load() would need a real copy"
+    )
+
+
+def test_load_returns_a_frame_the_caller_may_mutate(dataset_root):
+    """Mutating what `load()` returns must never reach the cached frame."""
+    repo = _repo(dataset_root)
+    first = repo.load("alerts", "cda")
+    original = str(first["note"].iloc[0])
+
+    first["note"] = "MUTADO"
+    first["columna_nueva"] = 1
+    first.iloc[0, 0] = "TAMBIEN_MUTADO"
+
+    second = repo.load("alerts", "cda")
+    assert str(second["note"].iloc[0]) == original, "the cached frame was corrupted"
+    assert "columna_nueva" not in second.columns
+    assert repo._frames.stats()["hits"] >= 1, "the second load must come from cache"
+
+
+def test_repeated_queries_return_identical_results(dataset_root):
+    """The failure a shared, un-copied cache would produce: one query poisoning the next.
+
+    The query methods replace whole columns (`pd.to_datetime`, `pd.to_numeric`) on the frame
+    they get back, so this is the behaviour that has to hold for the copy to be removable.
+    """
+    repo = _repo(dataset_root)
+    results = [repo.query_alerts("cda", limit=10) for _ in range(3)]
+    assert results[0] == results[1] == results[2]
+
+
+def test_no_query_method_deep_copies_its_dataset():
+    """Pins the change itself, since a defensive `.copy()` is easy to re-add by reflex."""
+    import re
+
+    source = (
+        Path(__file__).parent.parent / "src" / "campbell_ai" / "data.py"
+    ).read_text(encoding="utf-8")
+
+    # Anchored to an assignment so the pattern matches code and not the docstring in
+    # `load()`, which quotes the old call shape to explain why it is gone.
+    offenders = re.findall(
+        r"^\s*\w+\s*=\s*self\.load\([^)]*\)\.copy\(\s*\)", source, re.MULTILINE
+    )
+    assert offenders == [], (
+        f"{len(offenders)} site(s) deep-copy the whole dataset before filtering: {offenders}"
+    )
+    # `load()` documents why, so the reasoning survives without this test being read.
+    assert "Do not add a defensive `.copy()` on the result." in source

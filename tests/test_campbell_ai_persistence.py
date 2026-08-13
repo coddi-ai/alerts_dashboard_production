@@ -649,3 +649,100 @@ def test_clearing_a_conversation_keeps_the_backup(tmp_path):
     assert asyncio.run(scenario()) == []
     # "Limpiar" empties the visible thread; it is not a deletion request.
     assert archive.load_conversation(PRINCIPAL, "s1")
+
+
+# ------------------------------------------------- initialize / archive lookups
+
+
+class _CountingBackend(MemoryBackend):
+    """MemoryBackend that also records reads, so a wasted lookup is observable."""
+
+    def __init__(self):
+        super().__init__()
+        self.reads: list[str] = []
+
+    def get_json(self, key):
+        self.reads.append(key)
+        return super().get_json(key)
+
+
+def _service_with_archive(tmp_path, backend):
+    """A service whose archive is the given backend, and whose data root has one dataset."""
+    from src.campbell_ai.agents_runtime import CampbellAgentRuntime
+    from src.campbell_ai.service import CampbellAIService
+    from src.campbell_ai.sessions import InMemorySessionStore
+    from tests.test_campbell_ai import _settings, _write_alerts
+
+    _write_alerts(tmp_path)
+    settings = _settings(tmp_path)
+    service = CampbellAIService(settings)
+    service.runtime = CampbellAgentRuntime(
+        service.repository,
+        settings,
+        session_store=InMemorySessionStore(ttl_seconds=1800),
+        archive=ConversationArchive([backend]),
+    )
+    return service
+
+
+def test_initialize_skips_the_archive_when_it_mints_the_session(tmp_path, monkeypatch):
+    """A lookup for a just-generated uuid cannot match, so it must not be performed.
+
+    This ran on every first page load and every new tab - the browser store is
+    session-scoped and arrives empty - plus every client switch. Each one paid a storage
+    round trip guaranteed to miss, inside the blocking call the user waits on.
+    """
+    monkeypatch.setattr(
+        "src.campbell_ai.identity.get_user",
+        lambda username: {"role": "analyst", "clients": ["CDA"]},
+    )
+    backend = _CountingBackend()
+    service = _service_with_archive(tmp_path, backend)
+
+    initialized = asyncio.run(service.initialize("ana.perez", "CDA"))
+
+    assert initialized.session_id.startswith("campbell_")
+    assert initialized.restored_messages == 0
+    assert backend.reads == [], f"the archive was consulted for nothing: {backend.reads}"
+
+
+def test_initialize_still_restores_a_resumed_session(tmp_path, monkeypatch):
+    """The optimization must not cost the behaviour it is guarding: a caller that supplies
+    a session id is resuming, and its archived thread still has to come back."""
+    monkeypatch.setattr(
+        "src.campbell_ai.identity.get_user",
+        lambda username: {"role": "analyst", "clients": ["CDA"]},
+    )
+    backend = _CountingBackend()
+    service = _service_with_archive(tmp_path, backend)
+
+    async def scenario():
+        await service.runtime.record_exchange(PRINCIPAL, "s1", "¿Estado?", "Normal.")
+        # Simulate the live session expiring, leaving only the archived copy.
+        await service.runtime.sessions.write(("ana.perez", "cda", "s1"), [])
+        backend.reads.clear()
+        return await service.initialize("ana.perez", "CDA", "s1")
+
+    initialized = asyncio.run(scenario())
+
+    assert initialized.session_id == "s1"
+    assert initialized.restored_messages == 2
+    assert backend.reads, "resuming must still consult the archive"
+
+
+def test_initialize_still_rejects_a_malformed_session_id(tmp_path, monkeypatch):
+    """Validation of a supplied id is unchanged; only the archive lookup is conditional."""
+    from src.campbell_ai.errors import CampbellSessionError
+
+    monkeypatch.setattr(
+        "src.campbell_ai.identity.get_user",
+        lambda username: {"role": "analyst", "clients": ["CDA"]},
+    )
+    service = _service_with_archive(tmp_path, _CountingBackend())
+
+    try:
+        asyncio.run(service.initialize("ana.perez", "CDA", "../../etc/passwd"))
+    except CampbellSessionError:
+        pass
+    else:
+        raise AssertionError("a malformed session id must still be rejected")
