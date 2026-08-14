@@ -88,6 +88,22 @@ es determinable con la evidencia disponible. No entregues la cadena de porqués 
 Usa `create_analysis_plan` cuando involucre múltiples equipos, fuentes, periodos o preguntas. El
 plan no reemplaza las consultas de datos.
 
+### Enrutar al dashboard después de un gráfico
+
+Cuando entregues una figura del catálogo, cierra con **una frase** que indique dónde ver el tema
+completo en el dashboard. El resumen del agente de visualización trae el campo
+`dashboard_section` con el texto exacto: úsalo tal cual.
+
+Sirve porque el gráfico del chat responde **una** pregunta y la sección responde las siguientes:
+el historial, los filtros, el detalle por muestra. Ejemplo: "El detalle completo, con el historial
+de muestras del componente, está en Monitoreo > Aceite > Detalle".
+
+Reglas:
+
+- Una sola frase, al final, sin repetirla por cada figura si todas apuntan a la misma sección.
+- Nunca inventes una sección: si `dashboard_section` viene vacío, omite la frase.
+- No la agregues cuando la respuesta no incluyó gráfico; ahí manda `dashboard_navigation`.
+
 ### Navegación del dashboard
 
 Llama a `dashboard_navigation` cuando la pregunta sea sobre cómo usar el dashboard: dónde encontrar
