@@ -80,6 +80,8 @@ logs/
 *.xlsx
 *.parquet
 *.db
+# ...except hand-edited config, not generated data - must ship with the code
+!config/client_services.json
 # Docker
 *.pid
 *.seed
@@ -99,7 +101,11 @@ dataDev2/*
 dataDep/*
 
 new_dashboard/*
+migration_dashboard/*
 ai_docs/*
 
 # PDF files (local reference docs)
 *.pdf
+
+# .pyc files
+*.pyc

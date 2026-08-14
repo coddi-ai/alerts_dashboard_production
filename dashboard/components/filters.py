@@ -6,31 +6,6 @@ from dash import dcc, html
 import dash_bootstrap_components as dbc
 
 
-def create_client_selector(clients: list[str], default_client: str = None) -> dbc.Row:
-    """
-    Create client selector dropdown.
-    
-    Args:
-        clients: List of available clients
-        default_client: Default selected client
-    
-    Returns:
-        Bootstrap row with client dropdown
-    """
-    return dbc.Row([
-        dbc.Col([
-            html.Label("Select Client:", className="fw-bold"),
-            dcc.Dropdown(
-                id='client-selector',
-                options=[{'label': client, 'value': client} for client in clients],
-                value=default_client or (clients[0] if clients else None),
-                clearable=False,
-                className="mb-3"
-            )
-        ], width=4)
-    ])
-
-
 def create_machine_selector(machines: list[str] = None) -> dbc.Col:
     """
     Create machine selector dropdown.

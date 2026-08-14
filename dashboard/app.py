@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 import dash
 import dash_bootstrap_components as dbc
-from flask import send_from_directory
+from flask import request, send_from_directory
 from dashboard.layout import create_app_layout
 from dashboard.callbacks.auth_callbacks import register_auth_callbacks
 from dashboard.callbacks.navigation_callbacks import register_navigation_callbacks
@@ -66,12 +66,29 @@ import dashboard.callbacks.data_freshness_callbacks
 
 # Import predictive callbacks
 from dashboard.callbacks.predictive_callbacks import register_callbacks as register_predictive_callbacks
+from dashboard.campbell_ai.callbacks import register_campbell_ai_callbacks
+from dashboard.campbell_ai.stream import register_campbell_ai_stream
+from config.settings import get_settings
 
 # Import component hours callbacks
 from dashboard.callbacks.component_hours_callbacks import register_component_hours_callbacks
 
 # Import predictive pages callbacks (reactive content for /predictive/* pages)
 from dashboard.callbacks.predictive_pages_callbacks import register_predictive_pages_callbacks
+
+# Import admin callbacks (login events chart)
+from dashboard.callbacks.admin_callbacks import register_admin_callbacks
+
+# Import the centralized route guard (role + client-service route protection)
+from dashboard.callbacks.access_control_callbacks import register_access_control_callbacks
+
+# Import the reactive sidebar (re-renders nav when the selected client changes)
+from dashboard.callbacks.sidebar_callbacks import register_sidebar_callbacks
+
+# Validate the client service register at startup - critical structural
+# errors raise (fail fast); field-level issues are logged, not fatal.
+from config.client_services import validate_startup_config
+validate_startup_config()
 
 
 def normalize_prefix(prefix: str | None) -> str:
@@ -107,6 +124,14 @@ app = dash.Dash(
     serve_locally=True
 )
 
+# Campbell AI inherits the authenticated dashboard identity from this signed session.
+app.server.secret_key = get_settings().secret_key
+app.server.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=os.getenv("SESSION_COOKIE_SECURE", "false").lower() == "true",
+)
+
 # Import page modules so their dash.register_page() calls run (must happen
 # after the app is created since register_page() looks up the active app).
 import dashboard.pages.index
@@ -122,6 +147,8 @@ import dashboard.pages.integration_validacion_avisos
 import dashboard.pages.integration_seguimiento_avisos
 import dashboard.pages.reporting_main
 import dashboard.pages.admin_main
+import dashboard.pages.admin_user_registry
+import dashboard.pages.no_services
 
 # Set app layout
 app.layout = create_app_layout()
@@ -165,6 +192,47 @@ register_health_index_callbacks(app)
 register_predictive_callbacks(app)
 register_component_hours_callbacks(app)
 register_predictive_pages_callbacks(app)
+register_campbell_ai_callbacks(app)
+# Same-origin SSE proxy for progressive Campbell AI answers; inert unless
+# CAMPBELL_AI_STREAMING is enabled.
+register_campbell_ai_stream(app)
+register_admin_callbacks(app)
+register_access_control_callbacks(app)
+register_sidebar_callbacks(app)
+
+
+@app.server.after_request
+def _do_not_cache_the_app_shell(response):
+    """Keep the page and the callback graph out of every cache; keep assets in.
+
+    Dash already cache-busts files under `assets/` by appending the file's mtime to
+    their URL, so a deploy gives them fresh URLs. That only helps if the browser
+    re-fetches the *page* carrying those URLs — and the index was going out with no
+    cache headers at all, which leaves browsers and proxies free to apply heuristic
+    caching. The result after an update is a stale page asking for the previous build's
+    JavaScript, against a server running the new callbacks: clientside functions that no
+    longer exist, callbacks wired to components that moved. It looks like the app is
+    broken, and a hard reload "fixes" it, which is the tell.
+
+    Three things must never be cached, all of them descriptions of the current build:
+    the index, the layout, and the dependency graph. Everything else — the fingerprinted
+    assets and the bundled component libraries — is safe to cache and worth caching,
+    since those are the large files.
+    """
+    path = request.path or ""
+    never_cache = (
+        path in ("/", "")
+        or path.endswith("/_dash-layout")
+        or path.endswith("/_dash-dependencies")
+        or path.endswith("/_dash-update-component")
+        # Any page route: this is a multi-page app served from the same shell.
+        or not (path.startswith("/assets/") or path.startswith("/_dash-component-suites/"))
+    )
+    if never_cache:
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
 
 
 if __name__ == '__main__':
@@ -200,5 +268,5 @@ if __name__ == '__main__':
     app.run(
         host=host,
         port=port,
-        debug=False
+        debug=debug
     )

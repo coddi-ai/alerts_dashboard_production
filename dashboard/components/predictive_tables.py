@@ -4,6 +4,8 @@ Componentes de tablas para la página de evidencia.
 from dash import html
 import pandas as pd
 
+from dashboard.components.oil_charts import get_essay_limits_four, classify_four_limit_value
+
 
 def _oil_date_col(df) -> str:
     """
@@ -15,7 +17,7 @@ def _oil_date_col(df) -> str:
     return "Fecha"
 
 
-def create_oil_variables_table(df_unit, variables, oil_labels, oil_thresholds=None):
+def create_oil_variables_table(df_unit, variables, oil_labels, oil_limits_four=None):
     """
     Crear tabla de variables de aceite con valores actuales, anteriores,
     variación, velocidad de desgaste y estado.
@@ -91,9 +93,9 @@ def create_oil_variables_table(df_unit, variables, oil_labels, oil_thresholds=No
             variation_pct = None
             velocity = None
 
-        # Estado (basado en umbrales si están disponibles)
+        # Estado (basado en los límites Stewart de cuatro niveles, v2.8)
         oil_range = last_sample.get("oilHourRange", "LT_1000")
-        status = _get_status(var, current_val, oil_range, oil_thresholds)
+        status = _get_status(var, current_val, oil_range, oil_limits_four)
 
         # Construir fila
         rows.append(html.Tr([
@@ -156,23 +158,24 @@ def create_oil_variables_table(df_unit, variables, oil_labels, oil_thresholds=No
     return html.Div(table, className="fm-table-wrapper")
 
 
-def _get_status(var, value, oil_range, thresholds):
-    """Determinar estado basado en umbrales."""
-    if thresholds is None or var not in thresholds:
+def _get_status(var, value, oil_range, oil_limits_four):
+    """
+    Determinar estado usando los límites Stewart de cuatro niveles
+    (LIC/LIM/LSM/LSC, contrato de datos v2.8). Devuelve None cuando no hay
+    límites disponibles para este ensayo/rango de horas de aceite - nunca cae
+    de vuelta a la tabla legacy OIL_THRESHOLDS.
+    """
+    if not oil_limits_four:
         return None
 
-    ranges = thresholds[var].get(oil_range)
-    if ranges is None:
+    essay_limits = get_essay_limits_four(oil_limits_four, var, oil_range)
+    if not essay_limits or essay_limits.get('LSM') is None or essay_limits.get('LSC') is None:
         return None
 
-    normal, alert, critic = ranges
-
-    if value <= normal:
-        return "Normal"
-    elif value <= alert:
-        return "Alerta"
-    else:
-        return "Crítico"
+    return classify_four_limit_value(
+        value, essay_limits.get('LIC'), essay_limits.get('LIM'),
+        essay_limits['LSM'], essay_limits['LSC']
+    )
 
 
 def _render_variation(variation, variation_pct):
@@ -256,8 +259,10 @@ def _render_status_badge(status):
 
     colors = {
         "Normal": {"bg": "#eaf3de", "text": "#3b6d11"},
-        "Alerta": {"bg": "#faeeda", "text": "#854f0b"},
-        "Crítico": {"bg": "#fcebeb", "text": "#a32d2d"},
+        "Inferior Marginal": {"bg": "#faeeda", "text": "#854f0b"},
+        "Superior Marginal": {"bg": "#faeeda", "text": "#854f0b"},
+        "Inferior Condenatorio": {"bg": "#fcebeb", "text": "#a32d2d"},
+        "Superior Condenatorio": {"bg": "#fcebeb", "text": "#a32d2d"},
     }
 
     c = colors.get(status, {"bg": "#f0f0f0", "text": "#444"})

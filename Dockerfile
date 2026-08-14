@@ -12,9 +12,13 @@ COPY . ./
 RUN mkdir -p logs
 
 EXPOSE 8050
+EXPOSE 8000
 
+# Image-level only: things that describe how the container runs, not how Campbell AI
+# behaves.
 ENV PYTHONUNBUFFERED=1
 ENV DASHBOARD_HOST=0.0.0.0
 ENV DASHBOARD_PORT=8050
+
 
 CMD ["python", "dashboard/app.py"]

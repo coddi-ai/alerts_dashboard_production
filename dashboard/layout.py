@@ -13,6 +13,9 @@ import dash
 import os
 from pathlib import Path
 from config.settings import get_settings
+from config.client_services import is_service_enabled
+from dashboard.auth import is_admin
+from dashboard.services_registry import SERVICE_SECTIONS, SERVICE_LABELS, nav_path as _nav_path
 
 
 # Component icon map for predictive nav sections
@@ -21,27 +24,12 @@ PREDICTIVE_COMPONENT_ICONS = {
     "transmision": "fas fa-exchange-alt",
 }
 
-# Static nav-id -> URL path map. Predictive ids ('predictive-<component>') are
-# resolved dynamically instead of listed here.
-NAV_PATHS = {
-    'overview-general': '/overview/general',
-    'overview-data-freshness': '/overview/data-freshness',
-    'monitoring-alerts': '/monitoring/alerts',
-    'monitoring-telemetry': '/monitoring/telemetry',
-    'monitoring-oil': '/monitoring/oil',
-    'agents-campbell-ai': '/agents/campbell-ai',
-    'integration-validacion-avisos': '/integration/validacion-avisos',
-    'integration-seguimiento-avisos': '/integration/seguimiento-avisos',
-    'reporting-main': '/reporting',
-    'admin-main': '/admin',
-}
 
-
-def _nav_path(nav_id: str) -> str:
-    """Resolve a nav-item id to its URL path (predictive ids are dynamic)."""
-    if nav_id.startswith('predictive-'):
-        return f"/predictive/{nav_id.split('predictive-', 1)[1]}"
-    return NAV_PATHS[nav_id]
+def _campbell_ai_enabled() -> bool:
+    """Keep the new navigation entry behind an environment feature flag."""
+    return os.getenv("CAMPBELL_AI_ENABLED", "true").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
 
 
 def _discover_predictive_components(client: str) -> list:
@@ -318,7 +306,8 @@ def create_navbar(user_data: dict, available_clients: list[str] = None) -> html.
                                 color="danger",
                                 size="sm",
                                 className="px-3",
-                                style={"fontWeight": "500"}
+                                style={"fontWeight": "500"},
+                                n_clicks=0
                             )
                         ], className="d-flex align-items-center")
                     ], width="auto")
@@ -368,106 +357,81 @@ def create_placeholder_content(section_name: str) -> html.Div:
     ], className="mt-4")
 
 
-def create_main_dashboard(user_data: dict) -> html.Div:
+def build_navigation_items(selected_client: str, user_data: dict) -> list:
     """
-    Create main dashboard layout with redesigned navigation and unified shell.
-    
-    Args:
-        user_data: User information dictionary
-    
-    Returns:
-        Professional dashboard layout with full-height sidebar and integrated header
+    Build the nav-section/subsection data for the CURRENTLY SELECTED client.
+
+    Visibility is keyed on the active client (not "any client the user has"),
+    so it always matches exactly what dashboard/callbacks/access_control_callbacks.py
+    will actually let the user reach - a disabled service is never shown, and
+    switching clients in the navbar updates this immediately (see
+    dashboard/callbacks/sidebar_callbacks.py, which re-renders on
+    client-selector change).
     """
-    # Get clients user has access to
-    available_clients = user_data.get('clients', [])
-    
-    # Get client for discovering predictive components
-    # Predictive is restricted to specific clients (CDA for now)
-    settings = get_settings()
-    predictive_allowed = [c.upper() for c in settings.predictive_allowed_clients]
-    user_has_predictive_access = any(
-        c.upper() in predictive_allowed for c in available_clients
-    )
+    def _enabled(service_id: str) -> bool:
+        # Campbell AI additionally sits behind a global kill switch, on top of
+        # the per-client service registry - so it can be pulled everywhere
+        # (e.g. an OpenAI outage) without editing client_services.yaml.
+        if service_id == "agents-campbell-ai" and not _campbell_ai_enabled():
+            return False
+        return is_service_enabled(selected_client, service_id)
+
+    user_has_predictive_access = _enabled('predictive')
 
     # Use statically-known component list for navigation (data availability checked at runtime)
     predictive_nav_components = list(PREDICTIVE_COMPONENT_ICONS.keys()) if user_has_predictive_access else []
 
-    # Define navigation structure
-    navigation_items = [
-        {
-            'section': 'overview',
-            'label': 'Resumen',
-            'icon': 'fas fa-tachometer-alt',
-            'subsections': [
-                {'id': 'overview-general', 'label': 'General'},
-                {'id': 'overview-data-freshness', 'label': 'Estado de Datos'}
-            ]
-        },
-        {
-            'section': 'monitoring',
-            'label': 'Monitoreo',
-            'icon': 'fas fa-chart-line',
-            'subsections': [
-                {'id': 'monitoring-alerts', 'label': 'Alertas'},
-                {'id': 'monitoring-telemetry', 'label': 'Telemetría'},
-                {'id': 'monitoring-oil', 'label': 'Aceite'}
-            ]
-        },
-    ]
-
-    # Only add predictive section if user has access to a predictive-allowed client
-    # Show it even if no data exists (disclaimer will be shown in the content area)
-    if user_has_predictive_access:
-        navigation_items.append({
-            'section': 'predictive',
-            'label': 'Predictivo',
-            'icon': 'fas fa-brain',
-            'subsections': [
-                {'id': f'predictive-{comp}', 'label': comp.title()}
-                for comp in predictive_nav_components
-            ]
-        })
-
-    # Agentes section (always visible)
-    navigation_items.append({
-        'section': 'agents',
-        'label': 'Agentes',
-        'icon': 'fas fa-robot',
-        'subsections': [
-            {'id': 'agents-campbell-ai', 'label': 'Campbell AI'}
+    # Build navigation from the central services registry, keeping only the
+    # services enabled for the selected client - a disabled service is
+    # omitted entirely, never shown as an inactive tab. A section with zero
+    # visible services is skipped. Predictive is spliced in after
+    # 'monitoring' (its historical position) since its subsections are
+    # discovered dynamically rather than listed in SERVICE_SECTIONS. Campbell
+    # AI's own global kill switch is folded into _enabled() above, so its
+    # 'agents' section is omitted the same way a disabled client service is.
+    navigation_items = []
+    for section_def in SERVICE_SECTIONS:
+        subsections = [
+            {'id': service_id, 'label': SERVICE_LABELS[service_id]}
+            for service_id in section_def['services']
+            if _enabled(service_id)
         ]
-    })
+        if subsections:
+            navigation_items.append({
+                'section': section_def['section'],
+                'label': section_def['label'],
+                'icon': section_def['icon'],
+                'subsections': subsections,
+            })
 
-    # Additional sections (always visible)
-    navigation_items.extend([
-        {
-            'section': 'integration',
-            'label': 'Conexión ERP',
-            'icon': 'fas fa-plug',
-            'subsections': [
-                {'id': 'integration-validacion-avisos', 'label': 'Validación de Avisos'},
-                {'id': 'integration-seguimiento-avisos', 'label': 'Seguimiento de Avisos'}
-            ]
-        },
-        {
-            'section': 'reporting',
-            'label': 'Reportes',
-            'icon': 'fas fa-file-alt',
-            'subsections': [
-                {'id': 'reporting-main', 'label': 'Reportabilidad'}
-            ]
-        },
-        {
+        if section_def['section'] == 'monitoring' and user_has_predictive_access:
+            navigation_items.append({
+                'section': 'predictive',
+                'label': 'Predictivo',
+                'icon': 'fas fa-brain',
+                'subsections': [
+                    {'id': f'predictive-{comp}', 'label': comp.title()}
+                    for comp in predictive_nav_components
+                ]
+            })
+
+    # Admin section: controlled by role, independent of client service availability.
+    if is_admin(user_data):
+        navigation_items.append({
             'section': 'admin',
             'label': 'Administración',
             'icon': 'fas fa-cog',
             'subsections': [
-                {'id': 'admin-main', 'label': 'Administración'}
+                {'id': 'admin-main', 'label': 'Administración'},
+                {'id': 'admin-user-registry', 'label': 'Registro de usuarios'},
             ]
-        },
-    ])
-    
-    # Build left menu with improved styling
+        })
+
+    return navigation_items
+
+
+def build_menu_items(navigation_items: list) -> list:
+    """Render navigation_items (see build_navigation_items) into sidebar components."""
     menu_items = []
     for section in navigation_items:
         # Section header - improved typography and spacing
@@ -491,7 +455,7 @@ def create_main_dashboard(user_data: dict) -> html.Div:
             style={"borderBottom": "2px solid rgba(255,255,255,0.1)"}
             )
         )
-        
+
         # Subsections - improved interaction states
         for subsection in section['subsections']:
             menu_items.append(
@@ -513,7 +477,29 @@ def create_main_dashboard(user_data: dict) -> html.Div:
                     }
                 )
             )
-    
+    return menu_items
+
+
+def create_main_dashboard(user_data: dict) -> html.Div:
+    """
+    Create main dashboard layout with redesigned navigation and unified shell.
+
+    Args:
+        user_data: User information dictionary
+
+    Returns:
+        Professional dashboard layout with full-height sidebar and integrated header
+    """
+    # Get clients user has access to
+    available_clients = user_data.get('clients', [])
+
+    # Initial render uses the client-selector's own default (its first
+    # option) - dashboard/callbacks/sidebar_callbacks.py takes over from
+    # here and re-renders #sidebar-nav-menu whenever the selector changes.
+    default_client = available_clients[0] if available_clients else None
+    navigation_items = build_navigation_items(default_client, user_data)
+    menu_items = build_menu_items(navigation_items)
+
     # Full-height sidebar with no gaps
     left_menu = html.Div([
         # Sidebar header
@@ -535,9 +521,12 @@ def create_main_dashboard(user_data: dict) -> html.Div:
             "borderBottom": "2px solid rgba(255,255,255,0.1)"
         }),
         
-        # Menu items container
+        # Menu items container - re-rendered by dashboard/callbacks/sidebar_callbacks.py
+        # whenever client-selector changes, so it always reflects the
+        # currently selected client's enabled services.
         html.Div(
-            menu_items,
+            id='sidebar-nav-menu',
+            children=menu_items,
             className="p-3 sidebar-menu",
             style={"overflowY": "auto", "height": "calc(100vh - 142px)"}
         )
@@ -581,7 +570,10 @@ def create_app_layout() -> html.Div:
     return html.Div([
         # Store user info (initialized to None to trigger initial callback)
         dcc.Store(id='user-info-store', storage_type='session', data=None),
-        
+
+        # Session-scoped operator name for ERP notice validation (Validación de Avisos)
+        dcc.Store(id='erp-validator-operator-store', storage_type='session', data=None),
+
         # Store navigation state for cross-page navigation
         dcc.Store(id='navigation-state', storage_type='memory', data=None),
         
@@ -590,7 +582,7 @@ def create_app_layout() -> html.Div:
         
         # Store for alerts internal navigation
         dcc.Store(id='alerts-navigation-state', storage_type='memory', data=None),
-        
+
         # Page content (initialized with login page, will be replaced by callback)
         html.Div(id='page-content', children=create_login_page())
     ])

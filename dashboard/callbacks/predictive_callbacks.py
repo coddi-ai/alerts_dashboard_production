@@ -2,11 +2,13 @@
 Predictive callbacks - handles internal tab switching and evidence interactivity.
 """
 
+import re
+
 from dash import html, dcc, Input, Output, State, no_update
 import pandas as pd
 from src.utils.logger import get_logger
 from config.settings import get_settings
-from src.data.loaders import get_latest_component_hours
+from src.data.loaders import get_latest_component_hours, load_oil_classified
 from dashboard.components.predictive_config import (
     get_failure_modes_dict,
     get_failure_mode_options,
@@ -24,6 +26,61 @@ from dashboard.tabs.tab_predictive_evidence import (
 )
 
 logger = get_logger(__name__)
+
+
+def _normalize_unit_id(unit_id):
+    """T_09 -> T_9, same criterion used across the predictive module."""
+    if pd.isna(unit_id):
+        return unit_id
+    unit_str = str(unit_id)
+    match = re.match(r"^([A-Za-z]+)_(0+)(\d+)$", unit_str)
+    if match:
+        return f"{match.group(1)}_{match.group(3)}"
+    return unit_str
+
+
+def _load_real_oil_samples(client, component, unit):
+    """
+    Load real (non-forward-filled) oil samples for a component/unit from the
+    oil technique's golden layer (data/oil/golden/{client}/classified.parquet).
+
+    Predictivo's component.csv carries oil values forward across every daily
+    row between samples, which makes the timeseries chart look like a
+    staircase. This reads the actual lab reports instead - one row per real
+    sample - so the chart reflects true sample-to-sample variation.
+
+    Matches on componentName / componentNameNormalized (case-insensitive,
+    exact) - this works for clients where the oil naming already aligns with
+    the Predictivo component key (e.g. CDA's "motor"/"transmision"). Returns
+    None when no matching rows are found, so the caller can fall back to the
+    component.csv data instead of showing an empty chart.
+    """
+    try:
+        df_classified = load_oil_classified(client)
+    except Exception as exc:  # noqa: BLE001 - fall back to component.csv on any issue
+        logger.warning(f"No se pudo cargar classified.parquet para {client}: {exc}")
+        return None
+
+    if df_classified is None or df_classified.empty:
+        return None
+
+    comp_key = (component or "").strip().lower()
+    name_cols = [c for c in ("componentName", "componentNameNormalized") if c in df_classified.columns]
+    if not name_cols:
+        return None
+
+    mask = pd.Series(False, index=df_classified.index)
+    for col in name_cols:
+        mask = mask | (df_classified[col].astype(str).str.strip().str.lower() == comp_key)
+
+    comp_rows = df_classified[mask]
+    if comp_rows.empty or "unitId" not in comp_rows.columns:
+        return None
+
+    unit_norm = _normalize_unit_id(unit)
+    comp_rows = comp_rows[comp_rows["unitId"].apply(_normalize_unit_id) == unit_norm]
+
+    return comp_rows if not comp_rows.empty else None
 
 
 def register_callbacks(app):
@@ -107,6 +164,22 @@ def register_callbacks(app):
                 # Detailed evidence (updated by callback)
                 html.Div(id="predictive-ev-detailed-content"),
             ])
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # OVERVIEW: Análisis de Riesgo view switch (Riesgo Acumulado / Prioridad Actual)
+    # ══════════════════════════════════════════════════════════════════════════
+
+    @app.callback(
+        Output("predictive-risk-curve-container", "style"),
+        Output("predictive-risk-priority-container", "style"),
+        Input("predictive-risk-view-selector", "value"),
+        prevent_initial_call=True,
+    )
+    def toggle_risk_view(view):
+        """Switch between the accumulated-risk curve and the priority cards without re-rendering either."""
+        if view == "acumulado":
+            return {"display": "block"}, {"display": "none"}
+        return {"display": "none"}, {"display": "block"}
 
     # ══════════════════════════════════════════════════════════════════════════
     # OVERVIEW: Sort failure mode table by selected period
@@ -430,16 +503,18 @@ def register_callbacks(app):
     def update_oil_chart(selected_vars, oil_range, selected_unit, client, component):
         """Update oil timeseries chart based on user-selected variables."""
         from dashboard.components.predictive_charts import create_oil_timeseries_90d
-        from dashboard.components.predictive_config import OIL_LABELS, OIL_THRESHOLDS
+        from dashboard.components.predictive_config import OIL_LABELS, load_predictive_oil_limits_four
 
         if not selected_vars or not selected_unit or not client or not component:
             return html.P("Seleccione al menos una variable de aceite.",
                          className="text-muted", style={"fontSize": "13px", "padding": "20px", "textAlign": "center"})
 
-        # Resolve per-client label/threshold dicts (fallback to cda if missing)
+        # Resolve per-client labels (fallback to cda if missing) and the
+        # four-limit Stewart dict (LIC/LIM/LSM/LSC, v2.8) for this component -
+        # never the legacy three-limit OIL_THRESHOLDS table.
         _ckey = (client or "cda").lower()
         oil_labels = OIL_LABELS.get(_ckey, OIL_LABELS["cda"])
-        oil_thresholds = OIL_THRESHOLDS.get(_ckey, OIL_THRESHOLDS["cda"])
+        oil_limits_four = load_predictive_oil_limits_four(_ckey, component)
 
         components = _discover_components(client)
         filepath = components.get(component)
@@ -454,10 +529,18 @@ def register_callbacks(app):
         if df_unit.empty:
             return html.P("No hay datos para esta unidad.", className="text-muted")
 
-        # Always pass thresholds — the chart function shows limit lines when len(vars)==1
+        # Prefer real (non-forward-filled) samples from the oil golden layer so
+        # the chart shows true sample-to-sample variation instead of a
+        # staircase. Falls back to component.csv when the oil dataset has no
+        # matching component/unit rows (e.g. naming mismatch for this client).
+        df_oil_real = _load_real_oil_samples(client, component, selected_unit)
+        use_real = df_oil_real is not None and any(v in df_oil_real.columns for v in selected_vars)
+        df_for_chart = df_oil_real if use_real else df_unit
+
+        # Always pass limits — the chart function shows limit lines when len(vars)==1
         fig = create_oil_timeseries_90d(
-            df_unit, selected_vars, oil_labels,
-            oil_thresholds=oil_thresholds,
+            df_for_chart, selected_vars, oil_labels,
+            oil_limits_four=oil_limits_four,
             oil_range=oil_range,
         )
 
