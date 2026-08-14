@@ -40,6 +40,20 @@ from src.charts.builders import (
     build_time_series,
     build_treemap,
 )
+from src.campbell_ai.oil_limits import (
+    OIL_GROUP_ORDER,
+    build_four_limit_radar,
+    build_oil_time_series_grid,
+    classify_four_limit,
+    four_limit_for_essay,
+    normalize_four_limit,
+    oil_element_groups,
+)
+from src.campbell_ai.signals import (
+    build_alert_context_panels,
+    companions_for,
+    signal_display_label,
+)
 from src.charts.signals import signal_label
 from src.charts.theme import STATUS_COLORS
 
@@ -73,6 +87,17 @@ class ChartDefinition:
     caption: str = ""
     requires_predictive_module: bool = False
     tags: tuple[str, ...] = field(default=())
+    # The kind of question this chart answers, in the user's words rather than the dataset's.
+    # `description` says what the figure *is*; this says when to reach for it. Surfaced by
+    # `list_charts`, which is what the agent reads before choosing, so a chart with a good
+    # `use_when` gets picked for the questions it serves instead of losing to a generic
+    # ad-hoc bar chart.
+    use_when: str = ""
+    # Where the same information lives in full inside the dashboard. The answer cites it so a
+    # user who wants more than one figure gets a destination instead of "mira el dashboard".
+    # Must match a real route in dashboard/services_registry.py::NAV_PATHS.
+    dashboard_route: str = ""
+    dashboard_section: str = ""
 
 
 class DashboardChartRegistry:
@@ -243,6 +268,272 @@ class DashboardChartRegistry:
             "by_status": self._counts(frame, status),
         }
 
+    def _oil_essay_group_radar(self, client: str, params: dict[str, Any]):
+        """Oil essays of one component, split by element group, against LSM/LSC.
+
+        Reproduces the dashboard's own oil radar (Monitoreo > Aceite > Detalle) rather than
+        inventing a second look for the same information, so a user who sees this in the chat
+        and then opens the dashboard recognises it.
+
+        Two things it does that the retired `oil_essay_radar` could not:
+
+        - **It reads the four-limit contract** (LIC/LIM/LSM/LSC), which is what the dashboard
+          classifies against. The old one used the legacy three-threshold file, so it could
+          not speak the marginal/condenatorio vocabulary the rest of the product uses.
+        - **It splits by element group.** Iron and silicon on one axis set say nothing:
+          wear metals, contaminants and additives are read separately because they answer
+          different questions (is it wearing / is dirt getting in / is the oil spent).
+
+        The 0-100 normalization puts every threshold at a fixed radius (LIC 20, LIM 40,
+        LSM 60, LSC 80) so the rings are circles. Normalizing by a single threshold instead
+        cannot work here: measured across CDA, LSC/LSM ranges from 1.0 to 8.5, so the outer
+        ring would be a jagged shape rather than a reference.
+        """
+        unit_id = str(params.get("unit_id") or "").strip()
+        if not unit_id:
+            raise CampbellDataError(
+                'oil_essay_group_radar requiere unit_id (por ejemplo unit_id="T_15")'
+            )
+        requested_component = str(params.get("component") or "").strip()
+
+        samples = self.repository.load("oil_classified", client)
+        unit_col = self._column(samples, ("unitId", "unit_id", "UnitId"))
+        component_col = self._column(samples, ("componentName",))
+        date_col = self._column(samples, ("sampleDate", "reportDate"))
+        scoped = self.repository._filter_unit(samples, unit_col, unit_id)
+        if requested_component:
+            scoped = self.repository._filter_contains(
+                scoped, component_col, requested_component
+            )
+        if scoped.empty:
+            raise CampbellDataError(
+                f"Sin muestras de aceite para {unit_id}"
+                + (f" y componente {requested_component}" if requested_component else "")
+            )
+
+        scoped = scoped.assign(
+            __date=pd.to_datetime(scoped[date_col], errors="coerce")
+        ).sort_values("__date")
+        latest = scoped.iloc[-1]
+        component = str(latest[component_col])
+
+        limits = self.repository.four_limit_thresholds(
+            client,
+            machine=str(latest.get("machineName") or ""),
+            component=str(latest.get("componentNameNormalized") or component),
+        )
+        if not limits:
+            raise CampbellDataError(
+                f"No hay límites de cuatro niveles para el componente {component}"
+            )
+
+        hour_range = str(latest.get("oilHourRange") or "UNKNOWN")
+        groups = oil_element_groups()
+        status = str(latest.get("report_status") or "Normal")
+
+        rendered: list[str] = []
+        skipped: dict[str, int] = {}
+        figures: dict[str, go.Figure] = {}
+        detail: dict[str, Any] = {}
+
+        for group in OIL_GROUP_ORDER:
+            axes, values, raw, statuses = [], [], [], []
+            has_lower = False
+            for essay in sorted(e for e, g in groups.items() if g == group):
+                if essay not in latest.index or pd.isna(latest[essay]):
+                    continue
+                thresholds = four_limit_for_essay(limits, essay, hour_range)
+                if thresholds is None:
+                    continue
+                lic, lim = thresholds.get("LIC"), thresholds.get("LIM")
+                lsm, lsc = thresholds.get("LSM", 0), thresholds.get("LSC", 0)
+                has_lower = has_lower or (lic is not None and lim is not None)
+                measured = float(latest[essay])
+                axes.append(essay)
+                raw.append(round(measured, 3))
+                values.append(normalize_four_limit(measured, lic, lim, lsm, lsc))
+                statuses.append(classify_four_limit(measured, lic, lim, lsm, lsc))
+                detail[essay] = {
+                    "group": group,
+                    "value": round(measured, 3),
+                    "LIC": lic,
+                    "LIM": lim,
+                    "LSM": lsm,
+                    "LSC": lsc,
+                    "status": statuses[-1],
+                }
+            # Two axes make a line, not a radar; saying so beats rendering something
+            # unreadable and letting the agent describe it as evidence.
+            if len(axes) < 3:
+                if axes:
+                    skipped[group] = len(axes)
+                continue
+            figures[group] = build_four_limit_radar(
+                axes, values, raw, statuses, group, has_lower, status
+            )
+            rendered.append(group)
+
+        if not figures:
+            raise CampbellDataError(
+                f"Ningún grupo de elementos alcanza 3 ensayos con límite para {component}"
+            )
+
+        primary = next(g for g in OIL_GROUP_ORDER if g in figures)
+        figure = figures[primary]
+        sample_date = latest["__date"]
+        return figure, {
+            "unit_id": unit_id,
+            "component": component,
+            "group": primary,
+            "groups_rendered": rendered,
+            "groups_skipped_few_essays": skipped,
+            "sample_date": (
+                str(sample_date.date()) if pd.notna(sample_date) else None
+            ),
+            "report_status": status,
+            "oil_hour_range": hour_range,
+            "essays": detail,
+        }
+
+    def _oil_history_panels(self, client: str, params: dict[str, Any]):
+        """Oil history of one component as paired panels, with limits.
+
+        The radar answers "how is this sample"; this answers "how did it get here", which is
+        the question that follows it almost every time. Same pairs the dashboard uses, so a
+        user who asks in the chat and then opens Monitoreo > Aceite sees the same panels.
+        """
+        unit_id = str(params.get("unit_id") or "").strip()
+        if not unit_id:
+            raise CampbellDataError(
+                'oil_history_panels requiere unit_id (por ejemplo unit_id="T_15")'
+            )
+        requested_component = str(params.get("component") or "").strip()
+
+        samples = self.repository.load("oil_classified", client)
+        unit_col = self._column(samples, ("unitId", "unit_id", "UnitId"))
+        component_col = self._column(samples, ("componentName",))
+        date_col = self._column(samples, ("sampleDate", "reportDate"))
+        scoped = self.repository._filter_unit(samples, unit_col, unit_id)
+        if requested_component:
+            scoped = self.repository._filter_contains(
+                scoped, component_col, requested_component
+            )
+        if scoped.empty:
+            raise CampbellDataError(
+                f"Sin muestras de aceite para {unit_id}"
+                + (f" y componente {requested_component}" if requested_component else "")
+            )
+
+        # Without an explicit component the newest sample decides, so the panels describe one
+        # component rather than silently interleaving several histories on the same axes.
+        scoped = scoped.assign(sampleDate=pd.to_datetime(scoped[date_col], errors="coerce"))
+        component = str(scoped.sort_values("sampleDate").iloc[-1][component_col])
+        history = scoped[scoped[component_col].astype(str) == component].sort_values(
+            "sampleDate"
+        )
+
+        days = self._clamp(params.get("days"), 0, 0, 3650)
+        if days:
+            cutoff = history["sampleDate"].max() - pd.Timedelta(days=days)
+            windowed = history[history["sampleDate"] >= cutoff]
+            if len(windowed) >= 2:
+                history = windowed
+
+        latest = history.iloc[-1]
+        limits = self.repository.four_limit_thresholds(
+            client,
+            machine=str(latest.get("machineName") or ""),
+            component=str(latest.get("componentNameNormalized") or component),
+        )
+        figure, detail = build_oil_time_series_grid(
+            history,
+            limits,
+            str(latest.get("oilHourRange") or "UNKNOWN"),
+            oil_element_groups(),
+            title=f"Historial de aceite · {unit_id} · {component}",
+        )
+        if not detail["panels"]:
+            raise CampbellDataError(
+                f"Sin ensayos con historial para {unit_id} y componente {component}"
+            )
+        return figure, {
+            "unit_id": unit_id,
+            "component": component,
+            "samples": int(len(history)),
+            "period": (
+                f"{history['sampleDate'].min().date()} a {history['sampleDate'].max().date()}"
+                if history["sampleDate"].notna().any()
+                else ""
+            ),
+            "panels": {name: essays for name, essays in detail["panels"].items() if essays},
+            "limits_drawn": detail["limits"],
+            "report_status": str(latest.get("report_status") or ""),
+        }
+
+    def _alert_context_signals(self, client: str, params: dict[str, Any]):
+        """The signal that fired an alert plus the ones that explain it, sharing a time axis.
+
+        `alert_sensor_trend` plots one signal. Reading a trigger alone is how a single high
+        value becomes the wrong work order: coolant temperature means one thing next to a
+        falling oil pressure and another next to a normal one. The companions come from
+        `TRIGGER_COMPANION_SIGNALS`, which encodes that pairing.
+        """
+        unit_id = str(params.get("unit_id") or "").strip()
+        if not unit_id:
+            raise CampbellDataError(
+                'alert_context_signals requiere unit_id (por ejemplo unit_id="T_18")'
+            )
+
+        frame = self.repository.load("alerts_detail", client)
+        unit_col = self._column(frame, ("Unit", "UnitId", "unit_id"))
+        scoped = self.repository._filter_unit(frame, unit_col, unit_id)
+        if scoped.empty:
+            raise CampbellDataError(f"Sin detalle de alertas para {unit_id}")
+
+        alert_id = str(params.get("alert_id") or "").strip()
+        if alert_id:
+            scoped = scoped[scoped["AlertID"].astype(str) == alert_id]
+            if scoped.empty:
+                raise CampbellDataError(
+                    f"La alerta {alert_id} no existe para {unit_id}"
+                )
+        else:
+            # Newest alert of the unit, so "¿por qué se alertó este equipo?" resolves without
+            # the user having to know an id.
+            scoped = scoped.assign(
+                __start=pd.to_datetime(scoped["Alert_TimeStart"], errors="coerce")
+            )
+            alert_id = str(scoped.sort_values("__start").iloc[-1]["AlertID"])
+            scoped = scoped[scoped["AlertID"].astype(str) == alert_id]
+
+        trigger = str(params.get("signal") or scoped.iloc[0].get("Trigger") or "").strip()
+        if not trigger:
+            raise CampbellDataError(
+                f"La alerta {alert_id} no declara señal disparadora"
+            )
+
+        scoped = scoped.assign(
+            __time=pd.to_datetime(scoped["TimeStart"], errors="coerce")
+        ).sort_values("__time")
+
+        wanted = companions_for(trigger)
+        present = [s for s in wanted if f"{s}_Value" in scoped.columns]
+        if not present:
+            raise CampbellDataError(
+                f"Ninguna señal de {trigger} tiene datos en el detalle de la alerta"
+            )
+        figure, detail = build_alert_context_panels(scoped, present, trigger, alert_id, unit_id)
+        return figure, {
+            "unit_id": unit_id,
+            "alert_id": alert_id,
+            "trigger": trigger,
+            "trigger_label": signal_display_label(trigger),
+            "signals_plotted": present,
+            "companions_missing": [s for s in wanted if s not in present],
+            "limits": detail["limits"],
+            "samples": int(len(scoped)),
+        }
+
     def _alert_ranking(self, client: str, params: dict[str, Any]):
         days = self._clamp(params.get("days"), 60, 1, 3650)
         top_n = self._clamp(params.get("top_n"), 15, 3, 30)
@@ -386,293 +677,6 @@ class DashboardChartRegistry:
             "note": "Un puntaje menor indica peor condición del componente.",
         }
 
-    def _oil_essay_radar(self, client: str, params: dict[str, Any]):
-        """Oil essays of one component against their thresholds.
-
-        Essays live on incomparable scales (iron in the tens, zinc in the thousands),
-        so each axis is the ratio of the measurement to its alert threshold. A ring at
-        1.0 is the limit itself, which makes one glance enough. The summary keeps the
-        raw values and thresholds so the agent cites measured numbers, not ratios.
-        """
-        unit_id = str(params.get("unit_id") or "").strip()
-        if not unit_id:
-            raise CampbellDataError(
-                "oil_essay_radar requiere unit_id (por ejemplo unit_id=\"T_15\")"
-            )
-        component = str(params.get("component") or "").strip()
-
-        samples = self.repository.load("oil_classified", client).copy()
-        unit_col = self._column(samples, ("unitId", "unit_id", "UnitId"))
-        component_col = self._column(samples, ("componentNameNormalized", "componentName"))
-        date_col = self._column(samples, ("sampleDate", "reportDate"))
-        samples[date_col] = pd.to_datetime(samples[date_col], errors="coerce")
-        samples = self.repository._filter_unit(samples, unit_col, unit_id)
-        if component:
-            samples = self.repository._filter_contains(samples, component_col, component)
-        if samples.empty:
-            raise CampbellDataError(
-                f"Sin muestras de aceite para {unit_id}"
-                + (f" y componente {component}" if component else "")
-            )
-        # Without an explicit component, the newest sample is an arbitrary pick that
-        # can silently answer about a different component than the user asked about.
-        # Choose the one in the worst condition and record why.
-        status_col = DashboardDataRepository._resolve_column(
-            samples, ("report_status", "overall_status")
-        )
-        severity_col = DashboardDataRepository._resolve_column(samples, ("severity_score",))
-        if component:
-            selection = "componente solicitado"
-            latest = samples.sort_values(date_col).iloc[-1]
-        else:
-            severity = {"Anormal": 0, "Alerta": 1, "Normal": 2}
-            candidates = (
-                samples.sort_values(date_col)
-                .groupby(component_col, dropna=False)
-                .tail(1)
-                .copy()
-            )
-            order: list[str] = []
-            if status_col:
-                candidates["__severity"] = candidates[status_col].map(
-                    lambda value: severity.get(str(value), 3)
-                )
-                order.append("__severity")
-            if severity_col:
-                candidates["__score"] = -pd.to_numeric(
-                    candidates[severity_col], errors="coerce"
-                ).fillna(0)
-                order.append("__score")
-            if order:
-                candidates = candidates.sort_values(order)
-                selection = "componente en peor condición"
-            else:
-                candidates = candidates.sort_values(date_col, ascending=False)
-                selection = "muestra más reciente"
-            latest = candidates.iloc[0]
-        resolved_component = str(latest[component_col])
-
-        limits = self.repository.load("oil_limits", client)
-        scoped = limits[
-            limits["component"].astype(str).str.casefold() == resolved_component.casefold()
-        ]
-        if scoped.empty:
-            raise CampbellDataError(
-                f"No hay límites de referencia para el componente {resolved_component}"
-            )
-        hour_range = str(latest.get("oilHourRange") or "")
-        if hour_range and (scoped["oilHourRange"].astype(str) == hour_range).any():
-            scoped = scoped[scoped["oilHourRange"].astype(str) == hour_range]
-
-        axes: list[str] = []
-        ratios: list[float] = []
-        detail: dict[str, Any] = {}
-        for _, row in scoped.iterrows():
-            essay = str(row["essay"])
-            if essay not in samples.columns:
-                continue
-            measured = pd.to_numeric(latest.get(essay), errors="coerce")
-            threshold = pd.to_numeric(row.get("threshold_alert"), errors="coerce")
-            if pd.isna(measured) or pd.isna(threshold) or float(threshold) <= 0:
-                continue
-            axes.append(essay)
-            ratios.append(round(float(measured) / float(threshold), 3))
-            detail[essay] = {
-                "value": round(float(measured), 3),
-                "threshold_alert": round(float(threshold), 3),
-                "threshold_critic": (
-                    round(float(row["threshold_critic"]), 3)
-                    if pd.notna(row.get("threshold_critic"))
-                    else None
-                ),
-            }
-        if len(axes) < 3:
-            raise CampbellDataError(
-                "Se necesitan al menos 3 ensayos con límite para construir el radar"
-            )
-
-        status = str(latest.get("report_status") or "")
-        figure = build_radar(
-            [
-                {
-                    "label": f"{unit_id} · {resolved_component}",
-                    "values": ratios,
-                    "status": status,
-                },
-                {
-                    "label": "Límite de alerta",
-                    "values": [1.0] * len(axes),
-                    "fill": False,
-                },
-            ],
-            axes,
-            title=f"Ensayos de aceite vs límite · {unit_id} · {resolved_component}",
-            value_label="Proporción respecto al límite de alerta",
-            subtitle=(
-                f"Muestra del {latest[date_col].date()}"
-                if pd.notna(latest[date_col])
-                else ""
-            ),
-        )
-        return figure, {
-            "unit_id": unit_id,
-            "component": resolved_component,
-            "component_selected_by": selection,
-            "components_available": sorted(
-                {str(value) for value in samples[component_col].dropna().unique()}
-            ),
-            "status": status,
-            "essays": detail,
-            "above_alert_limit": [
-                essay for essay, ratio in zip(axes, ratios) if ratio >= 1
-            ],
-            "note": (
-                "Cada eje es el valor medido dividido por su límite de alerta; 1.0 es el "
-                "límite. Los valores absolutos están en 'essays'. La figura corresponde "
-                f"al componente '{resolved_component}': descríbelo con ese nombre, no "
-                "con el que hayas asumido."
-            ),
-        }
-
-    def _predictive_risk_radar(self, client: str, params: dict[str, Any]):
-        """Failure-mode profile of one unit against the fleet, as in the predictive tab."""
-        unit_id = str(params.get("unit_id") or "").strip()
-        if not unit_id:
-            raise CampbellDataError(
-                "predictive_risk_radar requiere unit_id (por ejemplo unit_id=\"T_15\")"
-            )
-        domain = str(params.get("domain") or "motor").strip().lower()
-        payload = json.loads(
-            self.repository.query_predictive_risk(client, domain=domain, limit=30)
-        )
-        if not payload.get("ranking_available") or not payload.get("records"):
-            raise CampbellDataError(
-                f"El modelo predictivo de {domain} no tiene ranking calculado"
-            )
-        records = payload["records"]
-        target = next(
-            (
-                item
-                for item in records
-                if self.repository._normalize_unit(item["unit_id"])
-                == self.repository._normalize_unit(unit_id)
-            ),
-            None,
-        )
-        if target is None:
-            raise CampbellDataError(
-                f"{unit_id} no aparece en el modelo predictivo de {domain}"
-            )
-        axes = list(target.get("top_risks") or {})
-        if len(axes) < 3:
-            raise CampbellDataError("El equipo no tiene suficientes modos de riesgo")
-
-        fleet_median: list[float] = []
-        for axis in axes:
-            values = [
-                float(item["top_risks"][axis])
-                for item in records
-                if axis in (item.get("top_risks") or {})
-            ]
-            fleet_median.append(
-                round(float(pd.Series(values).median()), 1) if values else 0.0
-            )
-        figure = build_radar(
-            [
-                {
-                    "label": str(target["unit_id"]),
-                    "values": [float(target["top_risks"][axis]) for axis in axes],
-                    "status": str(target.get("band") or ""),
-                },
-                {"label": "Mediana de la flota", "values": fleet_median, "fill": False},
-            ],
-            axes,
-            title=f"Modos de riesgo predictivo · {target['unit_id']} · {domain}",
-            value_label="Riesgo del modelo",
-            subtitle=f"Banda {target.get('band')} · ranking {target.get('ranking')}",
-        )
-        return figure, {
-            "unit_id": target["unit_id"],
-            "domain": payload.get("domain"),
-            "ranking": target.get("ranking"),
-            "band": target.get("band"),
-            "top_risks": target.get("top_risks"),
-            "fleet_median": dict(zip(axes, fleet_median)),
-            "note": payload.get("note"),
-        }
-
-    def _oil_severity_histogram(self, client: str, params: dict[str, Any]):
-        """Spread of component severity, to see whether risk is concentrated."""
-        frame = self.repository.load("oil_classified", client).copy()
-        unit_col = self._column(frame, ("unitId", "unit_id", "UnitId"))
-        component_col = self._column(frame, ("componentNameNormalized", "componentName"))
-        date_col = self._column(frame, ("sampleDate", "reportDate"))
-        severity = self._column(frame, ("severity_score",))
-        frame[date_col] = pd.to_datetime(frame[date_col], errors="coerce")
-        frame = (
-            frame.sort_values(date_col)
-            .groupby([unit_col, component_col], dropna=False)
-            .tail(1)
-        )
-        values = pd.to_numeric(frame[severity], errors="coerce").dropna()
-        if values.empty:
-            raise CampbellDataError("Sin puntajes de severidad disponibles")
-        figure = build_histogram(
-            [float(value) for value in values],
-            title="Distribución de severidad por componente (aceite)",
-            value_label="Puntaje de severidad",
-            bins=15,
-            subtitle="Muestra más reciente por equipo y componente",
-        )
-        return figure, {
-            "components_evaluated": int(len(values)),
-            "min": round(float(values.min()), 3),
-            "max": round(float(values.max()), 3),
-            "mean": round(float(values.mean()), 3),
-            "median": round(float(values.median()), 3),
-        }
-
-    def _unit_health_gauge(self, client: str, params: dict[str, Any]):
-        """One unit's telemetry priority against its bands, as a single indicator."""
-        unit_id = str(params.get("unit_id") or "").strip()
-        if not unit_id:
-            raise CampbellDataError(
-                "unit_health_gauge requiere unit_id (por ejemplo unit_id=\"T_18\")"
-            )
-        payload = json.loads(
-            self.repository.query_telemetry_health(client, unit_id=unit_id, limit=1)
-        )
-        records = payload.get("records") or []
-        if not records:
-            raise CampbellDataError(f"Sin evaluación de telemetría para {unit_id}")
-        record = records[0]
-        score = record.get("priority_score")
-        if score is None:
-            raise CampbellDataError("La fuente no expone priority_score para este equipo")
-        maximum = max(100.0, float(score) * 1.2)
-        figure = build_gauge(
-            float(score),
-            title=f"Prioridad de telemetría · {unit_id}",
-            value_label="Puntaje de prioridad",
-            maximum=maximum,
-            bands=[
-                (0, maximum * 0.35, STATUS_COLORS["Normal"]),
-                (maximum * 0.35, maximum * 0.75, STATUS_COLORS["Alerta"]),
-                (maximum * 0.75, maximum, STATUS_COLORS["Anormal"]),
-            ],
-            subtitle=str(payload.get("evaluation", {}).get("latest_week") or "")
-            and f"Semana {payload['evaluation']['latest_week']}",
-        )
-        return figure, {
-            "unit_id": unit_id,
-            "priority_score": score,
-            "overall_status": record.get("overall_status"),
-            "components_anormal": record.get("components_anormal"),
-            "components_alerta": record.get("components_alerta"),
-            "scale_max": round(maximum, 1),
-            "note": "Un puntaje de prioridad mayor implica mayor urgencia de atención.",
-        }
-
     def _alert_sensor_trend(self, client: str, params: dict[str, Any]):
         """Per-signal series of one alert against its limits, one panel per signal."""
         requested = str(params.get("signal") or "").strip()
@@ -791,6 +795,10 @@ class DashboardChartRegistry:
                     "domain": definition.domain,
                     "description": definition.description,
                     "parameters": list(definition.parameters),
+                    # What the agent reads to choose. Without these two it can only match on
+                    # the title, which is why a good chart used to lose to a generic bar.
+                    "use_when": definition.use_when,
+                    "dashboard_section": definition.dashboard_section,
                 }
             )
         return available
@@ -835,7 +843,15 @@ class DashboardChartRegistry:
             chart_type=definition.chart_type,
             figure=json.loads(figure.to_json()),
             parameters={"chart_id": definition.chart_id, **cleaned},
-            summary={"chart_id": definition.chart_id, **summary},
+            summary={
+                "chart_id": definition.chart_id,
+                # Travels with the artifact so the agent composing the answer can point the
+                # user at the dashboard section holding the full view. A chart in the chat
+                # answers one question; the section answers the next three.
+                "dashboard_section": definition.dashboard_section,
+                "dashboard_route": definition.dashboard_route,
+                **summary,
+            },
         )
 
     @staticmethod
@@ -920,6 +936,75 @@ class DashboardChartRegistry:
 
 CHART_DEFINITIONS: tuple[ChartDefinition, ...] = (
     ChartDefinition(
+        chart_id="oil_history_panels",
+        caption="Historial de ensayos de aceite del componente, por pares de lectura",
+        title="Historial de aceite por panel",
+        domain="aceite",
+        description=(
+            "Series temporales de los ensayos de un componente, agrupadas en los pares que se "
+            "leen juntos (hierro con PQ, silicio con aluminio, sodio con potasio), con los "
+            "limites de cada ensayo. Reproduce la grilla del dashboard."
+        ),
+        datasets=("oil_classified",),
+        parameters=("unit_id", "component", "days"),
+        builder=DashboardChartRegistry._oil_history_panels,
+        chart_type="line",
+        tags=("aceite", "historial", "tendencia"),
+        use_when=(
+            "El usuario pregunta como viene evolucionando el aceite de un componente, si un "
+            "elemento viene subiendo, desde cuando, o pide el historial o la tendencia de las "
+            "muestras. Responde 'como llego hasta aca', que es la pregunta que sigue al radar."
+        ),
+        dashboard_route="/monitoring/oil",
+        dashboard_section="Monitoreo > Aceite > Detalle",
+    ),
+    ChartDefinition(
+        chart_id="alert_context_signals",
+        caption="Senal que gatillo la alerta junto a las que la explican",
+        title="Contexto de una alerta",
+        domain="alertas",
+        description=(
+            "La senal disparadora de una alerta y sus senales acompanantes, en paneles con eje "
+            "de tiempo compartido y el limite de cada una."
+        ),
+        datasets=("alerts_detail",),
+        parameters=("unit_id", "alert_id", "signal"),
+        builder=DashboardChartRegistry._alert_context_signals,
+        chart_type="line",
+        tags=("alertas", "evidencia", "senales"),
+        use_when=(
+            "El usuario pregunta por que se gatillo una alerta, que la explica, si fue real o "
+            "un sensor, o pide el contexto de una alerta. Preferilo sobre alert_sensor_trend "
+            "cuando la pregunta sea de diagnostico y no solo de ver una senal: agrega las "
+            "senales que permiten confirmar o descartar la causa."
+        ),
+        dashboard_route="/monitoring/alerts",
+        dashboard_section="Monitoreo > Alertas > Detalle",
+    ),
+    ChartDefinition(
+        chart_id="oil_essay_group_radar",
+        caption="Ensayos de aceite del componente contra sus limites de cuatro niveles",
+        title="Condicion tribologica por grupo de elementos",
+        domain="aceite",
+        description=(
+            "Radar de los ensayos de una muestra contra LSM y LSC, separado por grupo de "
+            "elementos (desgaste, contaminante, aditivo). Reproduce el radar del dashboard."
+        ),
+        datasets=("oil_classified",),
+        parameters=("unit_id", "component"),
+        builder=DashboardChartRegistry._oil_essay_group_radar,
+        chart_type="radar",
+        tags=("aceite", "componentes", "limites"),
+        use_when=(
+            "El usuario pregunta por la condicion tribologica de un componente: que elementos "
+            "estan fuera de limite, si el desgaste viene de contaminacion o del aditivo, o pide "
+            "'el radar' de una muestra de aceite. Separa desgaste, contaminante y aditivo, que "
+            "es como se lee un informe de aceite."
+        ),
+        dashboard_route="/monitoring/oil",
+        dashboard_section="Monitoreo > Aceite > Detalle",
+    ),
+    ChartDefinition(
         chart_id="oil_fleet_status",
         title="Estado de la flota según análisis de aceite",
         domain="aceite",
@@ -929,6 +1014,11 @@ CHART_DEFINITIONS: tuple[ChartDefinition, ...] = (
         builder=DashboardChartRegistry._oil_fleet_status,
         chart_type="pie",
         tags=("flota", "estado", "aceite"),
+        use_when=(
+            "El usuario pregunta cómo está la flota en general por aceite, cuántos equipos hay en cada estado, o pide un panorama tribológico sin nombrar un equipo."
+        ),
+        dashboard_route="/monitoring/oil",
+        dashboard_section="Monitoreo > Aceite",
     ),
     ChartDefinition(
         chart_id="telemetry_fleet_status",
@@ -940,6 +1030,11 @@ CHART_DEFINITIONS: tuple[ChartDefinition, ...] = (
         builder=DashboardChartRegistry._telemetry_fleet_status,
         chart_type="pie",
         tags=("flota", "estado", "telemetria"),
+        use_when=(
+            "El usuario pregunta por el estado general de la flota según sensores, o cuántos equipos están anormales en la última semana evaluada."
+        ),
+        dashboard_route="/monitoring/telemetry",
+        dashboard_section="Monitoreo > Telemetría",
     ),
     ChartDefinition(
         chart_id="telemetry_component_status",
@@ -951,6 +1046,11 @@ CHART_DEFINITIONS: tuple[ChartDefinition, ...] = (
         builder=DashboardChartRegistry._telemetry_component_status,
         chart_type="stacked_bar",
         tags=("componentes", "telemetria"),
+        use_when=(
+            "El usuario pregunta qué componentes están peor por telemetría, o dónde se concentran los problemas a nivel de componente."
+        ),
+        dashboard_route="/monitoring/telemetry",
+        dashboard_section="Monitoreo > Telemetría",
     ),
     ChartDefinition(
         chart_id="oil_component_status",
@@ -962,6 +1062,11 @@ CHART_DEFINITIONS: tuple[ChartDefinition, ...] = (
         builder=DashboardChartRegistry._oil_component_status,
         chart_type="stacked_bar",
         tags=("componentes", "aceite"),
+        use_when=(
+            "El usuario pregunta qué componentes están peor por análisis de aceite, o dónde se concentran las muestras anormales."
+        ),
+        dashboard_route="/monitoring/oil",
+        dashboard_section="Monitoreo > Aceite",
     ),
     ChartDefinition(
         chart_id="alert_ranking",
@@ -974,6 +1079,11 @@ CHART_DEFINITIONS: tuple[ChartDefinition, ...] = (
         builder=DashboardChartRegistry._alert_ranking,
         chart_type="bar",
         tags=("ranking", "alertas"),
+        use_when=(
+            "El usuario pregunta qué equipos tienen más alertas, cuáles son los más problemáticos, o pide priorizar por cantidad de alertas."
+        ),
+        dashboard_route="/monitoring/alerts",
+        dashboard_section="Monitoreo > Alertas",
     ),
     ChartDefinition(
         chart_id="predictive_motor_ranking",
@@ -987,6 +1097,11 @@ CHART_DEFINITIONS: tuple[ChartDefinition, ...] = (
         chart_type="bar",
         requires_predictive_module=True,
         tags=("ranking", "predictivo"),
+        use_when=(
+            "El usuario pregunta qué equipos tienen mayor riesgo de falla de motor, o pide priorizar por riesgo predictivo en vez de por alertas ya ocurridas."
+        ),
+        dashboard_route="/predictive/motor",
+        dashboard_section="Predictivo > Motor",
     ),
     ChartDefinition(
         chart_id="alert_trend",
@@ -998,6 +1113,11 @@ CHART_DEFINITIONS: tuple[ChartDefinition, ...] = (
         builder=DashboardChartRegistry._alert_trend,
         chart_type="line",
         tags=("tendencia", "alertas"),
+        use_when=(
+            "El usuario pregunta si las alertas suben o bajan, cómo evolucionaron en el tiempo, o pide comparar meses."
+        ),
+        dashboard_route="/monitoring/alerts",
+        dashboard_section="Monitoreo > Alertas",
     ),
     ChartDefinition(
         chart_id="alert_trigger_treemap",
@@ -1009,6 +1129,11 @@ CHART_DEFINITIONS: tuple[ChartDefinition, ...] = (
         builder=DashboardChartRegistry._alert_trigger_treemap,
         chart_type="treemap",
         tags=("composicion", "alertas"),
+        use_when=(
+            "El usuario pregunta qué está gatillando las alertas, qué variable predomina, o pide la composición por tipo de disparador."
+        ),
+        dashboard_route="/monitoring/alerts",
+        dashboard_section="Monitoreo > Alertas",
     ),
     ChartDefinition(
         chart_id="telemetry_component_heatmap",
@@ -1020,63 +1145,11 @@ CHART_DEFINITIONS: tuple[ChartDefinition, ...] = (
         builder=DashboardChartRegistry._telemetry_component_heatmap,
         chart_type="heatmap",
         tags=("heatmap", "telemetria", "componentes"),
-    ),
-    ChartDefinition(
-        chart_id="oil_essay_radar",
-        caption="Ensayos de la muestra más reciente comparados con su límite de alerta",
-        title="Ensayos de aceite vs límites de un componente",
-        domain="aceite",
-        description=(
-            "Radar de los ensayos de la muestra más reciente comparados con su límite "
-            "de alerta; requiere unit_id y opcionalmente component"
+        use_when=(
+            "El usuario quiere ver de una sola vez qué equipo y qué componente están comprometidos, o pide un cruce equipo por componente."
         ),
-        datasets=("oil_classified", "oil_limits"),
-        parameters=("unit_id", "component"),
-        builder=DashboardChartRegistry._oil_essay_radar,
-        chart_type="radar",
-        tags=("radar", "aceite", "ensayos"),
-    ),
-    ChartDefinition(
-        chart_id="predictive_risk_radar",
-        caption="Modos de riesgo del modelo frente a la mediana de la flota",
-        title="Modos de riesgo predictivo de un equipo",
-        domain="predictivo",
-        description=(
-            "Radar de los modos de falla del modelo comparados con la mediana de la "
-            "flota; requiere unit_id y admite domain motor o transmision"
-        ),
-        datasets=("predictive_motor",),
-        parameters=("unit_id", "domain"),
-        builder=DashboardChartRegistry._predictive_risk_radar,
-        chart_type="radar",
-        requires_predictive_module=True,
-        tags=("radar", "predictivo"),
-    ),
-    ChartDefinition(
-        chart_id="oil_severity_histogram",
-        title="Distribución de severidad por componente (aceite)",
-        domain="aceite",
-        description="Histograma del puntaje de severidad de la muestra más reciente",
-        datasets=("oil_classified",),
-        parameters=(),
-        builder=DashboardChartRegistry._oil_severity_histogram,
-        chart_type="histogram",
-        tags=("distribucion", "aceite"),
-    ),
-    ChartDefinition(
-        chart_id="unit_health_gauge",
-        caption="Puntaje de prioridad del equipo dentro de sus bandas",
-        title="Prioridad de telemetría de un equipo",
-        domain="telemetria",
-        description=(
-            "Indicador del puntaje de prioridad de un equipo con sus bandas; "
-            "requiere unit_id"
-        ),
-        datasets=("telemetry_machine_status",),
-        parameters=("unit_id",),
-        builder=DashboardChartRegistry._unit_health_gauge,
-        chart_type="gauge",
-        tags=("indicador", "telemetria"),
+        dashboard_route="/monitoring/telemetry",
+        dashboard_section="Monitoreo > Telemetría",
     ),
     ChartDefinition(
         chart_id="alert_sensor_trend",
@@ -1094,6 +1167,11 @@ CHART_DEFINITIONS: tuple[ChartDefinition, ...] = (
         builder=DashboardChartRegistry._alert_sensor_trend,
         chart_type="line",
         tags=("alertas", "senales", "evidencia"),
+        use_when=(
+            "El usuario pregunta por qué se gatilló una alerta concreta, qué pasó con la señal, o si el valor superó su límite. Es la evidencia de una alerta puntual."
+        ),
+        dashboard_route="/monitoring/alerts",
+        dashboard_section="Monitoreo > Alertas > Detalle",
     ),
     ChartDefinition(
         chart_id="telemetry_signal_trend",
@@ -1116,6 +1194,11 @@ CHART_DEFINITIONS: tuple[ChartDefinition, ...] = (
         builder=DashboardChartRegistry._telemetry_signal_trend,
         chart_type="line",
         tags=("telemetria", "senales", "tendencia"),
+        use_when=(
+            "El usuario pide la serie de una señal de un equipo sin referirse a una alerta, o quiere ver el comportamiento continuo de un sensor en un período."
+        ),
+        dashboard_route="/monitoring/telemetry",
+        dashboard_section="Monitoreo > Telemetría > Detalle",
     ),
 )
 

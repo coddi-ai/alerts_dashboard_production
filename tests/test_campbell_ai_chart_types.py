@@ -70,6 +70,135 @@ def _oil_repository(tmp_path) -> DashboardDataRepository:
     return DashboardDataRepository(tmp_path)
 
 
+def _oil_four_limit_repository(tmp_path) -> DashboardDataRepository:
+    """Oil samples plus the four-limit contract the group radar reads.
+
+    Wear metals carry no lower limit (LIC/LIM null, as in production) while the
+    physico-chemical group does, so one fixture exercises both ring layouts.
+    """
+    oil = tmp_path / "oil" / "golden" / "cda"
+    oil.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "unitId": "T_15",
+                "machineName": "camion",
+                "componentName": "motor",
+                "componentNameNormalized": "motor",
+                "report_status": "Alerta",
+                "sampleDate": "2026-07-01",
+                "oilHourRange": "LT_1000",
+                "Hierro": 65.0,
+                "Cobre": 4.0,
+                "Aluminio": 2.0,
+                "Silicio": 3.0,
+                "Viscocidad": 14.0,
+            }
+        ]
+    ).to_parquet(oil / "classified.parquet", index=False)
+    pd.DataFrame(
+        [
+            {
+                "client": "CDA",
+                "machine": "camion",
+                "component": "motor",
+                "essay": essay,
+                "oilHourRange": "LT_1000",
+                "LIC": lic,
+                "LIM": lim,
+                "LSM": lsm,
+                "LSC": lsc,
+                "min_value": 0.0,
+                "GroupElement": group,
+                "sample_count": 100,
+                "calculation_date": "2026-08-05T11:07:45",
+            }
+            for essay, lic, lim, lsm, lsc, group in (
+                ("Hierro", None, None, 57.0, 66.0, "Desgaste"),
+                ("Cobre", None, None, 8.0, 17.0, "Desgaste"),
+                ("Aluminio", None, None, 3.0, 4.0, "Desgaste"),
+                ("Silicio", None, None, 6.0, 8.0, "Contaminante"),
+                ("Viscocidad", 12.0, 13.0, 16.0, 18.0, "Fisico Quimico"),
+            )
+        ]
+    ).to_parquet(oil / "stewart_limits_four.parquet", index=False)
+    return DashboardDataRepository(tmp_path)
+
+
+
+def _oil_history_repository(tmp_path) -> DashboardDataRepository:
+    """Three samples of one component, with four-limit thresholds for part of the essays."""
+    oil = tmp_path / "oil" / "golden" / "cda"
+    oil.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "unitId": "T_15",
+                "machineName": "camion",
+                "componentName": "motor",
+                "componentNameNormalized": "motor",
+                "report_status": "Alerta",
+                "sampleDate": date,
+                "oilHourRange": "LT_1000",
+                "Hierro": iron,
+                "Índice PQ": iron / 2,
+                "Silicio": 3.0,
+                "Aluminio": 2.0,
+                "Calcio": 1800.0,
+                "Zinc": 1200.0,
+                "Fósforo": 1100.0,
+                # Sin umbral por contrato: la serie se dibuja igual.
+                "Combustible": 0.0,
+            }
+            for date, iron in (("2026-05-01", 30.0), ("2026-06-01", 45.0), ("2026-07-01", 65.0))
+        ]
+    ).to_parquet(oil / "classified.parquet", index=False)
+    pd.DataFrame(
+        [
+            {
+                "client": "CDA", "machine": "camion", "component": "motor", "essay": essay,
+                "oilHourRange": "LT_1000", "LIC": None, "LIM": None, "LSM": lsm, "LSC": lsc,
+                "min_value": 0.0, "GroupElement": group, "sample_count": 50,
+                "calculation_date": "2026-08-05T11:07:45",
+            }
+            for essay, lsm, lsc, group in (
+                ("Hierro", 57.0, 66.0, "Desgaste"),
+                ("Silicio", 6.0, 8.0, "Contaminante"),
+                ("Calcio", 2000.0, 2400.0, "Aditivo"),
+                ("Zinc", 1400.0, 1600.0, "Aditivo"),
+                ("Fósforo", 1300.0, 1500.0, "Aditivo"),
+            )
+        ]
+    ).to_parquet(oil / "stewart_limits_four.parquet", index=False)
+    return DashboardDataRepository(tmp_path)
+
+
+def _alert_context_repository(tmp_path) -> DashboardDataRepository:
+    """One alert with its trigger and companions, each with the limits it really has."""
+    detail = tmp_path / "telemetry" / "golden" / "cda"
+    detail.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "AlertID": alert, "Alert_Index": 0, "Alert_TimeStart": start,
+                "Trigger": "EngCoolTemp", "TimeStart": moment, "Unit": "T_18",
+                "EngCoolTemp_Value": 100.0 + offset,
+                "EngCoolTemp_Upper_Limit": 105.0,
+                "EngOilPres_Value": 320.0 - offset,
+                "EngOilPres_Lower_Limit": 310.0,
+                "RAftrclrTemp_Value": 80.0,
+                "RAftrclrTemp_Upper_Limit": 102.0,
+            }
+            for alert, start, moment, offset in (
+                ("3", "2026-06-01", "2026-06-01T10:00:00", 1.0),
+                ("7", "2026-07-01", "2026-07-01T10:00:00", 2.0),
+                ("7", "2026-07-01", "2026-07-01T10:05:00", 4.0),
+            )
+        ]
+    ).to_csv(detail / "alerts_detail_wide_with_gps.csv", index=False)
+    return DashboardDataRepository(tmp_path)
+
+
 def _telemetry_repository(tmp_path) -> DashboardDataRepository:
     telemetry = tmp_path / "telemetry" / "golden" / "cda"
     telemetry.mkdir(parents=True)
@@ -298,38 +427,60 @@ def test_row_level_types_are_declared_so_labels_stay_honest():
 # ------------------------------------------------------------- named registry
 
 
-def test_oil_radar_normalizes_essays_against_their_alert_threshold(tmp_path):
-    """Iron reads in the tens and zinc in the thousands, so raw axes are unreadable."""
-    registry = DashboardChartRegistry(_oil_repository(tmp_path))
+def test_group_radar_pins_each_threshold_to_a_fixed_radius(tmp_path):
+    """Rings must be circles, which is why the scale is 0-100 and not a ratio.
 
-    artifact = registry.render("cda", "oil_essay_radar", {"unit_id": "T_15"})
+    Normalizing by one threshold cannot do this: on production data LSC/LSM spans 1.0 to
+    8.5, so the outer ring would come out as a jagged shape instead of a reference.
+    """
+    registry = DashboardChartRegistry(_oil_four_limit_repository(tmp_path))
+
+    artifact = registry.render(
+        "cda", "oil_essay_group_radar", {"unit_id": "T_15", "component": "motor"}
+    )
 
     assert artifact.chart_type == "radar"
     traces = artifact.figure["data"]
     assert traces[0]["type"] == "scatterpolar"
-    # A reference ring at 1.0 marks the limit itself.
-    assert traces[1]["name"] == "Límite de alerta"
-    assert set(traces[1]["r"]) == {1.0}
-    # Raw values and thresholds stay in the summary so the agent cites measurements.
-    assert artifact.summary["essays"]["Hierro"] == {
-        "value": 65.0,
-        "threshold_alert": 57.0,
-        "threshold_critic": 66.0,
+    # Wear metals have no lower limit, so only the two upper rings are drawn.
+    rings = {trace["name"]: set(trace["r"]) for trace in traces if "Límite" in trace["name"] or "L" == trace["name"][:1]}
+    assert rings["LSC (Superior Condenatorio)"] == {80}
+    assert rings["LSM (Superior Marginal)"] == {60}
+    assert "LIC (Inferior Condenatorio)" not in rings
+
+    # Raw measurements and the five-tier status stay in the summary, so the agent quotes
+    # the measured number and never the normalized radius.
+    hierro = artifact.summary["essays"]["Hierro"]
+    assert hierro["value"] == 65.0
+    assert hierro["status"] == "Superior Marginal"
+    assert hierro["LIC"] is None
+
+
+def test_group_radar_splits_by_element_group(tmp_path):
+    """Wear, contaminant and additive answer different questions and never share axes."""
+    registry = DashboardChartRegistry(_oil_four_limit_repository(tmp_path))
+
+    artifact = registry.render(
+        "cda", "oil_essay_group_radar", {"unit_id": "T_15", "component": "motor"}
+    )
+
+    # Only wear reaches three essays in the fixture; the rest are reported as skipped
+    # rather than rendered as an unreadable two-axis radar.
+    assert artifact.summary["groups_rendered"] == ["Desgaste"]
+    assert artifact.summary["groups_skipped_few_essays"] == {
+        "Contaminante": 1,
+        "Fisico Quimico": 1,
     }
-    assert artifact.summary["above_alert_limit"] == ["Hierro"]
-    assert "Hierro 65.0 (límite 57.0)" in artifact.description
+    assert artifact.summary["dashboard_section"] == "Monitoreo > Aceite > Detalle"
 
 
-def test_oil_radar_needs_a_unit_and_enough_essays(tmp_path):
-    registry = DashboardChartRegistry(_oil_repository(tmp_path))
+def test_group_radar_needs_a_unit_and_real_limits(tmp_path):
+    registry = DashboardChartRegistry(_oil_four_limit_repository(tmp_path))
 
     with pytest.raises(CampbellDataError, match="requiere unit_id"):
-        registry.render("cda", "oil_essay_radar")
+        registry.render("cda", "oil_essay_group_radar")
     with pytest.raises(CampbellDataError, match="Sin muestras de aceite"):
-        registry.render("cda", "oil_essay_radar", {"unit_id": "T_99"})
-    # 'rueda' has samples but no thresholds in the fixture.
-    with pytest.raises(CampbellDataError, match="límites de referencia"):
-        registry.render("cda", "oil_essay_radar", {"unit_id": "T_11", "component": "rueda"})
+        registry.render("cda", "oil_essay_group_radar", {"unit_id": "T_99"})
 
 
 def test_component_heatmap_crosses_units_and_components(tmp_path):
@@ -342,29 +493,6 @@ def test_component_heatmap_crosses_units_and_components(tmp_path):
     assert artifact.summary["units"] == 2
     assert artifact.summary["components"] == 2
     assert "menor indica peor" in artifact.summary["note"]
-
-
-def test_gauge_reports_one_indicator_with_its_bands(tmp_path):
-    registry = DashboardChartRegistry(_telemetry_repository(tmp_path))
-
-    artifact = registry.render("cda", "unit_health_gauge", {"unit_id": "T_18"})
-
-    assert artifact.chart_type == "gauge"
-    trace = artifact.figure["data"][0]
-    assert trace["type"] == "indicator"
-    assert trace["value"] == 121.0
-    # Bands must cover the whole scale, including a value above 100.
-    steps = trace["gauge"]["steps"]
-    assert len(steps) == 3
-    assert steps[-1]["range"][1] >= 121.0
-    assert "prioridad 121.0" in artifact.description
-
-
-def test_gauge_requires_a_unit(tmp_path):
-    registry = DashboardChartRegistry(_telemetry_repository(tmp_path))
-
-    with pytest.raises(CampbellDataError, match="requiere unit_id"):
-        registry.render("cda", "unit_health_gauge")
 
 
 def test_alert_trend_and_treemap_mirror_the_alerts_tab(tmp_path):
@@ -391,7 +519,93 @@ def test_no_named_chart_uses_call_instructions_as_its_caption():
         assert "admite" not in caption.lower(), definition.chart_id
 
 
-def test_registry_covers_the_shapes_the_previous_dashboard_offered():
-    """Radar, histogram, treemap, heatmap, gauge and timeseries were all missing."""
+def test_registry_covers_the_shapes_the_dashboard_offers():
+    """The shapes that survived the retirement of the score-based charts.
+
+    `gauge` and `histogram` left with `unit_health_gauge` and `oil_severity_histogram`: both
+    plotted internal scores, which the product decided not to surface. Asserting their
+    absence keeps a future re-add deliberate instead of accidental.
+    """
     kinds = {definition.chart_type for definition in CHART_DEFINITIONS}
-    assert {"radar", "histogram", "treemap", "heatmap", "gauge", "line", "pie"} <= kinds
+    assert {"radar", "treemap", "heatmap", "line", "pie", "bar", "stacked_bar"} <= kinds
+    assert "gauge" not in kinds
+    assert "histogram" not in kinds
+
+
+def test_every_chart_declares_context_and_a_dashboard_destination():
+    """`use_when` is what the agent reads to choose; the route is what the user follows.
+
+    A chart missing either is invisible to the picker or a dead end for the reader, so this
+    fails at definition time rather than in a conversation.
+    """
+    for definition in CHART_DEFINITIONS:
+        assert definition.use_when, f"{definition.chart_id} sin use_when"
+        assert definition.dashboard_route.startswith("/"), definition.chart_id
+        assert definition.dashboard_section, f"{definition.chart_id} sin seccion"
+
+
+# ------------------------------------------------- historial de aceite y contexto de alerta
+
+
+def test_history_panels_pair_the_essays_that_are_read_together(tmp_path):
+    """The pairs are diagnostic, not the element groups.
+
+    Iron with the particle index, silicon with aluminium: splitting those by GroupElement
+    would separate exactly the variables that only mean something side by side.
+    """
+    registry = DashboardChartRegistry(_oil_history_repository(tmp_path))
+
+    artifact = registry.render(
+        "cda", "oil_history_panels", {"unit_id": "T_15", "component": "motor"}
+    )
+
+    panels = artifact.summary["panels"]
+    assert panels["Hierro & PQ"] == ["Hierro", "Índice PQ"]
+    assert panels["Silicio & Aluminio"] == ["Silicio", "Aluminio"]
+    # Additive panels are derived from the spreadsheet, split so the lines stay readable.
+    assert "Aditivos: Calcio, Zinc & Fósforo" in panels
+    assert artifact.summary["samples"] == 3
+    assert artifact.summary["dashboard_section"] == "Monitoreo > Aceite > Detalle"
+
+
+def test_history_panels_keep_a_series_that_has_no_limit(tmp_path):
+    """`Combustible` carries no threshold by contract; the series is still the answer.
+
+    Dropping the panel would read as missing data when what is missing is the limit.
+    """
+    registry = DashboardChartRegistry(_oil_history_repository(tmp_path))
+
+    artifact = registry.render("cda", "oil_history_panels", {"unit_id": "T_15"})
+
+    assert artifact.summary["panels"]["Combustible & Agua"] == ["Combustible"]
+    assert not any(key.startswith("Combustible") for key in artifact.summary["limits_drawn"])
+    assert "Hierro.LSC" in artifact.summary["limits_drawn"]
+
+
+def test_alert_context_plots_the_trigger_with_its_companions(tmp_path):
+    """A trigger read alone is how one high value becomes the wrong work order."""
+    registry = DashboardChartRegistry(_alert_context_repository(tmp_path))
+
+    artifact = registry.render(
+        "cda", "alert_context_signals", {"unit_id": "T_18", "alert_id": "7"}
+    )
+
+    assert artifact.summary["trigger"] == "EngCoolTemp"
+    assert artifact.summary["trigger_label"] == "Temperatura del refrigerante del motor"
+    # Trigger first, then companions in declared order of relevance.
+    assert artifact.summary["signals_plotted"][0] == "EngCoolTemp"
+    assert "EngOilPres" in artifact.summary["signals_plotted"]
+    # Pressures alarm on the low side, temperatures on the high side.
+    assert artifact.summary["limits"]["EngCoolTemp"] == {"superior": 105.0}
+    assert artifact.summary["limits"]["EngOilPres"] == {"inferior": 310.0}
+
+
+def test_alert_context_falls_back_to_the_newest_alert(tmp_path):
+    """"¿Por qué se alertó este equipo?" must resolve without the user knowing an id."""
+    registry = DashboardChartRegistry(_alert_context_repository(tmp_path))
+
+    artifact = registry.render("cda", "alert_context_signals", {"unit_id": "T_18"})
+
+    assert artifact.summary["alert_id"] == "7"
+    with pytest.raises(CampbellDataError, match="requiere unit_id"):
+        registry.render("cda", "alert_context_signals")

@@ -316,7 +316,7 @@ ANALYSIS_CAPABILITIES: tuple[AnalysisCapability, ...] = (
     AnalysisCapability(
         "oil_limits",
         "Comparación de ensayos contra sus límites de referencia",
-        ("render_dashboard_chart(oil_essay_radar)",),
+        ("render_dashboard_chart(oil_essay_group_radar)",),
         ("oil_classified", "oil_limits"),
     ),
     AnalysisCapability(
@@ -983,6 +983,43 @@ class DashboardDataRepository:
                 "columns_truncated": len(columns) > 40,
             }
         return json.dumps(compact, ensure_ascii=False, default=str)
+
+    def four_limit_thresholds(
+        self, client: str, machine: str, component: str
+    ) -> dict[str, Any]:
+        """Four-limit oil thresholds (LIC/LIM/LSM/LSC) for one machine family/component.
+
+        Kept out of `DATASETS` on purpose. That registry describes tabular sources the agent
+        may query directly, and this one is a nested dict keyed
+        client → machine → component → essay → oilHourRange: it answers "what are the bands
+        for this component", never "give me rows". Exposing it as a queryable dataset would
+        invite the agent to try filtering it like a table.
+
+        Returns an empty dict when the file or any key is missing, so a caller decides
+        whether to degrade or to raise; a chart with no reference bands is a legitimate
+        outcome for a client that has not been calibrated yet.
+        """
+        normalized_client = normalize_client_id(client)
+        path = (
+            self.data_root / "oil" / "golden" / normalized_client / "stewart_limits_four.parquet"
+        ).resolve()
+        try:
+            path.relative_to(self.data_root)
+        except ValueError as exc:
+            raise CampbellDataError("Ruta de datos fuera del directorio autorizado") from exc
+        if not path.exists():
+            return {}
+
+        from src.data.loaders import load_stewart_limits_four
+
+        limits = load_stewart_limits_four(path)
+        if not limits:
+            return {}
+        # The client key in this parquet is upper-case, unlike every other path in this
+        # package. Looking it up with the normalized lower-case id silently returns {} and the
+        # chart renders without a single reference ring.
+        by_client = limits.get(normalized_client.upper()) or limits.get(normalized_client, {})
+        return by_client.get(str(machine), {}).get(str(component), {})
 
     def client_capabilities(self, client: str) -> dict[str, Any]:
         """Which analyses are possible for this client, and why the rest are not.

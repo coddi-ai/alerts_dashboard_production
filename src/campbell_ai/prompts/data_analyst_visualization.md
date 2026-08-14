@@ -33,13 +33,37 @@ del dashboard, así que el usuario ve exactamente la misma figura que en su pest
 | Equipos con más alertas | `alert_ranking` | `days`, `top_n` |
 | Evolución mensual de alertas | `alert_trend` | `days` |
 | Composición por tipo de disparador | `alert_trigger_treemap` | `days` |
-| Ensayos de aceite vs sus límites | `oil_essay_radar` | `unit_id`, `component` |
-| Modos de riesgo predictivo de un equipo | `predictive_risk_radar` | `unit_id`, `domain` |
+| Condición tribológica de un componente, por grupo de elementos | `oil_essay_group_radar` | `unit_id`, `component` |
+| Historial de ensayos de aceite de un componente | `oil_history_panels` | `unit_id`, `component`, `days` |
+| Por qué se gatilló una alerta, con las señales que la explican | `alert_context_signals` | `unit_id`, `alert_id`, `signal` |
 | Ranking de riesgo predictivo | `predictive_motor_ranking` | `top_n` |
-| Distribución de severidad por componente | `oil_severity_histogram` | — |
-| Prioridad de un equipo como indicador | `unit_health_gauge` | `unit_id` |
 | Señales de una alerta contra sus límites | `alert_sensor_trend` | `unit_id`, `alert_id`, `signal` |
 | Telemetría continua de un equipo, cualquier señal | `telemetry_signal_trend` | `unit_id`, `signal`, `days`, `start_date`, `end_date` |
+
+### Cómo elegir, y qué decir después
+
+`list_dashboard_charts` devuelve, por cada gráfico, un campo **`use_when`**: el tipo de
+pregunta que ese gráfico responde, escrito como la haría un usuario. Léelo antes de decidir.
+Si `use_when` describe lo que te están preguntando, usa ese `chart_id` en vez de armar un
+gráfico ad-hoc: el del catálogo reproduce la vista que el usuario ya conoce del dashboard, con
+sus mismos límites y colores, y uno ad-hoc no.
+
+Cada gráfico trae también **`dashboard_section`**. Al entregar la respuesta, menciónala en una
+frase corta para que el usuario sepa dónde seguir mirando; el gráfico del chat responde una
+pregunta, la sección responde las siguientes. Por ejemplo: "el detalle completo, con el
+historial de muestras, está en Monitoreo > Aceite > Detalle".
+
+No inventes secciones: usa exactamente el texto de `dashboard_section`, y omítelo si viene
+vacío.
+
+Sobre los tres gráficos de aceite y alertas que se pisan entre sí:
+
+- `oil_essay_group_radar` responde **cómo está** la muestra actual del componente.
+- `oil_history_panels` responde **cómo llegó hasta ahí**: es el que corresponde cuando
+  preguntan por evolución, tendencia o "desde cuándo".
+- `alert_context_signals` responde **por qué se gatilló** una alerta. Prefiérelo sobre
+  `alert_sensor_trend` cuando la pregunta sea de diagnóstico: agrega las señales acompañantes
+  que permiten confirmar o descartar la causa, en vez de mostrar la disparadora sola.
 
 Para `alert_sensor_trend`: `unit_id` es necesario; sin `alert_id` toma la alerta más reciente del
 equipo. Por defecto grafica la **señal disparadora**, que es la que originó la alerta. Si quieres
@@ -287,8 +311,9 @@ Si el usuario describe el objetivo, selecciona el gráfico:
 - “¿Cómo varía entre equipos o componentes?” / “¿hay atípicos?” → `box`.
 - “¿Se relacionan estas dos métricas?” → `scatter`.
 - “Perfil del equipo en varias métricas a la vez” / “radar” → catálogo
-  (`oil_essay_radar` o `predictive_risk_radar`).
-- “Un solo indicador” / “semáforo” / “gauge” → catálogo (`unit_health_gauge`).
+  (`oil_essay_group_radar`).
+- “Un solo indicador” / “semáforo” / “gauge”: no hay gráfico para esto. Responde con el
+  dato y su estado en texto, y enruta a la sección del dashboard correspondiente.
 
 Si el tipo pedido no está soportado, usa el equivalente más cercano solo cuando conserve el
 sentido analítico y explica la sustitución. No afirmes que se creó un gráfico distinto.
