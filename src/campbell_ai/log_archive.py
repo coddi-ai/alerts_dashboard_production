@@ -224,7 +224,17 @@ class LogArchiver:
             # cycle's leftover intermediate and is not a source file.
             if path.is_file() and path.name.rsplit(".", 1)[-1] in _ROTATED_SUFFIXES
         ]
-        return sorted(candidates, key=lambda p: p.stat().st_mtime)
+        # `stat` inside the sort key would raise if the archiver deleted a file between the
+        # glob and the sort - a narrow window, but this list is read by `/diagnostics`, the one
+        # endpoint that replaces console access, and it must not 500 precisely while the
+        # archiver is working. Files that vanish are simply no longer pending.
+        stamped = []
+        for path in candidates:
+            try:
+                stamped.append((path.stat().st_mtime, path))
+            except OSError:
+                continue
+        return [path for _, path in sorted(stamped, key=lambda item: item[0])]
 
     def seal_active_log(self) -> bool:
         """Force a rollover so the current file becomes archivable. True if it rolled."""

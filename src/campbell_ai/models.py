@@ -55,6 +55,16 @@ class InitializeRequest(BaseModel):
     session_id: str | None = Field(default=None, max_length=100)
 
 
+class InitializeProgressRequest(BaseModel):
+    """Who is asking about their own in-flight initialization.
+
+    No session id: the caller is polling *before* it has one - that is the whole point.
+    """
+
+    username: str = Field(min_length=1, max_length=100)
+    company_id: str = Field(min_length=1, max_length=80)
+
+
 class MessageRequest(BaseModel):
     username: str = Field(min_length=1, max_length=100)
     company_id: str = Field(min_length=1, max_length=80)
@@ -126,6 +136,12 @@ class InitializeResponse(BaseModel):
     # How many messages were recovered from the durable backup into this session, so a
     # consumer knows to render a thread it did not have in memory.
     restored_messages: int = 0
+    # Milliseconds spent in each phase of this call, so "la inicializacion tarda" becomes a
+    # number per phase instead of one opaque total. The phases have very different costs and
+    # very different fixes: `validate` walks the dataset files, `rehydrate` is a network round
+    # trip to S3 and only runs when resuming a thread. Returned rather than only logged so the
+    # caller can record what it actually waited for, on the side of the wire that waited.
+    phase_ms: dict[str, int] = Field(default_factory=dict)
 
 
 class MessageResponse(BaseModel):

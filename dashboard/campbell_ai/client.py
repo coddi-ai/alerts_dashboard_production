@@ -287,13 +287,62 @@ class CampbellAPIClient:
         except (URLError, json.JSONDecodeError) as exc:
             raise _failure("unreachable") from exc
 
+    def initialization_progress(self, username: str, company_id: str) -> dict[str, Any]:
+        """The phase the API says it is in, or ``{}`` when it will not say.
+
+        Polled while `initialize` is still in flight, which is exactly why it never raises:
+        this call exists to improve a wait, and a caller that has to handle its failure
+        would be paying for the diagnostic with the thing being diagnosed. Every fault -
+        unreachable, timeout, wrong status - reads the same as "no se", and the badge falls
+        back to its generic label.
+
+        A short timeout of its own, well under the poll period, so a stalled probe can never
+        pile up behind the next one.
+        """
+        request = Request(
+            f"{self.base_url}/api/v1/campbell-ai/initialize/progress",
+            data=json.dumps(self._identity(username, company_id)).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "X-Campbell-Token": self.internal_token,
+            },
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=2.0) as response:
+                body = response.read().decode("utf-8")
+            payload = json.loads(body) if body else {}
+            return payload if isinstance(payload, dict) else {}
+        except Exception:  # noqa: BLE001 - see docstring: never fails its caller
+            return {}
+
     def initialize(
         self, username: str, company_id: str, session_id: str | None = None
     ) -> dict[str, Any]:
         payload: dict[str, Any] = self._identity(username, company_id)
         if session_id:
             payload["session_id"] = session_id
-        return self._request("POST", "/api/v1/campbell-ai/initialize", payload)
+        response = self._request("POST", "/api/v1/campbell-ai/initialize", payload)
+
+        # The API's own per-phase breakdown, repeated in this process's log. Both sides are
+        # needed to read a slow initialization: this log has the wall time the browser
+        # actually waited, the API's has where that time went. A gap between them is network
+        # or queueing, not work - and that difference is only visible with both numbers side
+        # by side, in files that are both reachable without a console.
+        phase_ms = response.get("phase_ms") if isinstance(response, dict) else None
+        if isinstance(phase_ms, dict) and phase_ms:
+            logger.info(
+                "initialize phases company=%s total=%sms %s",
+                str(company_id).lower(),
+                phase_ms.get("total"),
+                " ".join(
+                    f"{phase}={value}ms"
+                    for phase, value in phase_ms.items()
+                    if phase != "total"
+                ),
+            )
+        return response
 
     def send_message(
         self, username: str, company_id: str, session_id: str, message: str

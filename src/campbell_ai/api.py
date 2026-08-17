@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import json
 import logging
@@ -29,6 +30,7 @@ from src.campbell_ai.models import (
     FeedbackRequest,
     FeedbackResponse,
     HistoryResponse,
+    InitializeProgressRequest,
     InitializeRequest,
     InitializeResponse,
     JobStatusRequest,
@@ -54,6 +56,7 @@ from src.campbell_ai.log_archive import (
 )
 from src.campbell_ai.logging_setup import configure_api_logging
 from src.campbell_ai.resources import reclaim
+from src.campbell_ai import progress
 
 
 logger = logging.getLogger("campbell_ai.api")
@@ -154,11 +157,68 @@ async def start_background_maintenance() -> None:
     start_janitor()
 
 
+# The periodic job-retention task, kept so shutdown can cancel it.
+_JOB_PRUNER: "asyncio.Task | None" = None
+
+
+@app.on_event("startup")
+async def start_job_pruning() -> None:
+    """Apply the job retention rule on a timer instead of only when a request arrives.
+
+    A finished job holds its whole answer - the rendered figures plus the conversation - and
+    eviction used to run only from `submit` and `get`. A burst of questions followed by
+    silence therefore left all of it resident, with nothing able to release it.
+
+    On the event loop rather than in the janitor thread, because the registry is guarded by an
+    `asyncio.Lock`: taking it from another thread raises, so the memory reclaim cannot be the
+    thing that maintains this. The interval is a third of the retention window, so nothing
+    outlives its retention by much, and the work is a dictionary scan.
+    """
+    global _JOB_PRUNER
+    settings = get_campbell_settings()
+    interval = max(30.0, float(settings.job_retention_seconds) / 3.0)
+
+    async def prune_jobs() -> None:
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                dropped = await resolve_service_for_pruning().jobs.evict_expired()
+                if dropped:
+                    logger.info("job retention: %s respuestas vencidas liberadas", dropped)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # pragma: no cover - maintenance must not kill the loop
+                logger.exception("job retention: fallo al aplicar la retencion")
+
+    _JOB_PRUNER = asyncio.create_task(prune_jobs())
+
+
+def resolve_service_for_pruning() -> CampbellAIService:
+    """The service instance the app is actually serving, singleton or injected."""
+    return getattr(app.state, "service", None) or get_service()
+
+
 @app.on_event("shutdown")
 async def stop_background_maintenance() -> None:
     """Stop the helper threads so a container stop is not waiting on them."""
+    global _JOB_PRUNER
+    if _JOB_PRUNER is not None:
+        _JOB_PRUNER.cancel()
+        _JOB_PRUNER = None
     reset_janitor()
     reset_log_archiver()
+
+
+# Endpoints that observe the service rather than use it. Traffic here is not a sign that
+# anybody is working, and counting it as activity is what silently disabled idle reclamation:
+# the compose healthcheck polls `/health` every 10 seconds against a 600-second idle
+# threshold, so the process never went idle for even a minute of its life and
+# `reclaims_idle` was structurally stuck at zero - read by an operator as "never needed"
+# rather than "never possible".
+MONITORING_PATHS = (
+    "/api/v1/campbell-ai/health",
+    "/api/v1/campbell-ai/diagnostics",
+)
 
 
 @app.middleware("http")
@@ -168,8 +228,13 @@ async def record_activity(request: Request, call_next):
     Placed in middleware rather than in each endpoint so a route added later cannot
     forget to do it and quietly make the janitor believe the service is asleep while
     it is answering questions.
+
+    Monitoring endpoints are excluded on purpose - see `MONITORING_PATHS`. An operator
+    reading diagnostics is not the service doing work either, and a poll loop pointed at it
+    would suppress reclamation exactly while somebody is investigating memory.
     """
-    touch_activity()
+    if not request.url.path.startswith(MONITORING_PATHS):
+        touch_activity()
     return await call_next(request)
 
 
@@ -338,6 +403,24 @@ async def initialize_chat(
         return await service.initialize(body.username, body.company_id, body.session_id)
     except Exception as exc:
         raise _translate_error(exc) from exc
+
+
+@app.post(
+    "/api/v1/campbell-ai/initialize/progress",
+    dependencies=[Depends(require_internal_token)],
+)
+async def initialize_progress(body: InitializeProgressRequest) -> dict:
+    """Which phase this user's in-flight initialization is in, if any.
+
+    Deliberately trivial: a dictionary lookup, no service, no data access. It is polled
+    while a much heavier request is in flight, so anything expensive here would compete
+    with the very call it reports on.
+
+    ``active: false`` means this process knows of no such call - already finished, never
+    started, or being served by a different replica. It is not an error and the caller
+    must not render it as one.
+    """
+    return progress.snapshot(progress.progress_key(body.username, body.company_id))
 
 
 @app.post(

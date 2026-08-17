@@ -193,6 +193,32 @@ class JobRegistry:
 
     # -- eviction -----------------------------------------------------------
 
+    async def evict_expired(self) -> int:
+        """Apply the retention rule now, without waiting for traffic. Returns jobs dropped.
+
+        A finished job holds its whole answer - the rendered figures plus the conversation -
+        and eviction only ever ran from `submit` and `get`. A burst of questions followed by
+        silence therefore left all of it resident with nothing able to release it: the
+        retention window needs a caller to tick it, and the janitor could not see this
+        registry at all. That is memory a reclaim could not touch, which is part of why a
+        reclaim under pressure could report freeing almost nothing.
+
+        Retention is honoured rather than bypassed, and that distinction is the whole point.
+        A job that finished two seconds ago is not garbage: its answer is computed and the
+        browser is about to poll for it. Dropping those to free memory is precisely the
+        "Consulta perdida" the retention window exists to prevent, so this makes eviction
+        *reachable*, not more aggressive.
+
+        A coroutine, not a plain function, and that is not incidental: this registry is
+        guarded by an `asyncio.Lock` owned by the event loop. Reaching it from the janitor
+        thread - the obvious way to hook it into a memory reclaim - cannot work, so the
+        periodic caller has to live on the loop. See `prune_jobs` in `api.py`.
+        """
+        async with self._lock:
+            before = len(self._jobs)
+            self._evict_locked()
+            return before - len(self._jobs)
+
     def _evict_locked(self) -> None:
         """Drop finished jobs past retention. Caller must hold the lock.
 
