@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
+import time
 
 import pandas as pd
 import pytest
@@ -12,8 +14,10 @@ from src.charts.theme import BRAND_ACCENT, BRAND_TITLE, STATUS_COLORS
 from src.campbell_ai.config import CampbellSettings
 from src.campbell_ai.agents_runtime import CampbellAgentRuntime
 from src.campbell_ai.data import DashboardDataRepository
+from src.campbell_ai.diagnostics import initialize_phases_info
 from src.campbell_ai.errors import CampbellAuthorizationError, CampbellDataError
 from src.campbell_ai.identity import resolve_dashboard_principal
+from src.campbell_ai import progress
 from src.campbell_ai.prompts import load_prompt
 from src.campbell_ai.security import deterministic_guard, requests_unsupported_capability
 from src.campbell_ai.service import CampbellAIService
@@ -720,3 +724,166 @@ def test_company_change_creates_an_isolated_session(tmp_path, monkeypatch):
     assert cda.session_id != emin.session_id
     assert cda.company_id == "cda"
     assert emin.company_id == "emin"
+
+
+def test_initialize_reports_where_the_time_went(tmp_path, monkeypatch):
+    """Each phase is timed, so a slow initialization names its own bottleneck."""
+    _write_alerts(tmp_path)
+    monkeypatch.setattr(
+        "src.campbell_ai.identity.get_user",
+        lambda username: {"role": "client", "clients": ["CDA"]},
+    )
+    service = CampbellAIService(_settings(tmp_path))
+
+    fresh = asyncio.run(service.initialize("user", "CDA"))
+
+    assert set(fresh.phase_ms) == {
+        "identity",
+        "validate",
+        "session",
+        "rehydrate",
+        "capabilities",
+        "total",
+    }
+    assert fresh.phase_ms["total"] == sum(
+        value for phase, value in fresh.phase_ms.items() if phase != "total"
+    )
+    # The claim the number has to support: a brand new session never consults the archive,
+    # so a nonzero `rehydrate` here would mean a storage round trip that cannot match.
+    assert fresh.phase_ms["rehydrate"] == 0
+
+    resumed = asyncio.run(service.initialize("user", "CDA", fresh.session_id))
+    assert resumed.phase_ms["total"] >= 0
+
+    # Reachable without a console: the same breakdown is in the diagnostics payload.
+    recent = initialize_phases_info()
+    assert recent["count"] >= 2
+    assert recent["recent"][0]["company"] == "cda"
+    assert recent["recent"][0]["resuming"] is True
+    assert recent["slowest_phase"]["phase"] in fresh.phase_ms
+
+
+def test_initialize_keeps_the_event_loop_free_while_walking_datasets(
+    tmp_path, monkeypatch
+):
+    """Dataset validation runs off the event loop, so the API stays answerable.
+
+    Awaited inline it froze the whole process for the length of the walk: no other user's
+    question, no job-status poll collecting an answer already computed, no health check.
+    The heartbeat is a stand-in for all of them, and it is sampled *inside* the blocking
+    call - counting ticks over the whole initialization proves nothing, because the other
+    phases yield anyway and would supply the ticks on their own.
+
+    Every call is recorded, not just the last one: `client_capabilities` re-enters
+    `validate_client`, so a single slot would report that inner call and hide the phase
+    under test.
+    """
+    _write_alerts(tmp_path)
+    monkeypatch.setattr(
+        "src.campbell_ai.identity.get_user",
+        lambda username: {"role": "client", "clients": ["CDA"]},
+    )
+    service = CampbellAIService(_settings(tmp_path))
+    real_validate = service.repository.validate_client
+    calls: list[dict[str, object]] = []
+    ticks = 0
+
+    def slow_validate(client):
+        on_main = threading.current_thread() is threading.main_thread()
+        before = ticks
+        time.sleep(0.3)
+        calls.append({"on_main_thread": on_main, "ticks_while_blocked": ticks - before})
+        return real_validate(client)
+
+    monkeypatch.setattr(service.repository, "validate_client", slow_validate)
+
+    async def scenario() -> None:
+        nonlocal ticks
+
+        async def heartbeat() -> None:
+            nonlocal ticks
+            while True:
+                await asyncio.sleep(0.01)
+                ticks += 1
+
+        beat = asyncio.create_task(heartbeat())
+        await service.initialize("user", "CDA")
+        beat.cancel()
+
+    asyncio.run(scenario())
+
+    assert calls, "validate_client no fue invocado"
+    # The `validate` phase itself is the first call. The event loop runs on the main
+    # thread, so blocking work landing there is the defect.
+    assert calls[0]["on_main_thread"] is False
+    # And the consequence that actually matters: other requests kept being served while
+    # the walk ran. Inline this is 0 by construction - a blocked loop cannot tick.
+    assert calls[0]["ticks_while_blocked"] >= 10
+
+
+def test_phase_is_readable_while_the_initialization_is_still_running(
+    tmp_path, monkeypatch
+):
+    """The whole point of the progress registry, tested the only way that proves it.
+
+    A caller blocked on `initialize` cannot report on itself; the value is that *another*
+    request, arriving while it is still in flight, can say which phase it is in. So this
+    reads the registry from a concurrent coroutine mid-call, not afterwards - and it only
+    passes because the blocking work runs off the event loop, which is what lets a second
+    request be served at all during the wait.
+    """
+    _write_alerts(tmp_path)
+    monkeypatch.setattr(
+        "src.campbell_ai.identity.get_user",
+        lambda username: {"role": "client", "clients": ["CDA"]},
+    )
+    progress.reset()
+    service = CampbellAIService(_settings(tmp_path))
+    real_validate = service.repository.validate_client
+
+    def slow_validate(client):
+        time.sleep(0.3)
+        return real_validate(client)
+
+    monkeypatch.setattr(service.repository, "validate_client", slow_validate)
+    key = progress.progress_key("user", "CDA")
+
+    async def scenario() -> list[str]:
+        seen: list[str] = []
+
+        async def observer() -> None:
+            while True:
+                await asyncio.sleep(0.02)
+                state = progress.snapshot(key)
+                if state["active"] and state["phase"] not in seen:
+                    seen.append(state["phase"])
+
+        watcher = asyncio.create_task(observer())
+        await service.initialize("user", "CDA")
+        watcher.cancel()
+        return seen
+
+    observed = asyncio.run(scenario())
+
+    # The slow phase is the one a waiting user needs named, and it was visible from
+    # outside the call while it ran.
+    assert "validate" in observed
+    assert progress.PHASE_LABELS["validate"]
+    # And nothing is left behind once the call returns, or the next poll would report a
+    # phase that ended long ago.
+    assert progress.snapshot(key)["active"] is False
+
+
+def test_progress_entry_is_cleared_when_initialization_fails(tmp_path, monkeypatch):
+    """A failed call must not leave a phase that never ends."""
+    monkeypatch.setattr(
+        "src.campbell_ai.identity.get_user",
+        lambda username: {"role": "client", "clients": ["CDA"]},
+    )
+    progress.reset()
+    service = CampbellAIService(_settings(tmp_path))  # sin datos: validate falla
+
+    with pytest.raises(CampbellDataError):
+        asyncio.run(service.initialize("user", "CDA"))
+
+    assert progress.snapshot(progress.progress_key("user", "CDA"))["active"] is False

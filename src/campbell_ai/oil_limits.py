@@ -29,11 +29,14 @@ Three ideas carry the whole module:
 from __future__ import annotations
 
 import logging
+import threading
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional
 
 import plotly.graph_objects as go
+
+from src.campbell_ai.resources import CACHES
 
 logger = logging.getLogger("campbell_ai.oil_limits")
 
@@ -104,16 +107,39 @@ _EXTRA_GROUPS = {
 }
 
 
-@lru_cache(maxsize=4)
+# Successful reads only. `lru_cache` here memoized the *degraded* result too, so one
+# transient failure - a file not mounted yet, a lock, a relative path resolved against the
+# wrong cwd - permanently downgraded every oil radar in the process to the hardcoded groups,
+# with no way back: the janitor could not see this cache and `/diagnostics/reclaim` could not
+# clear it. Caching only what succeeded means the next render retries.
+_GROUPS_CACHE: dict[str, dict[str, str]] = {}
+_GROUPS_LOCK = threading.Lock()
+
+
+def clear_oil_element_groups() -> int:
+    """Forget the cached spreadsheet. Returns how many entries were dropped."""
+    with _GROUPS_LOCK:
+        dropped = len(_GROUPS_CACHE)
+        _GROUPS_CACHE.clear()
+    return dropped
+
+
 def oil_element_groups(essays_file: str = "data/oil/essays_elements.xlsx") -> dict[str, str]:
     """Map each essay name to its element group, from the shared spreadsheet.
 
     Cached because it is read on every radar render and the file changes about never. An
     unreadable file degrades to the manual overrides rather than failing the chart: a radar
-    with fewer groups is worth more than an error.
+    with fewer groups is worth more than an error - but that degraded answer is *not* cached,
+    so a transient failure costs one render instead of the life of the process.
     """
+    with _GROUPS_LOCK:
+        cached = _GROUPS_CACHE.get(essays_file)
+    if cached is not None:
+        return dict(cached)
+
     groups: dict[str, str] = {}
     path = Path(essays_file)
+    read_ok = False
     try:
         import pandas as pd
 
@@ -122,12 +148,22 @@ def oil_element_groups(essays_file: str = "data/oil/essays_elements.xlsx") -> di
             str(row["ElementNameSpanish"]): str(row["GroupElement"])
             for _, row in frame.iterrows()
         }
+        read_ok = True
     except Exception:
         logger.warning(
             "No fue posible leer %s; se usan solo los grupos declarados en el codigo", path
         )
     groups.update(_EXTRA_GROUPS)
+    if read_ok:
+        with _GROUPS_LOCK:
+            _GROUPS_CACHE[essays_file] = dict(groups)
     return groups
+
+
+# Registered so the janitor and `/diagnostics/reclaim` can drop it like any other cache.
+# It holds a spreadsheet, not a frame, so it is small - but a cache nothing can clear is how
+# the previous version turned one bad read into a permanent degradation.
+CACHES.register("oil_element_groups", clear_oil_element_groups)
 
 
 def four_limit_for_essay(

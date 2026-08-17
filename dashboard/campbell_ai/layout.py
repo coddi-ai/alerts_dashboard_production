@@ -440,6 +440,19 @@ def create_campbell_ai_layout(user_data: dict | None = None) -> html.Div:
             # Streaming plumbing: the browser reads the SSE proxy directly and parks
             # the final payload, which this interval lifts back into a Dash store.
             dcc.Store(id="campbell-ai-stream-store", storage_type="memory", data=None),
+            # Late el estado del badge mientras la inicializacion esta en curso. Arranca
+            # deshabilitado: lo enciende el callback clientside que detecta el arranque y lo
+            # apaga el que ve un estado final en el badge.
+            dcc.Interval(
+                id="campbell-ai-init-poll",
+                interval=500,
+                disabled=True,
+                n_intervals=0,
+            ),
+            # La fase que la API dice estar corriendo ahora mismo, para que el badge nombre
+            # el paso real en vez de solo cronometrar. Vacio mientras no haya respuesta:
+            # el badge conserva su etiqueta generica y nunca muestra un paso inventado.
+            dcc.Store(id="campbell-ai-init-phase", storage_type="memory", data=None),
             dcc.Interval(
                 id="campbell-ai-stream-poll",
                 interval=350,

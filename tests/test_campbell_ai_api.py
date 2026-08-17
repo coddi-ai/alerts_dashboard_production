@@ -6,6 +6,7 @@ import json
 
 from fastapi.testclient import TestClient
 
+from src.campbell_ai import progress
 from src.campbell_ai.api import app
 from src.campbell_ai.config import reset_campbell_settings
 from src.campbell_ai.errors import CampbellConfigurationError
@@ -75,9 +76,16 @@ def test_api_requires_internal_token(monkeypatch):
     app.state.service = FakeService()
     client = TestClient(app)
 
+    identity = {"username": "user", "company_id": "CDA"}
+
     assert client.post(
-        "/api/v1/campbell-ai/initialize",
-        json={"username": "user", "company_id": "CDA"},
+        "/api/v1/campbell-ai/initialize", json=identity
+    ).status_code == 401
+    # Same trust boundary, including the cheap side channels. A progress endpoint that
+    # answered without the token would tell an unauthenticated caller which companies are
+    # in use and when someone is working.
+    assert client.post(
+        "/api/v1/campbell-ai/initialize/progress", json=identity
     ).status_code == 401
 
 
@@ -208,3 +216,50 @@ def test_api_reports_a_configuration_error_before_streaming_starts(monkeypatch):
 
     assert response.status_code == 503
     assert "streaming" in response.json()["detail"].lower()
+
+
+def test_progress_endpoint_reports_the_phase_of_a_call_in_flight(monkeypatch):
+    """The badge's source of truth: what is running right now, for this user.
+
+    Written against the registry rather than against a real initialization on purpose -
+    the property under test is that a *second, concurrent* request can read the phase the
+    first one is in, and a test that waited for the first to finish would prove the
+    opposite of what it claims.
+    """
+    monkeypatch.setenv("CAMPBELL_AI_INTERNAL_TOKEN", "secret-token")
+    reset_campbell_settings()
+    app.state.service = FakeService()
+    client = TestClient(app)
+    headers = {"X-Campbell-Token": "secret-token"}
+    body = {"username": "User", "company_id": "CDA"}
+
+    progress.reset()
+    # Nothing in flight: not an error, and no phase invented to fill the gap.
+    idle = client.post(
+        "/api/v1/campbell-ai/initialize/progress", headers=headers, json=body
+    )
+    assert idle.status_code == 200
+    assert idle.json()["active"] is False
+    assert idle.json()["label"] == ""
+
+    # The same identity the poll uses, in the casing the API normalizes to.
+    key = progress.progress_key("user", "cda")
+    progress.begin(key, resuming=True)
+    progress.advance(key, "rehydrate")
+
+    running = client.post(
+        "/api/v1/campbell-ai/initialize/progress", headers=headers, json=body
+    ).json()
+    assert running["active"] is True
+    assert running["phase"] == "rehydrate"
+    # The badge shows this string, so it is part of the contract, not a debug field.
+    assert running["label"] == progress.PHASE_LABELS["rehydrate"]
+    assert running["resuming"] is True
+
+    progress.finish(key)
+    assert (
+        client.post(
+            "/api/v1/campbell-ai/initialize/progress", headers=headers, json=body
+        ).json()["active"]
+        is False
+    )

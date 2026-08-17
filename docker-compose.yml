@@ -34,6 +34,9 @@ services:
       - ./src:/app/src
     ports:
       - "8050:8050"
+    # Techo de memoria. Los limites no reservan RAM: los dos servicios juntos tienen que
+    # caber en el host, y 900m + 900m deja aire para el sistema en una maquina de 2 GB.
+    mem_limit: 900m
     depends_on:
       campbell-api:
         condition: service_healthy
@@ -70,6 +73,17 @@ services:
       - ./src:/app/src:ro
     expose:
       - "8000"
+    # Ademas de ser el techo, este valor define cuando el janitor empieza a soltar cache:
+    # el watermark es 0.72 x el limite del cgroup, o sea 648 MB acá. Eso queda 40% sobre el
+    # pico medido del proceso (461 MB con 3 usuarios simultaneos sobre el cliente mas
+    # pesado), asi que el uso normal no lo dispara y el crecimiento descontrolado si.
+    #
+    # El piso real esta en ~640m: ahi 0.72 x el limite iguala el pico medido y el janitor
+    # empezaria a botar cache durante el uso normal. Entre 640m y 900m el watermark sigue
+    # sobre el pico pero con menos holgura (a 800m son 576 MB, 25% sobre el pico), asi que
+    # recortar hasta ~700m es viable si el host lo necesita - no gratis, pero no roto.
+    # Ver DEFAULT_WATERMARK_RATIO y MEASURED_PEAK_FLOW_MB en src/campbell_ai/resources.py.
+    mem_limit: 900m
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/campbell-ai/health"]
       interval: 10s

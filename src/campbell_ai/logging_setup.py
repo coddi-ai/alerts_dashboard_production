@@ -61,6 +61,37 @@ FILE_FORMAT = (
 )
 CONSOLE_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 
+# Request paths whose access lines are dropped from the file. The compose healthcheck polls
+# `/health` every 10 seconds, which is ~8.600 lines a day saying nothing happened.
+#
+# Two things were broken by keeping them, not one. The obvious cost is a log where the real
+# lines are one in a hundred, rotating on noise. The subtler one: `LogArchiver.seal_active_log`
+# uses the file's own `st_mtime` as proof that the file has gone quiet, and a line every ten
+# seconds means it never does - so the newest log was never sealed and never archived, and the
+# whole point of the archiver was to make those lines readable without a console.
+NOISY_ACCESS_PATHS = ("/api/v1/campbell-ai/health",)
+
+
+class _DropMonitoringAccess(logging.Filter):
+    """Drop `uvicorn.access` lines for endpoints that only observe the service.
+
+    Applied to the file handler rather than to the access logger, so uvicorn's own console
+    output is untouched: somebody watching `docker logs` to see whether the healthcheck passes
+    still sees it.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.name != "uvicorn.access":
+            return True
+        # The access formatter puts the request line in the args, not in the message, and the
+        # tuple shape is uvicorn's, so this reads the rendered text instead of indexing it.
+        try:
+            text = record.getMessage()
+        except Exception:  # pragma: no cover - a malformed record still belongs in the file
+            return True
+        return not any(path in text for path in NOISY_ACCESS_PATHS)
+
+
 _LOCK = threading.Lock()
 _CONFIGURED: dict[str, Any] = {}
 _HANDLER: Optional[RotatingFileHandler] = None
@@ -150,6 +181,7 @@ def configure_api_logging(force: bool = False) -> dict[str, Any]:
                 logging.Formatter(FILE_FORMAT, datefmt="%Y-%m-%d %H:%M:%S")
             )
             file_handler._campbell_ai_managed = True  # type: ignore[attr-defined]
+            file_handler.addFilter(_DropMonitoringAccess())
             package_logger.addHandler(file_handler)
             # Same handler object on the server loggers: one file, one lock, no
             # interleaving between the application's lines and the request lines.

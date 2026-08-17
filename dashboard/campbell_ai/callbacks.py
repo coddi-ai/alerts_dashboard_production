@@ -1100,6 +1100,91 @@ def register_campbell_ai_callbacks(app: dash.Dash) -> None:
         prevent_initial_call=True,
     )
 
+    # --- Estado de inicializacion ---------------------------------------------
+    # `synchronize_chat` hace una llamada bloqueante a la API (dos al refrescar, porque la
+    # sesion sobrevive en sessionStorage y entonces tambien se recupera el hilo). Un callback
+    # de Dash es atomico: no puede emitir un estado intermedio, asi que el badge se queda con
+    # su texto inicial durante toda la espera y se lee como si se hubiera colgado.
+    #
+    # Estos tres callbacks son clientside a proposito: informan sin agregar una sola peticion
+    # al servidor que ya esta ocupado, y no hubo que tocar `synchronize_chat`, que tiene diez
+    # salidas y ocho puntos de retorno.
+    app.clientside_callback(
+        "function(clientValue, sessionId, currentText) {"
+        " return window.dash_clientside.campbellAiStatus"
+        ".begin(clientValue, sessionId, currentText); }",
+        Output("campbell-ai-status", "children", allow_duplicate=True),
+        Output("campbell-ai-status", "color", allow_duplicate=True),
+        Output("campbell-ai-init-poll", "disabled", allow_duplicate=True),
+        Input("client-selector", "value"),
+        State("campbell-ai-session-store", "data"),
+        # El texto actual del badge: si el servidor ya gano la carrera y escribio un estado
+        # final, arrancar el latido dejaria el badge contando sobre una sesion ya lista.
+        State("campbell-ai-status", "children"),
+        # Tiene que correr en el montaje, que es justo cuando el badge se quedaria mudo, y
+        # escribe una salida duplicada: Dash exige este valor para esa combinacion.
+        prevent_initial_call="initial_duplicate",
+    )
+
+    # La unica pieza de servidor del ciclo, y la que convierte el cronometro en un estado
+    # real: le pregunta a la API en que fase esta la inicializacion que sigue en vuelo.
+    #
+    # Puede responder justamente porque `initialize` ya no bloquea el event loop de la API
+    # (el trabajo de archivos corre en un thread): antes esta consulta habria quedado
+    # encolada detras de la llamada lenta, es decir muda durante los unicos segundos en que
+    # tiene algo que decir.
+    #
+    # Solo late mientras el intervalo esta habilitado, o sea durante la inicializacion. Si la
+    # API no contesta - o contesta que no sabe nada, lo que pasa cuando el poll llega a una
+    # replica distinta de la que trabaja - el store queda vacio y el badge se queda con su
+    # etiqueta generica.
+    @app.callback(
+        Output("campbell-ai-init-phase", "data"),
+        Input("campbell-ai-init-poll", "n_intervals"),
+        State("client-selector", "value"),
+        State("campbell-ai-session-company", "data"),
+        prevent_initial_call=True,
+    )
+    def poll_initialization_phase(ticks, client_value, session_company):
+        # Un tick por medio, o sea una consulta por segundo. El intervalo late a 500 ms
+        # porque de eso depende que el contador se vea vivo; la fase, en cambio, cambia en
+        # escala de segundos, y preguntarla al doble de frecuencia solo agrega carga sobre la
+        # API que estamos esperando.
+        if not ticks or ticks % 2:
+            raise PreventUpdate
+        username = _current_username(session_company)
+        if not username or not client_value:
+            return None
+        state = CampbellAPIClient.from_env().initialization_progress(
+            username, client_value
+        )
+        if not state.get("active") or not state.get("label"):
+            return None
+        return {"label": state["label"], "phase": state.get("phase", "")}
+
+    app.clientside_callback(
+        "function(ticks, currentText, sessionId, phase) {"
+        " return window.dash_clientside.campbellAiStatus"
+        ".tick(ticks, currentText, sessionId, phase); }",
+        Output("campbell-ai-status", "children", allow_duplicate=True),
+        Output("campbell-ai-status", "color", allow_duplicate=True),
+        Input("campbell-ai-init-poll", "n_intervals"),
+        State("campbell-ai-status", "children"),
+        State("campbell-ai-session-store", "data"),
+        State("campbell-ai-init-phase", "data"),
+        prevent_initial_call=True,
+    )
+
+    # El badge es la fuente de verdad del ciclo: cuando deja de decir un estado de progreso,
+    # la inicializacion termino y el latido se apaga.
+    app.clientside_callback(
+        "function(currentText) {"
+        " return window.dash_clientside.campbellAiStatus.settle(currentText); }",
+        Output("campbell-ai-init-poll", "disabled", allow_duplicate=True),
+        Input("campbell-ai-status", "children"),
+        prevent_initial_call=True,
+    )
+
     # --- Streaming -------------------------------------------------------------
     # The browser reads the SSE proxy so text appears while the agents work. Dash
     # still owns the final render, and a failed stream falls back to the blocking

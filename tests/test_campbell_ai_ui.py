@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 import dash
 from flask import Flask, session as flask_session
 
@@ -163,6 +166,45 @@ def test_the_view_reports_the_current_version():
     # The exact version string isn't the point (it changes freely); what must
     # hold is that whatever CAMPBELL_AI_VERSION says is what the view shows.
     assert f"Campbell AI v{CAMPBELL_AI_VERSION}" in visible_text
+
+
+def test_the_status_badge_knows_which_text_is_its_own():
+    """Two couplings that fail silently, both in the badge that shows the wait.
+
+    The badge is written by several callbacks, and `campbell_ai_status.js` decides whether
+    to keep updating it by asking "is this still my text?". Get either half of that wrong
+    and nothing raises - the badge simply freezes during the initialization, which is the
+    one failure this whole mechanism exists to prevent.
+
+    Half one: the first comparison is against the text the layout renders, so the wording
+    lives in two files and they must agree.
+
+    Half two: ownership must be decided by what the script last wrote, never by the shape
+    of the text. The same badge shows "Pensando… 12s" while an answer runs; recognising a
+    trailing ellipsis as "mine" would make the initialization heartbeat overwrite the
+    answering state and keep its polling interval alive for the whole conversation.
+    """
+    badge = next(
+        item
+        for item in _walk(create_campbell_ai_layout())
+        if getattr(item, "id", None) == "campbell-ai-status"
+    )
+    script = (
+        Path(__file__).resolve().parents[1]
+        / "dashboard"
+        / "assets"
+        / "campbell_ai_status.js"
+    ).read_text(encoding="utf-8")
+
+    declared = re.search(r'var INITIAL_TEXT = "([^"]+)"', script)
+    assert declared, "campbell_ai_status.js dejo de declarar INITIAL_TEXT"
+    assert declared.group(1) == badge.children
+
+    ownership = re.search(r"function isOurs\(text\) \{(.+?)\n  \}", script, re.S)
+    assert ownership, "isOurs desaparecio o cambio de forma"
+    assert "state.written" in ownership.group(1)
+    assert "INITIAL_TEXT" in ownership.group(1)
+    assert not re.search(r"charAt|endsWith|\bslice\b", ownership.group(1))
 
 
 def test_the_session_company_survives_navigation_in_session_storage():
