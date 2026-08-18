@@ -71,11 +71,11 @@ def translate_system_label(value) -> str:
 STATE_COLORS = {
     'Operacional': '#2ecc71',  # Green
     'Ralenti': '#f39c12',      # Orange
-    'RalentÃ­': '#f39c12',
+    'Ralentí': '#f39c12',
     'IDLE': '#f39c12',
     'PREPARACION': '#f39c12',
-    'PREPARACIÃ“N': '#f39c12',
-    'PreparaciÃ³n': '#f39c12',
+    'PREPARACIÓN': '#f39c12',
+    'Preparación': '#f39c12',
     'RPM_BAJA': '#f39c12',
     'HABILITADO': '#2ecc71',
     'Habilitado': '#2ecc71',
@@ -91,13 +91,13 @@ STATE_LABELS = {
     'Operacional': 'Operacional',
     'Potencia': 'Potencia',
     'potencia': 'Potencia',
-    'PREPARACION': 'PreparaciÃ³n',
-    'PREPARACIÃ“N': 'PreparaciÃ³n',
-    'PreparaciÃ³n': 'PreparaciÃ³n',
-    'Ralenti': 'RalentÃ­ / Idle',
-    'RalentÃ­': 'RalentÃ­ / Idle',
-    'IDLE': 'RalentÃ­ / Idle',
-    'RPM_BAJA': 'RalentÃ­ / RPM baja',
+    'PREPARACION': 'Preparación',
+    'PREPARACIÓN': 'Preparación',
+    'Preparación': 'Preparación',
+    'Ralenti': 'Ralentí',
+    'Ralentí': 'Ralentí',
+    'IDLE': 'Ralentí',
+    'RPM_BAJA': 'Ralentí / RPM baja',
 }
 
 # Capstone state labels may arrive with either UTF-8 or legacy decoded text.
@@ -111,7 +111,7 @@ STATE_COLORS.update({
 STATE_LABELS.update({
     'Preparaci\u00f3n': 'Preparaci\u00f3n',
     'PREPARACI\u00d3N': 'Preparaci\u00f3n',
-    'PreparaciÃ³n': 'Preparaci\u00f3n',
+    'Preparación': 'Preparaci\u00f3n',
     'PREPARACION': 'Preparaci\u00f3n',
     'Transici\u00f3n': 'Transici\u00f3n',
     'Transicion': 'Transici\u00f3n',
@@ -1265,11 +1265,6 @@ SIGNAL_LINE_WIDTH = 1.3
 # than blend in with it.
 LIMIT_LINE_WIDTH = 3
 
-# Limit colors are semantic and never change based on which signal triggered
-# the alert: upper limit is always red, lower limit is always purple.
-LIMIT_UPPER_COLOR = 'rgba(231, 76, 60, 0.7)'
-LIMIT_LOWER_COLOR = 'rgba(155, 89, 182, 0.7)'
-
 # Trigger emphasis uses a color reserved for "this is the panel that
 # matters" that doesn't collide with any state/limit semantic (green/
 # orange/gray/red/purple), so highlighting the trigger never reads as an
@@ -1332,17 +1327,17 @@ def create_sensor_trends_chart_golden(
         # Use filtered data for plotting
         alert_data = alert_data_filtered
 
-        # REQ-AD-03: the trigger panel gets stronger styling (title, line
-        # weight, background) than the rest -- resolved once, up front.
+        # REQ-AD-03: the trigger panel is emphasized by *position* (always
+        # first) plus a stronger title -- resolved once, up front.
         trigger_feature = None
         if 'Trigger' in alert_data.columns and not alert_data['Trigger'].empty:
             raw_trigger = alert_data['Trigger'].iloc[0]
             if pd.notna(raw_trigger):
                 trigger_feature = str(raw_trigger).strip().casefold()
 
-        # Resolve each panel's columns (incl. Capstone alias fallback) and
-        # limit availability up front so subplot titles can state the
-        # applicable limit type and flag the trigger before make_subplots.
+        # Resolve each panel's columns (incl. Capstone alias fallback) up
+        # front so both the ordering below and the plotting loop share the
+        # same resolved column names.
         panel_specs = []
         for feature in feature_names:
             value_col = f'{feature}_Value'
@@ -1363,23 +1358,11 @@ def create_sensor_trends_chart_golden(
                         value_col = f'{alias}_Value'
                         upper_col = f'{alias}_Upper_Limit'
                         lower_col = f'{alias}_Lower_Limit'
-            has_upper = upper_col in alert_data.columns and alert_data[upper_col].notna().any()
-            has_lower = lower_col in alert_data.columns and alert_data[lower_col].notna().any()
             is_trigger = (
                 trigger_feature is not None
                 and trigger_feature == str(feature).strip().casefold()
             )
-
-            if has_upper and has_lower:
-                limit_suffix = ' (lím. superior/inferior)'
-            elif has_upper:
-                limit_suffix = ' (lím. superior)'
-            elif has_lower:
-                limit_suffix = ' (lím. inferior)'
-            else:
-                limit_suffix = ''
-            base_title = f'{display_name}{limit_suffix}'
-            title = f'<b>GATILLO · {base_title}</b>' if is_trigger else base_title
+            title = f'<b>GATILLO · {display_name}</b>' if is_trigger else display_name
 
             panel_specs.append(dict(
                 feature=feature,
@@ -1390,6 +1373,11 @@ def create_sensor_trends_chart_golden(
                 is_trigger=is_trigger,
                 title=title,
             ))
+
+        # Emphasize the trigger through position: it always renders as the
+        # first time series, ahead of the remaining signals in their
+        # original order -- no extra chart decoration needed to spot it.
+        panel_specs.sort(key=lambda spec: not spec['is_trigger'])
 
         subplot_titles = [spec['title'] for spec in panel_specs]
 
@@ -1410,7 +1398,7 @@ def create_sensor_trends_chart_golden(
         # by the title-styling loop further down.
         title_annotation_count = len(fig['layout']['annotations'])
 
-        limit_legend_shown = {'upper': False, 'lower': False}
+        limit_legend_shown = False
 
         # Plot each feature
         for idx, spec in enumerate(panel_specs, 1):
@@ -1505,11 +1493,10 @@ def create_sensor_trends_chart_golden(
                     )
             # Plot limits (SECONDARY PRIORITY - Visually lighter), also
             # gap-segmented so a missing limit window doesn't draw a
-            # straight connector across it. Upper limit is always red,
-            # lower limit is always purple, regardless of the trigger.
-            for limit_col, limit_label, limit_kind, limit_color in (
-                (lower_col, 'Límite inferior', 'lower', LIMIT_LOWER_COLOR),
-                (upper_col, 'Límite superior', 'upper', LIMIT_UPPER_COLOR),
+            # straight connector across it.
+            for limit_col, limit_label, dash_style in (
+                (lower_col, 'Límite Inferior', 'dash'),
+                (upper_col, 'Límite Superior', 'dash'),
             ):
                 if limit_col not in alert_data.columns or not alert_data[limit_col].notna().any():
                     continue
@@ -1520,13 +1507,13 @@ def create_sensor_trends_chart_golden(
                             x=segment['TimeStart'],
                             y=segment[limit_col],
                             mode='lines',
-                            name=limit_label,
-                            legendgroup=f'limit-{limit_kind}',
-                            showlegend=not limit_legend_shown[limit_kind],
+                            name='Límite',
+                            legendgroup='limits',
+                            showlegend=not limit_legend_shown,
                             line=dict(
-                                color=limit_color,
+                                color='rgba(231, 76, 60, 0.4)',
                                 width=LIMIT_LINE_WIDTH,
-                                dash='dash'
+                                dash=dash_style
                             ),
                             hovertemplate=(
                                 limit_label + '<br>' +
@@ -1538,7 +1525,7 @@ def create_sensor_trends_chart_golden(
                         row=idx,
                         col=1
                     )
-                    limit_legend_shown[limit_kind] = True
+                    limit_legend_shown = True
 
         # Add state swatches after the real sensor traces so they cannot
         # interfere with the first subplot's data rendering (both clients,
@@ -1571,8 +1558,9 @@ def create_sensor_trends_chart_golden(
                 col=1
             )
 
-        # Update layout with proper spacing and horizontal legend at top.
-        # Compact per-panel height/margins so more signals fit in the first
+        # Update layout with proper spacing and horizontal legend at the
+        # bottom (below the last subplot's x-axis labels). Compact
+        # per-panel height/margins so more signals fit in the first
         # viewport, while staying readable for markers and hover targets.
         fig.update_layout(
             height=150 + 130 * panel_count,
@@ -1581,8 +1569,8 @@ def create_sensor_trends_chart_golden(
             legend=dict(
                 orientation='h',  # Horizontal orientation
                 traceorder='reversed',
-                yanchor='bottom',
-                y=1.01,
+                yanchor='top',
+                y=-0.06,
                 xanchor='center',
                 x=0.5,
                 entrywidth=90,
@@ -1592,7 +1580,7 @@ def create_sensor_trends_chart_golden(
                 bordercolor='#e0e0e0',
                 borderwidth=1
             ),
-            margin=dict(l=55, r=25, t=45, b=30),
+            margin=dict(l=55, r=25, t=30, b=60),
             hovermode='x unified',
         )
 
@@ -1632,13 +1620,13 @@ def create_sensor_trends_chart_golden(
                 borderpad=1
             )
 
-        # Update subplot backgrounds for better separation. The trigger
-        # panel gets a stronger accent tint/border so it's recognizable at
-        # a glance, without touching any state/limit semantic color.
-        for idx, spec in enumerate(panel_specs, 1):
+        # Update subplot backgrounds for better separation. Trigger
+        # emphasis comes from position (first panel) and the title, not
+        # from a per-panel highlight, so every panel shares the same
+        # subtle background.
+        for idx in range(1, panel_count + 1):
             xref = 'x' if idx == 1 else f'x{idx}'
             yref = 'y' if idx == 1 else f'y{idx}'
-            is_trigger = spec['is_trigger']
 
             fig.add_shape(
                 type='rect',
@@ -1646,12 +1634,9 @@ def create_sensor_trends_chart_golden(
                 yref=f'{yref} domain',
                 x0=0, x1=1,
                 y0=0, y1=1,
-                fillcolor='rgba(41, 128, 185, 0.07)' if is_trigger else 'rgba(248, 249, 250, 0.5)',
+                fillcolor='rgba(248, 249, 250, 0.5)',
                 layer='below',
-                line=dict(
-                    color=TRIGGER_ACCENT_COLOR if is_trigger else 'rgba(0, 0, 0, 0)',
-                    width=1.5 if is_trigger else 0
-                ),
+                line_width=0,
                 row=idx,
                 col=1
             )

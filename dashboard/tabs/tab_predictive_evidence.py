@@ -641,18 +641,20 @@ def render_initial_content(unit, df, df_latest, component="motor", client=None):
     scatter_fig = create_fleet_scatter(latest, unit, STATUS_COLORS, 30.0)
     bar_fig = create_comparative_bars(row, latest, failure_modes)
 
-    # AI analysis (analisis_inteligente.parquet) for the selected unit
+    # AI analysis (analisis_inteligente.parquet) for the selected unit.
+    # Always render the three sections rather than hiding the panel when a
+    # unit has no row yet - the pipeline team is expected to backfill
+    # placeholder diagnostico/causa_probable/acciones for units without one
+    # (e.g. healthy units), so the "No disponible" fallback below is meant
+    # to be a rare/transitional case, not the steady-state UI.
     ai_row = _get_unit_ai_analysis(load_analisis_inteligente(client), unit) if client else None
-    ai_section = (
-        html.Div(
-            create_ai_analysis_panel(
-                ai_row.get("diagnostico"),
-                ai_row.get("causa_probable"),
-                ai_row.get("acciones"),
-            ),
-            style={"marginBottom": "1.5rem"},
-        )
-        if ai_row is not None else html.Div()
+    ai_section = html.Div(
+        create_ai_analysis_panel(
+            ai_row.get("diagnostico") if ai_row is not None else None,
+            ai_row.get("causa_probable") if ai_row is not None else None,
+            ai_row.get("acciones") if ai_row is not None else None,
+        ),
+        style={"marginBottom": "1.5rem"},
     )
 
     return html.Div([
