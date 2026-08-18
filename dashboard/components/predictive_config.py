@@ -116,11 +116,11 @@ FAILURE_MODE_CONFIG = {
             }
         },
     },
-
     "capstone": {
-        # Motor Cummins QSK60. Modos, variables y labels validados en el
-        # proyecto de origen (motor_capstone). Los nombres de telemetría
-        # corresponden a las columnas reales del dataset QSK60.
+        # Motor Cummins QSK60. Nombres de telemetría en snake_case / Celsius,
+        # correspondientes a la fuente nueva (migración ago-2026).
+        # Los modos combustion y coolant perdieron variables sin reemplazo —
+        # ver comentarios inline.
         "motor": {
             "abrasive_wear_risk": {
                 "label": "Desgaste Abrasivo",
@@ -131,11 +131,12 @@ FAILURE_MODE_CONFIG = {
             "combustion_risk": {
                 "label": "Combustión / Inyectores",
                 "oil_variables": ["Hollín", "Combustible"],
+                # Perdidas sin reemplazo en la fuente nueva:
+                # 'Injector Metering (PSI)', 'Commanded Engine Fuel Rail Pressure (kPa)',
+                # 'Water In Fuel Indicator 1 (bit)' (modificador).
                 "telemetry_variables": [
-                    "EGT-AV (F)",
-                    "Fuel Delivery Pressure (PSI)",
-                    "Injector Metering (PSI)",
-                    "Commanded Engine Fuel Rail Pressure (kPa)",
+                    "egt_avg_c",
+                    "fuel_pump_intake_pressure_psi",
                 ],
                 "description": "Combustión ineficiente o incompleta por falla en inyectores o sistema Common Rail"
             },
@@ -144,12 +145,12 @@ FAILURE_MODE_CONFIG = {
                 "oil_variables": [],
                 "telemetry_variables": [
                     "DeltaExh",
-                    "EGT-LB (MCRS) (F)",
-                    "EGT-RB (MCRS) (F)",
-                    "IMP-LB (PSI)",
-                    "IMP-RB (MCRS) (PSI)",
-                    "IMT-LBF (F)",
-                    "IMT-RBF (F)",
+                    "egt_lb_c",
+                    "egt_rb_c",
+                    "imp_lb_psi",
+                    "imp_rb_psi",
+                    "imt_lbf_c",
+                    "imt_rbf_c",
                 ],
                 "description": "Diferencia térmica persistente entre los bancos del motor V16"
             },
@@ -157,54 +158,58 @@ FAILURE_MODE_CONFIG = {
                 "label": "Falla de Turbocompresor",
                 "oil_variables": ["Aluminio", "Hierro", "Cromo"],
                 "telemetry_variables": [
-                    "Turbocharger Speed (RPM)",
-                    "IMP-LB (PSI)",
-                    "IMP-RB (MCRS) (PSI)",
-                    "IMT-LBF (F)",
-                    "IMT-RBF (F)",
-                    "EGT-LB (MCRS) (F)",
-                    "EGT-RB (MCRS) (F)",
+                    "turbo_speed_rpm",
+                    "imp_lb_psi",
+                    "imp_rb_psi",
+                    "imt_lbf_c",
+                    "imt_rbf_c",
+                    "egt_lb_c",
+                    "egt_rb_c",
                 ],
                 "description": "Falla en el sistema de turbocompresión en dos etapas, con pérdida de boost y eficiencia"
             },
             "oil_degradation_risk": {
                 "label": "Degradación de Aceite",
                 "oil_variables": ["Hollín", "Viscocidad", "Oxidación", "Combustible"],
-                "telemetry_variables": ["Engine Oil Temperature (F)"],
+                "telemetry_variables": ["oil_temp_c"],
                 "description": "Pérdida progresiva de propiedades lubricantes por contaminación y estrés térmico"
             },
             "coolant_contamination_risk": {
                 "label": "Contaminación por Refrigerante",
                 "oil_variables": ["Sodio", "Potasio"],
+                # Perdida sin reemplazo: 'Engine coolant level (%)'.
+                # La interacción Na×nivel se sustituyó por Na×presión.
                 "telemetry_variables": [
-                    "Coolant temperature (F)",
-                    "Coolant Pressure (PSI)",
-                    "Engine coolant level (%)",
+                    "coolant_temp_c",
+                    "coolant_pressure_psi",
                 ],
                 "description": "Ingreso de refrigerante al aceite por falla de empaquetaduras, O-rings de liner o fisuras"
             },
             "lubrication_failure_risk": {
                 "label": "Falla de Lubricación",
                 "oil_variables": ["Hierro", "Plomo", "Cobre"],
+                # Perdidos sin reemplazo (modificadores multiplicativos):
+                # 'Engine Emergency (Immediate) Shutdown Indication (bit)',
+                # 'Engine Controlled Shutdown Request (bit)'.
                 "telemetry_variables": [
-                    "Rifle Oil Pressure (PSI)",
-                    "Oil Differential Pressure (PSI)",
-                    "Engine Oil Temperature (F)",
+                    "rifle_oil_pressure_psi",
+                    "oil_diff_pressure_psi",
+                    "oil_temp_c",
                 ],
                 "description": "Lubricación insuficiente que genera contacto metal-metal y desgaste acelerado"
             },
             "bearing_wear_risk": {
                 "label": "Desgaste de Cojinetes",
                 "oil_variables": ["Plomo", "Cobre", "Hierro", "Estaño"],
-                "telemetry_variables": ["Rifle Oil Pressure (PSI)"],
+                "telemetry_variables": ["rifle_oil_pressure_psi"],
                 "description": "Desgaste progresivo de cojinetes de biela y bancada"
             },
             "blowby_risk": {
                 "label": "Blow-by / Desgaste de Anillos",
                 "oil_variables": ["Cromo", "Hierro", "Hollín"],
                 "telemetry_variables": [
-                    "Crankcase Pressure (MCRS) (in-H2O)",
-                    "Oil Level - Reserve Tank ()",
+                    "crankcase_pressure_inh2o",
+                    "oil_level_pct",
                 ],
                 "description": "Desgaste de anillos y liner con fuga de gases de combustión al cárter"
             },
@@ -230,30 +235,27 @@ TELEMETRY_LABELS = {
         "TrnSlip": "Deslizamiento Transmisión",
         "gear_mismatch": "Desajuste de Marcha",
     },
-
-    # Nombres QSK60 reales — coinciden con las columnas del dataset de
-    # telemetría de Capstone y con las señales referenciadas en los modos.
+    # Nombres QSK60 en snake_case (fuente nueva, temperaturas en Celsius).
+    # Se eliminaron 3 señales que no existen en la fuente nueva:
+    # Commanded Engine Fuel Rail Pressure, Engine coolant level, Injector Metering.
     "capstone": {
-        "Commanded Engine Fuel Rail Pressure (kPa)": "Presión Riel Comandada",
-        "Coolant Pressure (PSI)":                    "Presión Refrigerante",
-        "Coolant temperature (F)":                   "Temp. Refrigerante",
-        "Crankcase Pressure (MCRS) (in-H2O)":        "Presión Cárter",
-        "DeltaExh":                                  "Delta Escape entre Bancos",
-        "EGT-AV (F)":                                "Temp. Escape Promedio",
-        "EGT-LB (MCRS) (F)":                         "Temp. Escape Banco Izq.",
-        "EGT-RB (MCRS) (F)":                         "Temp. Escape Banco Der.",
-        "Engine Oil Temperature (F)":                "Temp. Aceite Motor",
-        "Engine coolant level (%)":                  "Nivel Refrigerante",
-        "Fuel Delivery Pressure (PSI)":              "Presión Entrega Combustible",
-        "IMP-LB (PSI)":                              "Presión Admisión Banco Izq.",
-        "IMP-RB (MCRS) (PSI)":                       "Presión Admisión Banco Der.",
-        "IMT-LBF (F)":                               "Temp. Admisión Banco Izq.",
-        "IMT-RBF (F)":                               "Temp. Admisión Banco Der.",
-        "Injector Metering (PSI)":                   "Presión Dosificación Inyectores",
-        "Oil Differential Pressure (PSI)":           "Presión Diferencial Filtro Aceite",
-        "Oil Level - Reserve Tank ()":               "Nivel Tanque Reserva",
-        "Rifle Oil Pressure (PSI)":                  "Presión Aceite Galería",
-        "Turbocharger Speed (RPM)":                  "Velocidad Turbocompresor",
+        "DeltaExh":                       "Delta Escape entre Bancos",
+        "coolant_pressure_psi":           "Presión Refrigerante",
+        "coolant_temp_c":                 "Temp. Refrigerante",
+        "crankcase_pressure_inh2o":       "Presión Cárter",
+        "egt_avg_c":                      "Temp. Escape Promedio",
+        "egt_lb_c":                       "Temp. Escape Banco Izq.",
+        "egt_rb_c":                       "Temp. Escape Banco Der.",
+        "fuel_pump_intake_pressure_psi":  "Presión Entrega Combustible",
+        "imp_lb_psi":                     "Presión Admisión Banco Izq.",
+        "imp_rb_psi":                     "Presión Admisión Banco Der.",
+        "imt_lbf_c":                      "Temp. Admisión Banco Izq.",
+        "imt_rbf_c":                      "Temp. Admisión Banco Der.",
+        "oil_diff_pressure_psi":          "Presión Diferencial Filtro Aceite",
+        "oil_level_pct":                  "Nivel Tanque Reserva",
+        "oil_temp_c":                     "Temp. Aceite Motor",
+        "rifle_oil_pressure_psi":         "Presión Aceite Galería",
+        "turbo_speed_rpm":                "Velocidad Turbocompresor",
     },
 }
 
@@ -324,19 +326,19 @@ OIL_THRESHOLDS = {
     # set (normal, alerta, crítico) — así el lookup por oilHourRange funciona
     # igual que en CDA sin tocar las funciones de charts/tablas.
     "capstone": {
-        "Aluminio":    {"LT_1000": (2.50, 3.0, 4.50),   "GE_1000": (2.50, 3.0, 4.50)},
-        "Cobre":       {"LT_1000": (2.50, 3.5, 5.25),   "GE_1000": (2.50, 3.5, 5.25)},
-        "Combustible": {"LT_1000": (0.05, 0.1, 0.15),   "GE_1000": (0.05, 0.1, 0.15)},
-        "Cromo":       {"LT_1000": (2.00, 3.0, 4.50),   "GE_1000": (2.00, 3.0, 4.50)},
-        "Estaño":      {"LT_1000": (3.00, 5.0, 7.50),   "GE_1000": (3.00, 5.0, 7.50)},
-        "Hierro":      {"LT_1000": (19.00, 24.0, 36.00), "GE_1000": (19.00, 24.0, 36.00)},
+        "Aluminio":    {"LT_1000": (3.0, 4.0, 5.0),   "GE_1000": (3.0, 4.0, 5.0)},
+        "Boro":        {"LT_1000": (61.0, 63.0, 64.5),   "GE_1000": (61.0, 63.0, 64.5)},
+        "Cobre":       {"LT_1000": (1.5, 5.0, 6.5),   "GE_1000": (1.5, 5.0, 6.5)},
+        "Cromo":       {"LT_1000": (2.00, 3.0, 4.0),   "GE_1000": (2.00, 3.0, 4.0)},
+        "Estaño":      {"LT_1000": (3.00, 3.0, 4.0),   "GE_1000": (3.00, 3.0, 4.0)},
+        "Hierro":      {"LT_1000": (18.00, 19.0, 21.00), "GE_1000": (18.00, 19.0, 21.00)},
         "Hollín":      {"LT_1000": (1.50, 3.0, 4.50),   "GE_1000": (1.50, 3.0, 4.50)},
         "Oxidación":   {"LT_1000": (19.00, 24.5, 36.75), "GE_1000": (19.00, 24.5, 36.75)},
-        "Plomo":       {"LT_1000": (2.00, 3.0, 4.50),   "GE_1000": (2.00, 3.0, 4.50)},
-        "Potasio":     {"LT_1000": (2.50, 3.5, 5.25),   "GE_1000": (2.50, 3.5, 5.25)},
-        "Silicio":     {"LT_1000": (11.00, 13.0, 19.50), "GE_1000": (11.00, 13.0, 19.50)},
-        "Sodio":       {"LT_1000": (10.00, 13.0, 19.50), "GE_1000": (10.00, 13.0, 19.50)},
-        "Viscocidad":  {"LT_1000": (16.10, 16.3, 24.45), "GE_1000": (16.10, 16.3, 24.45)},
+        "Plomo":       {"LT_1000": (2.5, 4.0, 6.0),   "GE_1000": (2.5, 4.0, 6.0)},
+        "Potasio":     {"LT_1000": (3.0, 4.0, 10.5),   "GE_1000":  (3.0, 4.0, 10.5)},
+        "Silicio":     {"LT_1000": (11.00, 12.0, 13.0), "GE_1000": (11.00, 12.0, 13.0)},
+        "Sodio":       {"LT_1000": (4.0, 6.0, 13.5), "GE_1000": (4.0, 6.0, 13.5)},
+        "Viscocidad":  {"LT_1000": (16.0, 17.0, 18.0), "GE_1000": (16.0, 17.0, 18.0)},
     },
 }
 
@@ -496,9 +498,14 @@ FAILURE_MODE_METHODOLOGY = {
                 "contaminantes externos."
             ),
             "combustion_risk": (
-                "Se analiza el Hollín en aceite junto con las temperaturas de "
-                "gases de escape (promedio y por banco). Hollín elevado con "
-                "temperaturas de escape anómalas indica combustión deficiente."
+                "Se analiza el Hollín y la dilución por Combustible en aceite, "
+                "junto con la temperatura promedio de gases de escape y la presión "
+                "de entrega de combustible. Hollín elevado con escape caliente "
+                "indica combustión deficiente; dilución con presión de combustible "
+                "baja sugiere inyector con fuga. Nota: la fuente actual no expone "
+                "presión de dosificación de inyectores, riel comandado ni el "
+                "indicador de agua en combustible, por lo que la detección de "
+                "fallas de inyección se apoya mayoritariamente en análisis de aceite."
             ),
             "thermal_imbalance_risk": (
                 "Se monitorea el diferencial entre las temperaturas de escape de "
@@ -523,8 +530,9 @@ FAILURE_MODE_METHODOLOGY = {
             ),
             "blowby_risk": (
                 "Se correlaciona la presión del cárter con el contenido de Hollín "
-                "en el aceite. Presión de cárter elevada con hollín alto indica "
-                "fuga de gases de combustión (blow-by)."
+                "y Cromo en el aceite, junto con el nivel del tanque de reserva. "
+                "Presión de cárter elevada con hollín alto indica fuga de gases de "
+                "combustión (blow-by); Cromo creciente confirma desgaste de anillos."
             ),
             "turbocharger_risk": (
                 "Se monitorea la velocidad del turbo y las presiones de admisión "
