@@ -751,6 +751,44 @@ def load_oil_classified(client: str) -> pd.DataFrame:
 
 
 @lru_cache(maxsize=8)
+def _load_analisis_inteligente_cached(client: str) -> pd.DataFrame:
+    """
+    Load AI-generated risk analysis/recommendation for Predictivo -> Evidencia
+    (one row per Unit per Fecha). Callers filter to a single Unit and take the
+    most recent Fecha.
+
+    Args:
+        client: Client identifier (e.g., 'cda')
+
+    Returns:
+        DataFrame with columns including Unit, Fecha, diagnostico,
+        causa_probable, acciones. Empty DataFrame if the file is missing.
+    """
+    file_path = _data_path("predictive", "golden", client.lower(), "analisis_inteligente.parquet")
+    logger.info(f"Loading analisis inteligente data from {file_path}")
+
+    if not file_path.exists():
+        logger.warning(f"Analisis inteligente file not found: {file_path}")
+        return pd.DataFrame()
+
+    try:
+        df = safe_read_parquet(file_path)
+        if "Fecha" in df.columns:
+            df["Fecha"] = pd.to_datetime(df["Fecha"])
+        logger.info(f"Loaded {len(df)} analisis inteligente rows")
+        return df
+
+    except Exception as e:
+        logger.error(f"Error loading analisis inteligente data: {e}")
+        return pd.DataFrame()
+
+
+def load_analisis_inteligente(client: str) -> pd.DataFrame:
+    """Return cached AI analysis data as a defensive copy."""
+    return _load_analisis_inteligente_cached((client or '').lower()).copy(deep=True)
+
+
+@lru_cache(maxsize=8)
 def _load_machine_status_cached(client: str) -> pd.DataFrame:
     """
     Load machine-level status aggregations for the oil dashboards (fleet

@@ -1265,6 +1265,17 @@ SIGNAL_LINE_WIDTH = 1.3
 # than blend in with it.
 LIMIT_LINE_WIDTH = 3
 
+# Limit colors are semantic and never change based on which signal triggered
+# the alert: upper limit is always red, lower limit is always purple.
+LIMIT_UPPER_COLOR = 'rgba(231, 76, 60, 0.7)'
+LIMIT_LOWER_COLOR = 'rgba(155, 89, 182, 0.7)'
+
+# Trigger emphasis uses a color reserved for "this is the panel that
+# matters" that doesn't collide with any state/limit semantic (green/
+# orange/gray/red/purple), so highlighting the trigger never reads as an
+# upper-limit cue.
+TRIGGER_ACCENT_COLOR = '#2980b9'
+
 # ================================
 # NEW GOLDEN LAYER CHART FUNCTIONS
 # ================================
@@ -1320,32 +1331,20 @@ def create_sensor_trends_chart_golden(
         
         # Use filtered data for plotting
         alert_data = alert_data_filtered
-        
-        # Use Spanish names if mapping provided
-        subplot_titles = [feature_name_map.get(f, f) if feature_name_map else f for f in feature_names]
-        
-        # Plotly limits vertical_spacing to 1 / (rows - 1). Charts can expose
-        # many mapped signals, so reduce spacing for tall charts regardless
-        # of client (REQ-AD-01: rendering must not depend on client).
-        panel_count = len(feature_names)
-        vertical_spacing = 0.12 if panel_count <= 1 else min(0.05, 0.9 / (panel_count - 1))
-        fig = make_subplots(
-            rows=panel_count,
-            cols=1,
-            shared_xaxes=True,
-            subplot_titles=subplot_titles,
-            vertical_spacing=vertical_spacing
-        )
-        limit_legend_shown = False
-        # REQ-AD-03: the highlight rectangle is drawn only on the panel of
-        # the feature that actually triggered the alert.
+
+        # REQ-AD-03: the trigger panel gets stronger styling (title, line
+        # weight, background) than the rest -- resolved once, up front.
         trigger_feature = None
         if 'Trigger' in alert_data.columns and not alert_data['Trigger'].empty:
             raw_trigger = alert_data['Trigger'].iloc[0]
             if pd.notna(raw_trigger):
                 trigger_feature = str(raw_trigger).strip().casefold()
-        # Plot each feature
-        for idx, feature in enumerate(feature_names, 1):
+
+        # Resolve each panel's columns (incl. Capstone alias fallback) and
+        # limit availability up front so subplot titles can state the
+        # applicable limit type and flag the trigger before make_subplots.
+        panel_specs = []
+        for feature in feature_names:
             value_col = f'{feature}_Value'
             upper_col = f'{feature}_Upper_Limit'
             lower_col = f'{feature}_Lower_Limit'
@@ -1364,6 +1363,64 @@ def create_sensor_trends_chart_golden(
                         value_col = f'{alias}_Value'
                         upper_col = f'{alias}_Upper_Limit'
                         lower_col = f'{alias}_Lower_Limit'
+            has_upper = upper_col in alert_data.columns and alert_data[upper_col].notna().any()
+            has_lower = lower_col in alert_data.columns and alert_data[lower_col].notna().any()
+            is_trigger = (
+                trigger_feature is not None
+                and trigger_feature == str(feature).strip().casefold()
+            )
+
+            if has_upper and has_lower:
+                limit_suffix = ' (lím. superior/inferior)'
+            elif has_upper:
+                limit_suffix = ' (lím. superior)'
+            elif has_lower:
+                limit_suffix = ' (lím. inferior)'
+            else:
+                limit_suffix = ''
+            base_title = f'{display_name}{limit_suffix}'
+            title = f'<b>GATILLO · {base_title}</b>' if is_trigger else base_title
+
+            panel_specs.append(dict(
+                feature=feature,
+                value_col=value_col,
+                upper_col=upper_col,
+                lower_col=lower_col,
+                display_name=display_name,
+                is_trigger=is_trigger,
+                title=title,
+            ))
+
+        subplot_titles = [spec['title'] for spec in panel_specs]
+
+        # Plotly limits vertical_spacing to 1 / (rows - 1). Charts can expose
+        # many mapped signals, so keep spacing tight to fit more signals in
+        # the first viewport, regardless of client (REQ-AD-01).
+        panel_count = len(panel_specs)
+        vertical_spacing = 0.1 if panel_count <= 1 else min(0.035, 0.85 / (panel_count - 1))
+        fig = make_subplots(
+            rows=panel_count,
+            cols=1,
+            shared_xaxes=True,
+            subplot_titles=subplot_titles,
+            vertical_spacing=vertical_spacing
+        )
+        # Only the subplot-title annotations exist at this point; anything
+        # added later (e.g. the "Alerta" time labels) must not be swept up
+        # by the title-styling loop further down.
+        title_annotation_count = len(fig['layout']['annotations'])
+
+        limit_legend_shown = {'upper': False, 'lower': False}
+
+        # Plot each feature
+        for idx, spec in enumerate(panel_specs, 1):
+            feature = spec['feature']
+            value_col = spec['value_col']
+            upper_col = spec['upper_col']
+            lower_col = spec['lower_col']
+            display_name = spec['display_name']
+            is_trigger_feature = spec['is_trigger']
+
             if value_col not in alert_data.columns:
                 logger.warning("Skipping feature without value column: %s", feature)
                 continue
@@ -1387,6 +1444,13 @@ def create_sensor_trends_chart_golden(
                 lambda state: _state_color(state) if str(state).strip() else SIGNAL_LINE_COLOR
             )
 
+            # REQ-AD-03: the trigger panel keeps the same state palette but
+            # renders with a heavier line/marker so it reads as "the panel
+            # that matters" without recoloring the signal itself.
+            line_width = SIGNAL_LINE_WIDTH * 1.8 if is_trigger_feature else SIGNAL_LINE_WIDTH
+            marker_size = 8 if is_trigger_feature else 6
+            marker_line_width = 1.5 if is_trigger_feature else 1
+
             # REQ-AD-02: break the line at real time gaps instead of
             # connecting them, by rendering one trace per contiguous segment.
             for segment in _split_gap_segments(value_data, 'TimeStart'):
@@ -1399,11 +1463,11 @@ def create_sensor_trends_chart_golden(
                         showlegend=False,
                         customdata=segment['_state_label'].to_numpy(),
                         marker=dict(
-                            size=6,
+                            size=marker_size,
                             color=segment['_state_color'].to_numpy(),
-                            line=dict(width=1, color='white')
+                            line=dict(width=marker_line_width, color='white')
                         ),
-                        line=dict(color=SIGNAL_LINE_COLOR, width=SIGNAL_LINE_WIDTH),
+                        line=dict(color=SIGNAL_LINE_COLOR, width=line_width),
                         hovertemplate=(
                             f'<b>{display_name}</b><br>' +
                             'Hora: %{x|%d/%m/%Y %H:%M:%S}<br>' +
@@ -1416,37 +1480,36 @@ def create_sensor_trends_chart_golden(
                     col=1
                 )
 
-            # REQ-AD-03: flashy highlight rectangle around the alert moment,
-            # only on the panel of the feature that triggered the alert --
-            # 30s before/after the alert timestamp on the x-axis, and
-            # (alert value +/- 1) on the y-axis.
-            is_trigger_feature = (
-                trigger_feature is not None
-                and trigger_feature == str(feature).strip().casefold()
-            )
+            # Highlight rectangle around the alert moment, only on the panel
+            # of the feature that actually triggered the alert -- 30s
+            # before/after the alert timestamp on the x-axis, and (alert
+            # value +/- 1) on the y-axis. Uses the trigger accent color
+            # (blue), never red, so it can't be mistaken for the
+            # upper-limit semantic.
             if is_trigger_feature:
                 time_deltas = (value_data['TimeStart'] - alert_time).abs()
                 nearest_idx = time_deltas.idxmin()
                 alert_value = value_data.loc[nearest_idx, value_col]
-            if is_trigger_feature and pd.notna(alert_value):
-                fig.add_shape(
-                    type='rect',
-                    x0=alert_time - timedelta(seconds=30),
-                    x1=alert_time + timedelta(seconds=30),
-                    y0=alert_value - 1,
-                    y1=alert_value + 1,
-                    line=dict(color='#ff0000', width=3),
-                    fillcolor='rgba(255, 0, 0, 0.25)',
-                    layer='above',
-                    row=idx,
-                    col=1
-                )
+                if pd.notna(alert_value):
+                    fig.add_shape(
+                        type='rect',
+                        x0=alert_time - timedelta(seconds=30),
+                        x1=alert_time + timedelta(seconds=30),
+                        y0=alert_value - 1,
+                        y1=alert_value + 1,
+                        line=dict(color=TRIGGER_ACCENT_COLOR, width=3),
+                        fillcolor='rgba(41, 128, 185, 0.2)',
+                        layer='above',
+                        row=idx,
+                        col=1
+                    )
             # Plot limits (SECONDARY PRIORITY - Visually lighter), also
             # gap-segmented so a missing limit window doesn't draw a
-            # straight connector across it.
-            for limit_col, limit_label, dash_style in (
-                (lower_col, 'Límite Inferior', 'dash'),
-                (upper_col, 'Límite Superior', 'dash'),
+            # straight connector across it. Upper limit is always red,
+            # lower limit is always purple, regardless of the trigger.
+            for limit_col, limit_label, limit_kind, limit_color in (
+                (lower_col, 'Límite inferior', 'lower', LIMIT_LOWER_COLOR),
+                (upper_col, 'Límite superior', 'upper', LIMIT_UPPER_COLOR),
             ):
                 if limit_col not in alert_data.columns or not alert_data[limit_col].notna().any():
                     continue
@@ -1457,13 +1520,13 @@ def create_sensor_trends_chart_golden(
                             x=segment['TimeStart'],
                             y=segment[limit_col],
                             mode='lines',
-                            name='Límite',
-                            legendgroup='limits',
-                            showlegend=not limit_legend_shown,
+                            name=limit_label,
+                            legendgroup=f'limit-{limit_kind}',
+                            showlegend=not limit_legend_shown[limit_kind],
                             line=dict(
-                                color='rgba(231, 76, 60, 0.4)',
+                                color=limit_color,
                                 width=LIMIT_LINE_WIDTH,
-                                dash=dash_style
+                                dash='dash'
                             ),
                             hovertemplate=(
                                 limit_label + '<br>' +
@@ -1475,7 +1538,7 @@ def create_sensor_trends_chart_golden(
                         row=idx,
                         col=1
                     )
-                    limit_legend_shown = True
+                    limit_legend_shown[limit_kind] = True
 
         # Add state swatches after the real sensor traces so they cannot
         # interfere with the first subplot's data rendering (both clients,
@@ -1508,44 +1571,41 @@ def create_sensor_trends_chart_golden(
                 col=1
             )
 
-        # Update layout with proper spacing and horizontal legend at top
+        # Update layout with proper spacing and horizontal legend at top.
+        # Compact per-panel height/margins so more signals fit in the first
+        # viewport, while staying readable for markers and hover targets.
         fig.update_layout(
-            height=280 + 200 * len(feature_names),  # Increased height per chart for better spacing
+            height=150 + 130 * panel_count,
             template='plotly_white',
             showlegend=True,  # Show legend for state colors and limits
             legend=dict(
                 orientation='h',  # Horizontal orientation
                 traceorder='reversed',
                 yanchor='bottom',
-                y=1.02,  # Same legend position as CDA
+                y=1.01,
                 xanchor='center',
                 x=0.5,
                 entrywidth=90,
                 entrywidthmode='pixels',
-                font=dict(size=11),
+                font=dict(size=10),
                 bgcolor='rgba(255, 255, 255, 0.9)',
                 bordercolor='#e0e0e0',
                 borderwidth=1
             ),
-            margin=dict(l=60, r=40, t=80, b=50),
+            margin=dict(l=55, r=25, t=45, b=30),
             hovermode='x unified',
-            title=dict(
-                text=f'<b>Análisis de Tendencias - {unit_id}</b>',
-                x=0.5,
-                xanchor='center',
-                y=0.99,
-                yanchor='top',
-                font=dict(size=16, color='#2c3e50', family='Arial, sans-serif')
-            )
         )
 
-        # The card heading and subplot titles identify the chart; avoid a
-        # second global title covering the first panel or the legend
-        # (both clients, REQ-AD-01).
+        # The alert-context header (above the card) and subplot titles
+        # identify the chart; avoid a second global title covering the
+        # first panel or the legend (both clients, REQ-AD-01).
         fig.layout.title = None
 
-        # Add alert time vertical lines as shapes (full height in each subplot)
-        for idx in range(1, len(feature_names) + 1):
+        # Add alert time vertical lines as shapes (full height in each
+        # subplot), each carrying a visible "Alerta" label so the reference
+        # is unambiguous on every panel.
+        for idx in range(1, panel_count + 1):
+            xref = 'x' if idx == 1 else f'x{idx}'
             yref = 'y' if idx == 1 else f'y{idx}'
             fig.add_shape(
                 type='line',
@@ -1554,30 +1614,48 @@ def create_sensor_trends_chart_golden(
                 y0=0,
                 y1=1,
                 yref=f'{yref} domain',
-                line=dict(color='rgba(128, 128, 128, 0.5)', width=2.5, dash='dot'),
+                line=dict(color='rgba(128, 128, 128, 0.6)', width=2.5, dash='dot'),
                 row=idx,
                 col=1
             )
-        
-        # Update subplot backgrounds for better separation
-        for idx in range(1, len(feature_names) + 1):
+            fig.add_annotation(
+                x=alert_time,
+                y=1,
+                xref=xref,
+                yref=f'{yref} domain',
+                text='Alerta',
+                showarrow=False,
+                xanchor='left',
+                yanchor='top',
+                font=dict(size=9, color='#7f8c8d', family='Arial, sans-serif'),
+                bgcolor='rgba(255, 255, 255, 0.75)',
+                borderpad=1
+            )
+
+        # Update subplot backgrounds for better separation. The trigger
+        # panel gets a stronger accent tint/border so it's recognizable at
+        # a glance, without touching any state/limit semantic color.
+        for idx, spec in enumerate(panel_specs, 1):
             xref = 'x' if idx == 1 else f'x{idx}'
             yref = 'y' if idx == 1 else f'y{idx}'
-            
-            # Add subtle background rectangle for each subplot
+            is_trigger = spec['is_trigger']
+
             fig.add_shape(
                 type='rect',
                 xref=f'{xref} domain',
                 yref=f'{yref} domain',
                 x0=0, x1=1,
                 y0=0, y1=1,
-                fillcolor='rgba(248, 249, 250, 0.5)',
+                fillcolor='rgba(41, 128, 185, 0.07)' if is_trigger else 'rgba(248, 249, 250, 0.5)',
                 layer='below',
-                line_width=0,
+                line=dict(
+                    color=TRIGGER_ACCENT_COLOR if is_trigger else 'rgba(0, 0, 0, 0)',
+                    width=1.5 if is_trigger else 0
+                ),
                 row=idx,
                 col=1
             )
-        
+
         # Update x and y axes for better readability
         fig.update_xaxes(
             showgrid=True,
@@ -1598,12 +1676,21 @@ def create_sensor_trends_chart_golden(
             title_font=dict(size=11)
         )
         
-        # Style subplot titles (annotations)
-        for annotation in fig['layout']['annotations']:
-            annotation['font'] = dict(size=13, color='#2c3e50', family='Arial, sans-serif')
+        # Style subplot titles (annotations). Only the first
+        # `title_annotation_count` annotations are subplot titles -- the
+        # "Alerta" time labels added above keep their own smaller styling
+        # and must not be swept up here. The trigger panel gets a bolder,
+        # accent-colored title (REQ-AD-03: stronger title).
+        for i, annotation in enumerate(fig['layout']['annotations'][:title_annotation_count]):
+            is_trigger = panel_specs[i]['is_trigger']
+            annotation['font'] = (
+                dict(size=14, color=TRIGGER_ACCENT_COLOR, family='Arial, sans-serif')
+                if is_trigger
+                else dict(size=12, color='#2c3e50', family='Arial, sans-serif')
+            )
             annotation['xanchor'] = 'center'
             annotation['yanchor'] = 'bottom'
-        
+
         logger.info(f"Created sensor trends chart (golden layer) with {len(feature_names)} features")
         return fig
     
