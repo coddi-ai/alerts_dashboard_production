@@ -11,7 +11,7 @@ import json
 import re
 from pathlib import Path
 from config.settings import get_settings
-from src.utils.file_utils import safe_read_parquet
+from src.data.loaders import load_oil_classified
 from src.data.loaders import load_stewart_limits_four
 from dashboard.components.oil_charts import (
     get_essay_limits_four,
@@ -208,7 +208,7 @@ def register_reports_callbacks(app):
             return [], None
         
         try:
-            df = safe_read_parquet(reports_file)
+            df = load_oil_classified(client)
             familias = sorted(df['machineName'].dropna().unique().tolist())
             options = [{'label': f.title(), 'value': f} for f in familias]
             
@@ -256,7 +256,7 @@ def register_reports_callbacks(app):
             return [], None
         
         try:
-            df = safe_read_parquet(reports_file)
+            df = load_oil_classified(client)
             df = df[df['machineName'] == familia]
             
             equipos = sorted(df['unitId'].dropna().unique().tolist())
@@ -308,7 +308,7 @@ def register_reports_callbacks(app):
             return [], None, None
         
         try:
-            df = safe_read_parquet(reports_file)
+            df = load_oil_classified(client)
             df = df[(df['machineName'] == familia) & (df['unitId'] == equipo)]
             
             components = sorted(df['componentName'].dropna().unique().tolist())
@@ -365,7 +365,7 @@ def register_reports_callbacks(app):
             return [], None
         
         try:
-            df = safe_read_parquet(reports_file)
+            df = load_oil_classified(client)
             logger.info(f"Loaded {len(df)} rows from {reports_file}")
             logger.info(f"Columns: {df.columns.tolist()}")
             logger.info(f"Unique familias: {df['machineName'].unique().tolist()}")
@@ -445,7 +445,7 @@ def register_reports_callbacks(app):
                    html.P("Sin datos"), [], None, html.Div())
 
         try:
-            df = safe_read_parquet(reports_file)
+            df = load_oil_classified(client)
             limits = load_stewart_limits_four(limits_file) if limits_file.exists() else None
             
             logger.info(f"Loaded {len(df)} rows, filtering for: familia={familia}, equipo={equipo}, component={component}, date={sample_date}")
@@ -535,7 +535,7 @@ def register_reports_callbacks(app):
             return Figure()
 
         try:
-            df = safe_read_parquet(reports_file)
+            df = load_oil_classified(client)
             limits = load_stewart_limits_four(limits_file) if limits_file.exists() else None
             
             # Filter to this equipment and component
@@ -676,7 +676,7 @@ def register_reports_callbacks(app):
             return html.P("No hay datos disponibles", className="text-muted")
 
         try:
-            df = safe_read_parquet(reports_file)
+            df = load_oil_classified(client)
             limits = load_stewart_limits_four(limits_file) if limits_file.exists() else None
 
             # Filter to equipment + component
@@ -733,7 +733,7 @@ def register_reports_callbacks(app):
             return html.P("Sin datos", className="text-muted")
 
         try:
-            df = safe_read_parquet(reports_file)
+            df = load_oil_classified(client)
             history = df[(df['unitId'] == equipo) & (df['componentName'] == component)].copy()
             if history.empty:
                 return html.P("Sin historial para este equipo/componente", className="text-muted")
@@ -820,7 +820,7 @@ def register_reports_callbacks(app):
         if not reports_file.exists():
             return []
         try:
-            df = safe_read_parquet(reports_file)
+            df = load_oil_classified(client)
             history = df[(df['unitId'] == equipo) & (df['componentName'] == component)]
             if history.empty:
                 return []
@@ -868,7 +868,7 @@ def register_reports_callbacks(app):
             return html.P("Sin datos", className="text-muted")
 
         try:
-            df = safe_read_parquet(reports_file)
+            df = load_oil_classified(client)
             limits = load_stewart_limits_four(limits_file) if limits_file.exists() else None
 
             history = df[(df['unitId'] == equipo) & (df['componentName'] == component)].copy()

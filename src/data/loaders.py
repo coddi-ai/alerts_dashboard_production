@@ -750,6 +750,39 @@ def load_oil_classified(client: str) -> pd.DataFrame:
     return _load_oil_classified_cached((client or '').lower()).copy(deep=True)
 
 
+@lru_cache(maxsize=8)
+def _load_machine_status_cached(client: str) -> pd.DataFrame:
+    """
+    Load machine-level status aggregations for the oil dashboards (fleet
+    overview KPIs, heatmap table, machine detail card).
+
+    Args:
+        client: Client identifier (e.g., 'cda')
+
+    Returns:
+        DataFrame with columns: unit_id, overall_status, machine_ai_recommendation, etc.
+    """
+    file_path = _data_path("oil", "golden", client.lower(), "machine_status.parquet")
+    logger.info(f"Loading machine status from {file_path}")
+
+    if not file_path.exists():
+        logger.warning(f"Machine status file not found: {file_path}")
+        return pd.DataFrame()
+
+    try:
+        df = safe_read_parquet(file_path)
+        logger.info(f"Loaded {len(df)} machine status records")
+        return df
+
+    except Exception as e:
+        logger.error(f"Error loading machine status data: {e}")
+        return pd.DataFrame()
+
+
+def load_machine_status_for_client(client: str) -> pd.DataFrame:
+    """Return cached machine status data as a defensive copy."""
+    return _load_machine_status_cached((client or '').lower()).copy(deep=True)
+
 
 # ========================================
 # TELEMETRY HEALTH DASHBOARD LOADERS
@@ -857,13 +890,14 @@ def _load_latest_telemetry_output(
         return pd.DataFrame()
 
 
-def load_telemetry_unit_health(client: str) -> pd.DataFrame:
+@lru_cache(maxsize=8)
+def _load_telemetry_unit_health_cached(client: str) -> pd.DataFrame:
     """
     Load unit health assessments from golden layer.
-    
+
     Args:
         client: Client identifier (e.g., 'cda')
-    
+
     Returns:
         DataFrame with unit-level health (overall_status, priority_score, executive_summary, etc.)
     """
@@ -883,6 +917,18 @@ def load_telemetry_unit_health(client: str) -> pd.DataFrame:
     except Exception as e:
         logger.error(f"Error loading telemetry unit health: {e}")
         return pd.DataFrame()
+
+
+def load_telemetry_unit_health(client: str) -> pd.DataFrame:
+    """Return cached telemetry unit health data as a defensive copy.
+
+    Cached because this is on the post-login critical path (Resumen ->
+    General's overview aggregator calls it on every page mount / client
+    switch) and involves a directory-partition scan plus a parquet read -
+    not something to repeat on every login. A caller mutating the returned
+    frame in place (e.g. reassigning a column) only affects its own copy.
+    """
+    return _load_telemetry_unit_health_cached((client or '').lower()).copy(deep=True)
 
 
 def load_telemetry_system_health(client: str) -> pd.DataFrame:

@@ -12,8 +12,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 import logging
 
-from src.utils.file_utils import safe_read_parquet
-from src.data.loaders import load_telemetry_unit_health, load_alerts_data
+from src.data.loaders import load_telemetry_unit_health, load_alerts_data, load_machine_status_for_client
 from src.data.maintenance_repository import get_repository
 from dashboard.callbacks.data_freshness_callbacks import load_data_freshness
 
@@ -874,10 +873,7 @@ def register_overview_general_callbacks(app):
             logger.info(f"Maintenance: Loaded {len(df_status)} status records for client: {client}")
             
             # Load Oil analysis data - use machine_status.parquet for overview charts
-            from config.settings import get_settings as get_oil_settings
-            oil_settings = get_oil_settings()
-            machine_status_file = oil_settings.get_machine_status_path(client.lower())
-            df_oil = safe_read_parquet(machine_status_file)
+            df_oil = load_machine_status_for_client(client)
             if df_oil is None or df_oil.empty:
                 df_oil = pd.DataFrame()
             else:

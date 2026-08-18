@@ -10,8 +10,7 @@ from dash import Input, Output, State, html, dcc, dash_table, ctx, no_update
 from dash.exceptions import PreventUpdate
 import pandas as pd
 from config.settings import get_settings
-from src.utils.file_utils import safe_read_parquet
-from src.data.loaders import get_latest_component_hours
+from src.data.loaders import get_latest_component_hours, load_oil_classified, load_machine_status_for_client
 from src.utils.logger import get_logger
 from dashboard.components.tables import create_machine_detail_table
 import dash_bootstrap_components as dbc
@@ -51,7 +50,7 @@ def register_machines_callbacks(app):
         if not path.exists():
             return []
         try:
-            df = safe_read_parquet(path)
+            df = load_oil_classified(client)
             sites = sorted(df['site'].dropna().unique().tolist())
             return [{'label': s, 'value': s} for s in sites]
         except Exception as e:
@@ -76,7 +75,7 @@ def register_machines_callbacks(app):
         if not path.exists():
             return [], None
         try:
-            df = safe_read_parquet(path)
+            df = load_oil_classified(client)
             if site:
                 df = df[df['site'] == site]
             fleets = sorted(df['machineName'].dropna().unique().tolist())
@@ -112,7 +111,7 @@ def register_machines_callbacks(app):
         if not path.exists():
             return empty
         try:
-            df = safe_read_parquet(path)
+            df = load_oil_classified(client)
             if site:
                 df = df[df['site'] == site]
             if fleet:
@@ -127,7 +126,7 @@ def register_machines_callbacks(app):
             machine_file = settings.get_machine_status_path(client.lower())
             ms_map = {}
             if machine_file.exists():
-                ms_df = safe_read_parquet(machine_file)
+                ms_df = load_machine_status_for_client(client)
                 ms_map = dict(zip(ms_df['unit_id'], ms_df['overall_status']))
 
             pivot = latest.pivot_table(index='unitId', columns='componentName',
@@ -166,7 +165,7 @@ def register_machines_callbacks(app):
         if not path.exists():
             return [], []
         try:
-            df = safe_read_parquet(path)
+            df = load_oil_classified(client)
             if site:
                 df = df[df['site'] == site]
             df = df[df['machineName'] == fleet]
@@ -211,7 +210,7 @@ def register_machines_callbacks(app):
             return html.P("Sin datos disponibles", className="text-muted"), ""
 
         try:
-            df = safe_read_parquet(path)
+            df = load_oil_classified(client)
             if site:
                 df = df[df['site'] == site]
             df = df[df['machineName'] == fleet]
@@ -227,7 +226,7 @@ def register_machines_callbacks(app):
             machine_file = settings.get_machine_status_path(client.lower())
             ms_map = {}
             if machine_file.exists():
-                ms_df = safe_read_parquet(machine_file)
+                ms_df = load_machine_status_for_client(client)
                 ms_map = dict(zip(ms_df['unit_id'], ms_df['overall_status']))
 
             pivot = latest.pivot_table(index='unitId', columns='componentName',
@@ -371,7 +370,7 @@ def register_machines_callbacks(app):
             return "Sin datos", "light", html.Div(), "No hay datos"
 
         try:
-            df = safe_read_parquet(reports_file)
+            df = load_oil_classified(client)
             mdf = df[df['unitId'] == unit_id].copy()
             if mdf.empty:
                 return f"Máquina {unit_id}", "warning", html.Div(), f"Sin datos para {unit_id}"
@@ -411,7 +410,7 @@ def register_machines_callbacks(app):
             rec_card = html.Div()
             if machine_file.exists():
                 try:
-                    ms_df = safe_read_parquet(machine_file)
+                    ms_df = load_machine_status_for_client(client)
                     mr = ms_df[ms_df['unit_id'] == unit_id]
                     if not mr.empty:
                         rec = mr.iloc[0].get('machine_ai_recommendation', None)
@@ -489,7 +488,7 @@ def register_machines_callbacks(app):
             raise PreventUpdate
 
         try:
-            df = safe_read_parquet(path)
+            df = load_oil_classified(client)
             unit_df = df[(df['unitId'] == unit_id) & (df['componentName'] == component)]
             if unit_df.empty:
                 raise PreventUpdate
@@ -534,7 +533,7 @@ def register_machines_callbacks(app):
         if not path.exists():
             return [], True, True
         try:
-            df = safe_read_parquet(path)
+            df = load_oil_classified(client)
             comps = sorted(df[df['unitId'] == unit_id]['componentName'].unique().tolist())
             return [{'label': c.title(), 'value': c} for c in comps], False, False
         except:
@@ -557,7 +556,7 @@ def register_machines_callbacks(app):
         familia = None
         if path.exists():
             try:
-                df = safe_read_parquet(path)
+                df = load_oil_classified(client)
                 md = df[df['unitId'] == equipo]
                 if not md.empty:
                     familia = md.iloc[0]['machineName']

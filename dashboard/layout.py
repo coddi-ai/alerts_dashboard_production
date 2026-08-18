@@ -12,7 +12,7 @@ import dash_bootstrap_components as dbc
 import dash
 import os
 from pathlib import Path
-from config.settings import get_settings
+from config.settings import get_settings, APP_VERSION
 from config.client_services import is_service_enabled
 from dashboard.auth import is_admin
 from dashboard.services_registry import SERVICE_SECTIONS, SERVICE_LABELS, nav_path as _nav_path
@@ -177,6 +177,13 @@ def create_login_page() -> dbc.Container:
                                 color="primary",
                                 spinner_style={"display": "none"},
                                 spinnerClassName="mt-3 text-center"
+                            ),
+
+                            # Version footnote
+                            html.P(
+                                f"v{APP_VERSION}",
+                                className="text-center text-muted mt-4 mb-0",
+                                style={"fontSize": "0.75rem"}
                             )
                         ], style={"padding": "32px"})
                     ], style={"padding": "0"})
