@@ -30,7 +30,6 @@ from src.campbell_ai.errors import CampbellDataError
 from src.campbell_ai.models import VisualizationArtifact
 from src.charts.builders import (
     build_category_bar,
-    build_signal_panels,
     build_gauge,
     build_heatmap,
     build_histogram,
@@ -50,6 +49,7 @@ from src.campbell_ai.oil_limits import (
     oil_element_groups,
 )
 from src.campbell_ai.signals import (
+    build_state_signal_panels,
     build_alert_context_panels,
     companions_for,
     signal_display_label,
@@ -516,13 +516,12 @@ class DashboardChartRegistry:
             __time=pd.to_datetime(scoped["TimeStart"], errors="coerce")
         ).sort_values("__time")
 
+        # Pedidas todas las del diccionario. Antes se filtraba por existencia de columna, que
+        # no es lo mismo que tener lecturas: una columna presente y vacia producia un panel en
+        # blanco. El builder descarta las que no tienen valores y devuelve cuales fueron.
         wanted = companions_for(trigger)
-        present = [s for s in wanted if f"{s}_Value" in scoped.columns]
-        if not present:
-            raise CampbellDataError(
-                f"Ninguna señal de {trigger} tiene datos en el detalle de la alerta"
-            )
-        figure, detail = build_alert_context_panels(scoped, present, trigger, alert_id, unit_id)
+        figure, detail = build_alert_context_panels(scoped, wanted, trigger, alert_id, unit_id)
+        present = detail["signals_plotted"]
         return figure, {
             "unit_id": unit_id,
             "alert_id": alert_id,
@@ -530,7 +529,20 @@ class DashboardChartRegistry:
             "trigger_label": signal_display_label(trigger),
             "signals_plotted": present,
             "companions_missing": [s for s in wanted if s not in present],
+            # Pedidas por el diccionario pero sin una sola lectura en esta alerta. Es un hecho
+            # sobre el equipo, no un fallo: el agente puede decirlo en vez de omitirlo.
+            "signals_without_values": detail["signals_without_values"],
+            "alert_time": detail["alert_time"],
             "limits": detail["limits"],
+            # Which limits move inside the window instead of holding one value. It changes how
+            # the chart is read: a crossing against a moving threshold is not the same claim as
+            # one against a fixed number, and the agent has to be able to say which it saw.
+            "limits_vary": detail["limits_vary"],
+            # The operating state behind the line colour, and how the window splits between
+            # states. A reading taken almost entirely at idle deserves a different sentence
+            # from the same reading under load, and this is the number that decides it.
+            "state_column": detail["state_column"],
+            "state_share_pct": detail["state_share_pct"],
             "samples": int(len(scoped)),
         }
 
@@ -691,8 +703,15 @@ class DashboardChartRegistry:
             unit_id=str(params.get("unit_id") or ""),
             signals=signals,
         )
+        trigger = payload.get("trigger") or ""
         panels = [
-            {**panel, "label": signal_label(panel["signal"]) or panel["signal"]}
+            {
+                **panel,
+                "label": signal_display_label(panel["signal"]),
+                # La señal que gatillo la alerta se dibuja en su propia familia de color, para
+                # que se distinga del resto sin tener que leer el titulo del panel.
+                "highlight": panel["signal"] == trigger,
+            }
             for panel in payload["panels"]
         ]
         if not panels:
@@ -701,12 +720,13 @@ class DashboardChartRegistry:
                 f"alerta. Disponibles: {', '.join(payload['signals_available'])}"
             )
         window = payload["window"]
-        figure = build_signal_panels(
+        figure = build_state_signal_panels(
             panels,
             title=(
                 f"Señales de la alerta {payload['alert_id']} · {payload['unit_id']}"
             ),
             subtitle=f"{str(window['start'])[:16]} a {str(window['end'])[:16]}",
+            alert_time=payload.get("alert_time") or None,
         )
         return figure, {
             "alert_id": payload["alert_id"],
@@ -743,11 +763,11 @@ class DashboardChartRegistry:
             )
         )
         panels = [
-            {**panel, "label": signal_label(panel["signal"]) or panel["signal"]}
+            {**panel, "label": signal_display_label(panel["signal"])}
             for panel in payload["panels"]
         ]
         window = payload["window"]
-        figure = build_signal_panels(
+        figure = build_state_signal_panels(
             panels,
             title=f"Telemetría de {payload['unit_id']}",
             subtitle=f"{str(window['start'])[:10]} a {str(window['end'])[:10]}",
@@ -759,6 +779,10 @@ class DashboardChartRegistry:
             "signals_plotted": payload["signals_selected"],
             "signals_available": payload["signals_available"],
             "signals_unknown": payload["signals_unknown"],
+            # Señales que se grafican sin umbral porque no hay uno reproducible para ellas.
+            # El agente tiene que poder decirlo: una serie sin límite no es una serie dentro
+            # de rango.
+            "signals_without_limits": payload.get("signals_without_limits", []),
             "note": (
                 "Serie continua de telemetría cruda, independiente de cualquier "
                 "alerta específica. No hay banda de límites porque esta fuente no "

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
+import time
 import uuid
 from typing import AsyncIterator
 
@@ -9,6 +12,7 @@ from src.campbell_ai.agents_runtime import CampbellAgentRuntime
 from src.campbell_ai.concurrency import ConcurrencyGuard, ConcurrencyLimits
 from src.campbell_ai.config import CampbellSettings, get_campbell_settings
 from src.campbell_ai.data import DashboardDataRepository
+from src.campbell_ai.diagnostics import record_initialize_phases
 from src.campbell_ai.errors import CampbellConfigurationError, CampbellDataError
 from src.campbell_ai.errors import (
     CampbellAuthorizationError,
@@ -22,6 +26,7 @@ from src.campbell_ai.identity import (
     resolve_dashboard_principal,
 )
 from src.campbell_ai.jobs import Job, JobRegistry
+from src.campbell_ai import progress
 from src.campbell_ai.models import (
     ConversationListResponse,
     FeedbackResponse,
@@ -29,11 +34,15 @@ from src.campbell_ai.models import (
     InitializeResponse,
     MessageResponse,
 )
+from src.campbell_ai.resources import CACHES
 from src.campbell_ai.security import (
     UNSUPPORTED_CAPABILITY_MESSAGE,
     requests_unsupported_capability,
 )
 from src.campbell_ai.temporal import current_temporal_context
+
+
+logger = logging.getLogger("campbell_ai.service")
 
 
 class CampbellAIService:
@@ -51,6 +60,12 @@ class CampbellAIService:
         # Background answers. The job owns the work, so a caller that disconnects,
         # reloads or retries never orphans a run nor starts a duplicate one.
         self.jobs = JobRegistry(retention_seconds=self.settings.job_retention_seconds)
+        # Reported in diagnostics but deliberately *not* registered with a clear callable.
+        # Two reasons, and both matter: a finished job is live state until the browser
+        # collects it, so a reclaim must never drop one to free memory; and the registry is
+        # guarded by an `asyncio.Lock`, which the janitor thread cannot take. Its retention
+        # rule is applied on the event loop instead - see `prune_jobs` in `api.py`.
+        CACHES.register("answer_jobs", lambda: 0, self.jobs.stats)
 
     def _ensure_enabled(self) -> None:
         if not self.settings.enabled:
@@ -88,44 +103,136 @@ class CampbellAIService:
     async def initialize(
         self, username: str, company_id: str, session_id: str | None = None
     ) -> InitializeResponse:
-        self._ensure_enabled()
-        principal = resolve_dashboard_principal(username, company_id)
-        # Whether the caller is resuming a thread it already knows about, or starting a new
-        # one. The distinction decides if the archive is worth consulting at all, below.
-        # A supplied id is still validated exactly as before and rejects a malformed value.
-        if session_id:
-            resolved_session = normalize_session_id(session_id)
-            resuming = True
-        else:
-            resolved_session = normalize_session_id(f"campbell_{uuid.uuid4().hex}")
-            resuming = False
-        validation = self.repository.validate_client(principal.company_id)
-        if not validation["data_ready"]:
-            raise CampbellDataError(
-                f"No hay fuentes de datos disponibles para {principal.company_id.upper()}"
-            )
-        await self.runtime.initialize(principal, resolved_session)
-        # A session that expired, or a worker that restarted, must not take the
-        # conversation with it: if the live thread is empty and the archive holds one for
-        # this exact session, restore it before answering anything.
+        # One marker per phase, serving two readers.
         #
-        # Only when resuming. The archive is keyed by session id, so a lookup for an id
-        # this method just minted from `uuid4` cannot match anything - it was a storage
-        # round trip guaranteed to miss, paid inside the blocking call the user is waiting
-        # on. It happened on every first page load and on every new tab (the browser store
-        # is session-scoped, so it arrives empty), and on every client switch for a user
-        # with more than one client.
-        restored = await self._rehydrate(principal, resolved_session) if resuming else 0
-        return InitializeResponse(
-            session_id=resolved_session,
-            company_id=principal.company_id,
-            username=principal.username,
-            temporal_context=self.temporal_context(),
-            data_ready=True,
-            datasets=self._public_data_status(validation),
-            capabilities=self.repository.client_capabilities(principal.company_id),
-            restored_messages=restored,
-        )
+        # Afterwards: `phases` is how long each step took. "La inicializacion tarda" is not
+        # actionable; "rehydrate took 1.8s of a 2.0s call" is, because each phase has its own
+        # fix - `validate` walks dataset files, `rehydrate` is a round trip to S3.
+        #
+        # During: `progress` publishes the phase now running, which is the only way a caller
+        # blocked on this single request can say something true about the wait. Recording it
+        # is best-effort and never affects the outcome of this call.
+        #
+        # Measured on every call, not behind a debug flag: the slow case only appears in the
+        # deployment, where nobody is going to reproduce it with instrumentation turned on.
+        phases: dict[str, int] = {}
+        current_phase = ""
+        started = time.perf_counter()
+        progress_id = progress.progress_key(username, company_id)
+
+        def _phase(name: str) -> None:
+            """Close the phase that was running and announce the one starting."""
+            nonlocal started, current_phase
+            now = time.perf_counter()
+            if current_phase:
+                phases[current_phase] = int((now - started) * 1000)
+            started = now
+            current_phase = name
+            if name:
+                progress.advance(progress_id, name)
+
+        self._ensure_enabled()
+        # `resuming` is decided below from the same value; taken early only so the label a
+        # waiting caller sees is right from the first poll.
+        progress.begin(progress_id, resuming=bool(session_id))
+        try:
+            _phase("identity")
+            principal = resolve_dashboard_principal(username, company_id)
+            # Whether the caller is resuming a thread it already knows about, or starting a
+            # new one. The distinction decides if the archive is worth consulting at all,
+            # below. A supplied id is still validated exactly as before and rejects a
+            # malformed value.
+            if session_id:
+                resolved_session = normalize_session_id(session_id)
+                resuming = True
+            else:
+                resolved_session = normalize_session_id(f"campbell_{uuid.uuid4().hex}")
+                resuming = False
+
+            # In a worker thread, not inline. `validate_client` walks every dataset file for
+            # the client and counts its rows: seconds of pure blocking work on the first call
+            # for a large catalogue. Awaited inline in an async route it holds the event loop,
+            # so for that whole time the API answers nothing else - not another user's
+            # question, not the job-status poll the browser is using to collect an answer
+            # already computed, not health, not the progress poll that exists to report this
+            # very phase. One user initializing froze the process for everyone.
+            _phase("validate")
+            validation = await asyncio.to_thread(
+                self.repository.validate_client, principal.company_id
+            )
+            if not validation["data_ready"]:
+                raise CampbellDataError(
+                    f"No hay fuentes de datos disponibles para {principal.company_id.upper()}"
+                )
+
+            _phase("session")
+            await self.runtime.initialize(principal, resolved_session)
+
+            # A session that expired, or a worker that restarted, must not take the
+            # conversation with it: if the live thread is empty and the archive holds one for
+            # this exact session, restore it before answering anything.
+            #
+            # Only when resuming. The archive is keyed by session id, so a lookup for an id
+            # this method just minted from `uuid4` cannot match anything - it was a storage
+            # round trip guaranteed to miss, paid inside the blocking call the user is waiting
+            # on. It happened on every first page load and on every new tab (the browser store
+            # is session-scoped, so it arrives empty), and on every client switch for a user
+            # with more than one client. Timed as zero rather than left out when skipped: a
+            # missing key reads as "not measured", and the point is to be able to say S3 was
+            # never touched on this call.
+            _phase("rehydrate")
+            restored = (
+                await self._rehydrate(principal, resolved_session) if resuming else 0
+            )
+
+            # Off the loop for the same reason as `validate`: it re-derives coverage from the
+            # dataset probes. Cheap on a warm cache, but the cold call is the one that matters
+            # and it is file work either way.
+            _phase("capabilities")
+            capabilities = await asyncio.to_thread(
+                self.repository.client_capabilities, principal.company_id
+            )
+            _phase("")
+
+            phases["total"] = sum(phases.values())
+            record_initialize_phases(
+                principal.company_id, resuming=resuming, phases=phases
+            )
+            logger.info(
+                "initialize phases company=%s resuming=%s total=%sms %s",
+                principal.company_id,
+                resuming,
+                phases["total"],
+                " ".join(
+                    f"{phase}={value}ms"
+                    for phase, value in phases.items()
+                    if phase != "total"
+                ),
+            )
+            # The one phase whose cost is a network round trip, called out so it is greppable
+            # without reading every line. Only ever nonzero when resuming.
+            if phases.get("rehydrate", 0) >= 500:
+                logger.warning(
+                    "initialize spent %sms reading the conversation archive (S3) for %s",
+                    phases["rehydrate"],
+                    principal.company_id,
+                )
+
+            return InitializeResponse(
+                session_id=resolved_session,
+                company_id=principal.company_id,
+                username=principal.username,
+                temporal_context=self.temporal_context(),
+                data_ready=True,
+                datasets=self._public_data_status(validation),
+                capabilities=capabilities,
+                restored_messages=restored,
+                phase_ms=phases,
+            )
+        finally:
+            # Including on the error paths. A record left behind would keep telling the next
+            # poll that a call is still running in a phase it left long ago.
+            progress.finish(progress_id)
 
     async def _rehydrate(self, principal, session_id: str) -> int:
         """Restore an archived conversation into an empty session. Returns its length."""

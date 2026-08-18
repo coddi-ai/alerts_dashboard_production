@@ -23,11 +23,13 @@ import platform
 import sys
 import threading
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any, Optional
 
 from src.campbell_ai.janitor import janitor_stats
 from src.campbell_ai.log_archive import log_archive_stats
+from src.campbell_ai.progress import active_count as active_initializations
 from src.campbell_ai.logging_setup import logging_description
 from src.campbell_ai.resources import CACHES, MEGABYTE, memory_snapshot
 
@@ -42,6 +44,58 @@ PROCESS_NAME = "campbell-api"
 # of not materializing the file.
 MAX_TAIL_LINES = 2000
 _TAIL_CHUNK_BYTES = 64 * 1024
+
+
+# The last few initializations, broken down by phase. "Cambiar de cliente se demora un
+# minuto" is a complaint; this turns it into a row that says which phase spent the minute.
+# Kept here rather than only in the log because a slow initialization is reported after the
+# fact, and re-reading a rotated log to find it is worse than asking the process.
+#
+# Deliberately short: this is the recent past, not history. Company id, never the username -
+# this payload promises to carry no identities.
+_RECENT_INITIALIZATIONS: deque[dict[str, Any]] = deque(maxlen=20)
+
+
+def record_initialize_phases(
+    company_id: str, *, resuming: bool, phases: dict[str, int]
+) -> None:
+    """Remember one initialization's phase timings for the diagnostics payload."""
+    _RECENT_INITIALIZATIONS.append(
+        {
+            "at_epoch": round(time.time(), 1),
+            "company": company_id,
+            "resuming": bool(resuming),
+            "total_ms": int(phases.get("total", 0)),
+            # Copied: the caller owns its dict and this one outlives the call.
+            "phase_ms": dict(phases),
+        }
+    )
+
+
+def initialize_phases_info() -> dict[str, Any]:
+    """Recent initializations, newest first, with the slowest phase called out."""
+    recent = list(_RECENT_INITIALIZATIONS)
+    slowest_phase = None
+    if recent:
+        # Which phase dominates *across* the sample, which is the actionable question. One
+        # slow call can be a cold cache; the same phase leading every call is the bottleneck.
+        totals: dict[str, int] = {}
+        for entry in recent:
+            for phase, value in entry["phase_ms"].items():
+                if phase != "total":
+                    totals[phase] = totals.get(phase, 0) + value
+        if totals:
+            name, accumulated = max(totals.items(), key=lambda item: item[1])
+            slowest_phase = {"phase": name, "total_ms": accumulated}
+
+    return {
+        "count": len(recent),
+        # In flight right now, per this process. Nonzero while nothing progresses is a
+        # different story from zero: the first is a slow call, the second is a lost one.
+        "in_flight": active_initializations(),
+        "slowest_phase": slowest_phase,
+        "recent": list(reversed(recent)),
+    }
 
 
 def process_info() -> dict[str, Any]:
@@ -140,6 +194,7 @@ def snapshot(*, include_disk: bool = True) -> dict[str, Any]:
         "caches": CACHES.stats(),
         "cache_names": CACHES.names(),
         "janitor": janitor_stats(),
+        "initializations": initialize_phases_info(),
         "logging": logging_description(),
         "log_files": log_files_info(),
         "log_archive": log_archive_stats(),

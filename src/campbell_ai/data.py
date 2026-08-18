@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 
 from src.campbell_ai.errors import CampbellDataError
+from src.campbell_ai.signals import state_series
 from src.campbell_ai.identity import normalize_client_id
 from src.campbell_ai.resources import CACHES, FrameCache, budget_from_env
 from src.campbell_ai.temporal import DEFAULT_TIMEZONE, current_temporal_context
@@ -466,6 +467,87 @@ def shared_probe_cache() -> dict[tuple[str, int], dict[str, Any]]:
             )
             _SHARED_PROBE_CACHE = cache
         return _SHARED_PROBE_CACHE
+
+
+# Four-limit thresholds, cached by file and mtime.
+#
+# `load_stewart_limits_four` reads the whole parquet and walks it with `iterrows()` to build a
+# nested dict of every client, machine, component, essay and hour range - and the caller then
+# keeps one component out of it. Uncached, every oil radar and every oil history grid paid that
+# again: disk read plus thousands of small dict allocations, which is the allocation pattern
+# that fragments a heap most and returns least to the kernel.
+#
+# Keyed on mtime so replacing the file is picked up without a restart, exactly like the frame
+# cache. Two entries is enough for any real deployment - one file per client - and the ceiling
+# only exists so a mistake here cannot become the memory problem this package was hardened
+# against.
+_FOUR_LIMIT_CACHE: dict[tuple[str, int], dict[str, Any]] = {}
+_FOUR_LIMIT_LOCK = threading.Lock()
+_FOUR_LIMIT_MAX_ENTRIES = 4
+
+
+def clear_four_limit_cache() -> int:
+    """Forget the parsed thresholds. Returns how many files were dropped."""
+    with _FOUR_LIMIT_LOCK:
+        dropped = len(_FOUR_LIMIT_CACHE)
+        _FOUR_LIMIT_CACHE.clear()
+    return dropped
+
+
+def four_limit_cache_stats() -> dict[str, Any]:
+    with _FOUR_LIMIT_LOCK:
+        return {"files": len(_FOUR_LIMIT_CACHE), "max_files": _FOUR_LIMIT_MAX_ENTRIES}
+
+
+def _load_four_limits(path: Path) -> dict[str, Any]:
+    """Parsed four-limit thresholds for one file, read at most once per version."""
+    try:
+        key = (str(path), path.stat().st_mtime_ns)
+    except OSError:
+        return {}
+    with _FOUR_LIMIT_LOCK:
+        cached = _FOUR_LIMIT_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    from src.data.loaders import load_stewart_limits_four
+
+    limits = load_stewart_limits_four(path)
+    if not limits:
+        # Not cached: an empty result is usually a file that is not there yet, and memoizing it
+        # would keep answering "no limits" after it arrives.
+        return {}
+    with _FOUR_LIMIT_LOCK:
+        if len(_FOUR_LIMIT_CACHE) >= _FOUR_LIMIT_MAX_ENTRIES:
+            _FOUR_LIMIT_CACHE.pop(next(iter(_FOUR_LIMIT_CACHE)), None)
+        _FOUR_LIMIT_CACHE[key] = limits
+    return limits
+
+
+CACHES.register("oil_four_limits", clear_four_limit_cache, four_limit_cache_stats)
+
+
+# Thresholds derived from the alert evidence for the continuous telemetry source. Built once
+# per client because building it walks the whole evidence table, and read on every continuous
+# series chart.
+_TELEMETRY_LIMIT_CACHE: dict[str, dict[str, Any]] = {}
+_TELEMETRY_LIMIT_LOCK = threading.Lock()
+_TELEMETRY_LIMIT_MAX_CLIENTS = 4
+
+
+def clear_telemetry_limit_cache() -> int:
+    """Forget the derived thresholds. Returns how many clients were dropped."""
+    with _TELEMETRY_LIMIT_LOCK:
+        dropped = len(_TELEMETRY_LIMIT_CACHE)
+        _TELEMETRY_LIMIT_CACHE.clear()
+    return dropped
+
+
+CACHES.register(
+    "telemetry_signal_limits",
+    clear_telemetry_limit_cache,
+    lambda: {"clients": len(_TELEMETRY_LIMIT_CACHE)},
+)
 
 
 class DashboardDataRepository:
@@ -1010,9 +1092,7 @@ class DashboardDataRepository:
         if not path.exists():
             return {}
 
-        from src.data.loaders import load_stewart_limits_four
-
-        limits = load_stewart_limits_four(path)
+        limits = _load_four_limits(path)
         if not limits:
             return {}
         # The client key in this parquet is upper-case, unlike every other path in this
@@ -2015,6 +2095,10 @@ class DashboardDataRepository:
             ][:1] or with_values[:1]
         selected = list(dict.fromkeys(selected))[: max(1, min(int(max_signals), 6))]
 
+        # Operating state per sample, so a chart can colour the line by it instead of asking
+        # the reader to hold the load context in their head.
+        states = state_series(frame)
+
         panels: list[dict[str, Any]] = []
         for signal in selected:
             values = pd.to_numeric(frame[f"{signal}_Value"], errors="coerce")
@@ -2029,7 +2113,10 @@ class DashboardDataRepository:
                 series = pd.to_numeric(frame.loc[mask, column], errors="coerce")
                 if series.notna().sum() == 0:
                     return None
-                # Limits are constant within an alert but can arrive sparse.
+                # Returned as a series, one value per sample, because a limit is not always a
+                # constant: `EngOilPres_Lower_Limit` is a function of engine speed and moves on
+                # every alert that carries it. Gaps are filled from the neighbouring samples,
+                # which arrive sparse, but the variation itself is preserved.
                 return [float(value) for value in series.ffill().bfill()]
 
             panels.append(
@@ -2037,12 +2124,26 @@ class DashboardDataRepository:
                     "signal": signal,
                     "times": [stamp.isoformat() for stamp in frame.loc[mask, time_col]],
                     "values": [float(value) for value in values[mask]],
+                    # Operating state per sample. The reading alone does not say whether the
+                    # machine was working: the same temperature means different things under
+                    # load and at idle, and the evidence records which it was.
+                    "states": [str(state) for state in states[mask]],
                     "upper": limit("_Upper_Limit"),
                     "lower": limit("_Lower_Limit"),
                 }
             )
 
+        # The instant the alert fired, so a chart can mark it. The sampling window extends
+        # past it, and without the mark the reader cannot tell what led to the alert from
+        # what merely followed it.
+        alert_time = ""
+        if "Alert_TimeStart" in frame.columns:
+            stamps = pd.to_datetime(frame["Alert_TimeStart"], errors="coerce").dropna()
+            if not stamps.empty:
+                alert_time = stamps.iloc[0].isoformat()
+
         return {
+            "alert_time": alert_time,
             "alert_id": self._scalar(frame[alert_col].iloc[0]) if alert_col else None,
             "unit_id": (
                 self._scalar(frame[unit_col].dropna().iloc[0])
@@ -2148,7 +2249,80 @@ class DashboardDataRepository:
         if not date_col:
             return pd.DataFrame()
         combined[date_col] = pd.to_datetime(combined[date_col], errors="coerce")
+        # Dropped to naive local time before comparing. capstone's weekly files store `Fecha`
+        # as `datetime64[us, UTC]` while CDA's are naive, and comparing a tz-aware column
+        # against a naive bound raises TypeError - which made this whole chart unavailable for
+        # capstone rather than merely off by an offset. Converted rather than localized on the
+        # other side because every other date in this package is naive local time, and one
+        # tz-aware column reaching a caller would move the inconsistency instead of removing it.
+        if isinstance(combined[date_col].dtype, pd.DatetimeTZDtype):
+            combined[date_col] = combined[date_col].dt.tz_convert(None)
         return combined[(combined[date_col] >= start) & (combined[date_col] <= end)]
+
+    # Limits for the *continuous* telemetry source, which publishes none of its own.
+    #
+    # A raw series without its threshold is hard to read: 80 degrees is either normal or an
+    # alarm depending on a number the chart does not show. The thresholds do exist in the
+    # repository, in the alert evidence, as `<signal>_Upper_Limit` columns - and they are not
+    # per-alert values but a published configuration: across all of CDA's evidence, every one
+    # of them takes exactly one value per (unit, machine sub-state, signal).
+    #
+    # That makes the join exact rather than approximate, and the key lines up on both sides:
+    # the evidence calls the sub-state `SubState` and the raw source calls it `EstadoMaquina`,
+    # and the two vocabularies are identical - the same six values, with nothing on either side
+    # the other lacks.
+    #
+    # One signal is deliberately excluded. `EngOilPres_Lower_Limit` is a function of engine
+    # speed and takes thousands of distinct values even within a single sub-state; there is no
+    # table that reproduces it, so it is reported as unavailable instead of approximated.
+    _LIMIT_AMBIGUITY_CEILING = 1
+
+    def telemetry_signal_limits(self, client: str) -> dict[str, Any]:
+        """Per-unit, per-sub-state thresholds for the continuous telemetry signals.
+
+        Shape: ``{signal: {"upper"|"lower": {(unit, substate): value}}}``. A signal whose
+        threshold is not a function of that key is left out entirely rather than averaged.
+        """
+        normalized = normalize_client_id(client)
+        cached = _TELEMETRY_LIMIT_CACHE.get(normalized)
+        if cached is not None:
+            return cached
+
+        try:
+            evidence = self.load("alerts_detail", normalized)
+        except CampbellDataError:
+            return {}
+
+        unit_col = self._resolve_column(evidence, ("Unit", "UnitId", "unit_id"))
+        state_col = self._resolve_column(evidence, ("SubState", "State"))
+        if not unit_col or not state_col:
+            return {}
+
+        table: dict[str, Any] = {}
+        for column in evidence.columns:
+            name = str(column)
+            for side, suffix in (("upper", "_Upper_Limit"), ("lower", "_Lower_Limit")):
+                if not name.endswith(suffix):
+                    continue
+                signal = name[: -len(suffix)]
+                frame = evidence[[unit_col, state_col, name]].dropna(subset=[name])
+                if frame.empty:
+                    continue
+                grouped = frame.groupby([unit_col, state_col])[name]
+                if grouped.nunique().max() > self._LIMIT_AMBIGUITY_CEILING:
+                    # Not a function of (unit, sub-state): reporting one value would be a
+                    # guess drawn as a fact.
+                    continue
+                table.setdefault(signal, {})[side] = {
+                    (str(unit), str(state)): float(value)
+                    for (unit, state), value in grouped.first().items()
+                }
+
+        with _TELEMETRY_LIMIT_LOCK:
+            if len(_TELEMETRY_LIMIT_CACHE) >= _TELEMETRY_LIMIT_MAX_CLIENTS:
+                _TELEMETRY_LIMIT_CACHE.pop(next(iter(_TELEMETRY_LIMIT_CACHE)), None)
+            _TELEMETRY_LIMIT_CACHE[normalized] = table
+        return table
 
     def query_telemetry_series(
         self,
@@ -2221,19 +2395,54 @@ class DashboardDataRepository:
             selected = catalogued[:1]
         selected = list(dict.fromkeys(selected))[: max(1, min(int(max_signals), 6))]
 
+        # Operating state per sample, so a chart can colour the line by it. This source is the
+        # weekly `Telemetry_Wide_With_States` directory, which carries it; which column holds it
+        # differs by client, so the resolution is delegated rather than hardcoded here.
+        states = state_series(frame)
+
+        # Thresholds for this source, keyed by (unit, sub-state). The sub-state column is the
+        # join key and is named differently here than in the evidence the table comes from;
+        # when it is missing the lookup simply finds nothing and the panels carry no limits.
+        limit_table = self.telemetry_signal_limits(client)
+        substate_col = self._resolve_column(frame, ("EstadoMaquina", "SubState"))
+        substates = (
+            frame[substate_col].astype("string").fillna("ND")
+            if substate_col
+            else pd.Series(["ND"] * len(frame), index=frame.index)
+        )
+        units = frame[unit_col].astype("string")
+
+        def limits_for(signal: str, side: str, mask: pd.Series) -> list[float] | None:
+            lookup = (limit_table.get(signal) or {}).get(side)
+            if not lookup:
+                return None
+            series = [
+                lookup.get((unit, state))
+                for unit, state in zip(units[mask], substates[mask])
+            ]
+            # All-or-nothing per panel: a threshold drawn for part of the window and absent for
+            # the rest reads as the limit having changed, which is a different claim.
+            return series if all(value is not None for value in series) else None
+
         panels: list[dict[str, Any]] = []
+        without_limits: list[str] = []
         for signal in selected:
             values = pd.to_numeric(frame[signal], errors="coerce")
             mask = values.notna()
             if not mask.any():
                 continue
+            upper = limits_for(signal, "upper", mask)
+            lower = limits_for(signal, "lower", mask)
+            if upper is None and lower is None:
+                without_limits.append(signal)
             panels.append(
                 {
                     "signal": signal,
                     "times": [stamp.isoformat() for stamp in frame.loc[mask, date_col]],
                     "values": [float(value) for value in values[mask]],
-                    "upper": None,
-                    "lower": None,
+                    "states": [str(state) for state in states[mask]],
+                    "upper": upper,
+                    "lower": lower,
                 }
             )
         if not panels:
@@ -2259,13 +2468,17 @@ class DashboardDataRepository:
                 ],
                 "signals_unknown": unknown,
                 "panels": panels,
+                "signals_without_limits": without_limits,
                 "note": (
                     "Serie continua de telemetria cruda para el periodo solicitado, "
                     "independiente de cualquier alerta especifica: sirve para pedir "
                     "senales adicionales a la que disparo una alerta. Usa las listas "
-                    "*_labels para nombrar cada senal en espanol. Esta fuente no "
-                    "publica limites (upper/lower); para el limite vigente durante "
-                    "una alerta usa alert_signal_series."
+                    "*_labels para nombrar cada senal en espanol. Los limites no vienen "
+                    "en esta fuente: se derivan de la configuracion publicada en el "
+                    "detalle de alertas, que fija un valor por unidad y estado de "
+                    "maquina. Las senales en signals_without_limits no tienen un limite "
+                    "reproducible - la presion de aceite del motor depende del regimen y "
+                    "no se puede tabular - y se grafican sin umbral."
                 ),
             },
             ensure_ascii=False,

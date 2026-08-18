@@ -465,23 +465,61 @@ def test_probe_and_reclaim_take_the_same_lock(dataset_root, monkeypatch):
     assert entered, "the janitor's clear() must hold the same lock the probe path holds"
 
 
-def test_the_service_singleton_is_never_reclaimable():
-    """`get_service` owns the session store and the job registry.
+def test_a_reclaim_never_discards_an_answer_the_browser_can_still_collect():
+    """The service's live state must survive a reclaim, whatever is registered.
 
-    Registering it would make a memory reclaim discard live conversations and answers in
-    flight. This asserts the hazard stays absent rather than trusting a comment.
+    This used to forbid any cache whose *name* mentioned the service, the session store or
+    jobs. That guarded the right hazard by the wrong means: the job registry does need to be
+    reachable from a reclaim - otherwise its retention rule only runs when a request happens
+    to arrive, and a burst of questions followed by silence leaves every rendered answer
+    resident with nothing able to release it.
+
+    So the invariant is stated directly instead, in two halves.
+
+    A reclaim must not drop a job at all: its answer may be computed and uncollected, and
+    discarding it to free memory is exactly the "Consulta perdida" the retention window
+    exists to prevent. And the retention rule must still be reachable without traffic -
+    otherwise a burst of questions followed by silence leaves every answer resident - which
+    is what `evict_expired` is for. It is a coroutine because the registry is guarded by an
+    `asyncio.Lock` the janitor thread cannot take, so its caller lives on the event loop.
     """
+    import asyncio
     import os as _os
 
     _os.environ.setdefault("CAMPBELL_AI_PERSISTENCE", "false")
     from src.campbell_ai.api import get_service
     from src.campbell_ai.resources import CACHES
 
-    get_service()
-    for name in CACHES.names():
-        assert "service" not in name, f"{name} must not be reclaimable"
-        assert "session" not in name, f"{name} must not be reclaimable"
-        assert "job" not in name, f"{name} must not be reclaimable"
+    service = get_service()
+    names = CACHES.names()
+    # The session store still must not be reclaimable: unlike a job, a live conversation has
+    # no retention window protecting it and no way to be rebuilt.
+    assert not any("session" in name for name in names), names
+
+    # Built directly rather than through `submit`, which needs a coroutine to run: what is
+    # under test is the eviction rule, not how a job gets created.
+    from src.campbell_ai.jobs import Job
+
+    fresh = Job(job_id="job_fresh", dedup_key="d1")
+    fresh.status = "done"
+    fresh.finished_at = time.monotonic()
+    stale = Job(job_id="job_stale", dedup_key="d2")
+    stale.status = "done"
+    stale.finished_at = time.monotonic() - service.jobs.retention_seconds - 1
+    service.jobs._jobs[fresh.job_id] = fresh
+    service.jobs._jobs[stale.job_id] = stale
+
+    # Half one: a full reclaim leaves both alone. Freeing memory is never a reason to throw
+    # away an answer somebody is waiting to read.
+    CACHES.clear_all()
+    assert {"job_fresh", "job_stale"} <= set(service.jobs._jobs), "un reclaim borro jobs"
+
+    # Half two: the retention rule, applied on the loop, drops only what has expired.
+    dropped = asyncio.run(service.jobs.evict_expired())
+    remaining = set(service.jobs._jobs)
+    assert dropped == 1
+    assert "job_fresh" in remaining, "la retencion descarto una respuesta aun cobrable"
+    assert "job_stale" not in remaining, "la retencion no vencio un job antiguo"
 
 
 def test_prompt_cache_is_registered_and_still_has_its_own_clear():
@@ -570,6 +608,44 @@ def test_janitor_reclaims_once_per_idle_stretch(monkeypatch):
     time.sleep(1.05)
     assert janitor.tick() is not None
     assert janitor.stats()["reclaims_idle"] == 2
+
+
+def test_health_polling_neither_counts_as_activity_nor_reaches_the_log(monkeypatch):
+    """The compose healthcheck used to disable two features at once, silently.
+
+    It polls `/health` every 10 seconds. Two things read that traffic and drew the wrong
+    conclusion from it:
+
+    - the activity marker, so `_last_activity` never got older than ten seconds and the
+      600-second idle reclaim above could not fire once in the life of the process;
+    - the log file, whose own `st_mtime` is `seal_active_log`'s proof that the file has gone
+      quiet - so the newest log was never sealed, never archived, and never readable without
+      a console, which was the entire point of the archiver.
+
+    Both now ignore monitoring traffic. Asserted together because they are one defect with
+    one cause, and fixing either alone leaves the other broken.
+    """
+    from src.campbell_ai.api import MONITORING_PATHS
+    from src.campbell_ai.logging_setup import _DropMonitoringAccess
+
+    # The middleware's own predicate, applied to the paths that reach it.
+    assert "/api/v1/campbell-ai/health".startswith(MONITORING_PATHS)
+    assert "/api/v1/campbell-ai/diagnostics/tail".startswith(MONITORING_PATHS)
+    assert not "/api/v1/campbell-ai/message".startswith(MONITORING_PATHS)
+
+    drop = _DropMonitoringAccess()
+
+    def access(text: str) -> logging.LogRecord:
+        return logging.LogRecord("uvicorn.access", logging.INFO, __file__, 1, text, (), None)
+
+    assert not drop.filter(access('127.0.0.1 - "GET /api/v1/campbell-ai/health HTTP/1.1" 200'))
+    assert drop.filter(access('10.0.0.4 - "POST /api/v1/campbell-ai/message HTTP/1.1" 200'))
+    # Only the access logger is filtered; the package's own lines are never dropped, whatever
+    # they happen to mention.
+    application = logging.LogRecord(
+        "campbell_ai.service", logging.INFO, __file__, 1, "health check failed", (), None
+    )
+    assert drop.filter(application)
 
 
 def test_janitor_idle_disabled_by_zero(monkeypatch):
