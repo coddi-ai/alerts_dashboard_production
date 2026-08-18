@@ -177,13 +177,6 @@ def create_login_page() -> dbc.Container:
                                 color="primary",
                                 spinner_style={"display": "none"},
                                 spinnerClassName="mt-3 text-center"
-                            ),
-
-                            # Version footnote
-                            html.P(
-                                f"v{APP_VERSION}",
-                                className="text-center text-muted mt-4 mb-0",
-                                style={"fontSize": "0.75rem"}
                             )
                         ], style={"padding": "32px"})
                     ], style={"padding": "0"})
@@ -193,7 +186,19 @@ def create_login_page() -> dbc.Container:
                     "overflow": "hidden"
                 })
             ], width=12, lg=5, xl=4, className='mx-auto')
-        ], className="align-items-center min-vh-100")
+        ], className="align-items-center min-vh-100"),
+
+        # Version footnote, bottom-left of the screen
+        html.Div(
+            f"v{APP_VERSION}",
+            style={
+                "position": "fixed",
+                "bottom": "12px",
+                "left": "16px",
+                "color": "rgba(255, 255, 255, 0.5)",
+                "fontSize": "0.75rem"
+            }
+        )
     ], fluid=True, style={
         "background": "#00173b",
         "minHeight": "100vh"
@@ -527,7 +532,7 @@ def create_main_dashboard(user_data: dict) -> html.Div:
             "backgroundColor": "rgba(0,0,0,0.2)",
             "borderBottom": "2px solid rgba(255,255,255,0.1)"
         }),
-        
+
         # Menu items container - re-rendered by dashboard/callbacks/sidebar_callbacks.py
         # whenever client-selector changes, so it always reflects the
         # currently selected client's enabled services.
@@ -537,7 +542,7 @@ def create_main_dashboard(user_data: dict) -> html.Div:
             className="p-3 sidebar-menu",
             style={"overflowY": "auto", "height": "calc(100vh - 142px)"}
         )
-    ], style={
+    ], id='app-sidebar', style={
         "width": "260px",
         "backgroundColor": "#2c3e50",
         "height": "100vh",
@@ -547,12 +552,26 @@ def create_main_dashboard(user_data: dict) -> html.Div:
         "boxShadow": "2px 0 8px rgba(0,0,0,0.1)",
         "zIndex": 999
     })
-    
+
+    # Floating toggle button - lives outside the sidebar so it stays
+    # reachable (to re-expand) even while the sidebar is collapsed. Its
+    # position and icon direction are driven purely by CSS off the
+    # 'sidebar-collapsed' class on #dashboard-shell (see
+    # dashboard/assets/custom_layout.css), toggled by the clientside
+    # callback in dashboard/callbacks/sidebar_callbacks.py.
+    sidebar_toggle_button = html.Button(
+        html.I(id='sidebar-toggle-icon', className="fas fa-chevron-left"),
+        id='sidebar-toggle-btn',
+        title='Ocultar/mostrar menú de navegación',
+        n_clicks=0,
+        className='sidebar-toggle-btn'
+    )
+
     # Content area with proper spacing from header and sidebar
     content_area = html.Div([
         # Routed page content
         dash.page_container
-    ], style={
+    ], id='app-content-wrapper', style={
         "marginLeft": "260px",
         "marginTop": "80px",
         "padding": "28px",
@@ -563,8 +582,9 @@ def create_main_dashboard(user_data: dict) -> html.Div:
     return html.Div([
         create_navbar(user_data, available_clients),
         left_menu,
+        sidebar_toggle_button,
         content_area
-    ])
+    ], id='dashboard-shell')
 
 
 def create_app_layout() -> html.Div:
@@ -589,6 +609,10 @@ def create_app_layout() -> html.Div:
         
         # Store for alerts internal navigation
         dcc.Store(id='alerts-navigation-state', storage_type='memory', data=None),
+
+        # Sidebar collapsed/expanded preference - persisted across page
+        # navigation and browser sessions (see dashboard/callbacks/sidebar_callbacks.py).
+        dcc.Store(id='sidebar-collapsed-store', storage_type='local', data=False),
 
         # Page content (initialized with login page, will be replaced by callback)
         html.Div(id='page-content', children=create_login_page())

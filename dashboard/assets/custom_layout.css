@@ -200,3 +200,65 @@
 .alerts-detail-selector-dropdown .Select-menu-outer {
     z-index: 10 !important;
 }
+
+/* ========================================
+   COLLAPSIBLE SIDEBAR
+   ======================================== */
+
+/* Smooth width/margin animation whenever the collapsed state flips */
+#app-sidebar,
+#app-content-wrapper {
+    transition: width 0.25s ease, margin-left 0.25s ease;
+}
+
+/* Collapsed state: sidebar shrinks to nothing and content reclaims the space */
+#dashboard-shell.sidebar-collapsed #app-sidebar {
+    width: 0 !important;
+    min-width: 0;
+    overflow: hidden;
+    box-shadow: none !important;
+}
+
+#dashboard-shell.sidebar-collapsed #app-content-wrapper {
+    margin-left: 0 !important;
+}
+
+/* Floating toggle button - sits on the sidebar's right edge and slides to
+   the far left (staying reachable) once the sidebar is hidden. */
+.sidebar-toggle-btn {
+    position: fixed;
+    top: 96px;
+    left: 246px;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background-color: #3498db;
+    color: #fff;
+    border: 2px solid #f8f9fa;
+    border-radius: 50%;
+    font-size: 0.75rem;
+    cursor: pointer;
+    z-index: 1001;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
+    transition: left 0.25s ease, background-color 0.2s ease;
+}
+
+.sidebar-toggle-btn:hover {
+    background-color: #2980b9;
+}
+
+.sidebar-toggle-btn:focus {
+    outline: none;
+    box-shadow: 0 0 0 3px rgba(52, 152, 219, 0.4);
+}
+
+#dashboard-shell.sidebar-collapsed .sidebar-toggle-btn {
+    left: 6px;
+}
+
+#dashboard-shell.sidebar-collapsed .sidebar-toggle-btn #sidebar-toggle-icon {
+    transform: rotate(180deg);
+}

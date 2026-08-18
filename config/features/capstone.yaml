@@ -1,0 +1,101 @@
+# Capstone client configuration — see design.md §3.7 (and §3.7.1 for the divergence record
+# from project_definition.md's original §11 table, approved 2026-08-14).
+
+client: capstone
+
+paths:
+  telemetry_silver_root: data/telemetry/silver/capstone/Telemetry_Wide_With_States
+  alerts_output_root: data/alerts
+
+gate:
+  column: EstadoMaquina
+  value: Potencia
+
+zone_limits:
+  granularity: global          # pooled across all units — not per-unit; not overridable
+  marginal_sigma: 2.0
+  condenatorio_sigma: 2.3
+
+rule:
+  window_minutes: 60
+  score_threshold: 45
+  points:
+    marginal: 1
+    condenatorio: 10
+  cooldown_hours: 12
+  cooldown_scope: [unit, functional_group]
+
+system: stewart
+rule_variant: rolling_window_v1
+
+# 37 monitored features across 13 functional groups.
+features:
+  - {name: rpm,                    source_column: engine_speed_rpm,            direction: alta, functional_group: engine_core}
+
+  - {name: coolant_temp,           source_column: coolant_temp_c,              direction: alta, functional_group: coolant}
+  - {name: coolant_pressure,       source_column: coolant_pressure_psi,        direction: baja, functional_group: coolant}
+
+  - {name: ecu_temp,               source_column: ecu_temp_c,                  direction: alta, functional_group: ecu_temperature}
+
+  - {name: oil_temp,               source_column: oil_temp_c,                  direction: alta, functional_group: oil_temperature}
+
+  - {name: imt_lbf,                source_column: imt_lbf_c,                   direction: alta, functional_group: intake_temperature}
+  - {name: imt_lbr,                source_column: imt_lbr_c,                   direction: alta, functional_group: intake_temperature}
+  - {name: imt_rbf,                source_column: imt_rbf_c,                   direction: alta, functional_group: intake_temperature}
+  - {name: imt_rbr,                source_column: imt_rbr_c,                   direction: alta, functional_group: intake_temperature}
+
+  - {name: egt_01,                 source_column: egt_01_c,                    direction: alta, functional_group: egt}
+  - {name: egt_02,                 source_column: egt_02_c,                    direction: alta, functional_group: egt}
+  - {name: egt_03,                 source_column: egt_03_c,                    direction: alta, functional_group: egt}
+  - {name: egt_04,                 source_column: egt_04_c,                    direction: alta, functional_group: egt}
+  - {name: egt_05,                 source_column: egt_05_c,                    direction: alta, functional_group: egt}
+  - {name: egt_06,                 source_column: egt_06_c,                    direction: alta, functional_group: egt}
+  - {name: egt_07,                 source_column: egt_07_c,                    direction: alta, functional_group: egt}
+  - {name: egt_08,                 source_column: egt_08_c,                    direction: alta, functional_group: egt}
+  - {name: egt_09,                 source_column: egt_09_c,                    direction: alta, functional_group: egt}
+  - {name: egt_10,                 source_column: egt_10_c,                    direction: alta, functional_group: egt}
+  - {name: egt_11,                 source_column: egt_11_c,                    direction: alta, functional_group: egt}
+  - {name: egt_12,                 source_column: egt_12_c,                    direction: alta, functional_group: egt}
+  - {name: egt_13,                 source_column: egt_13_c,                    direction: alta, functional_group: egt}
+  - {name: egt_14,                 source_column: egt_14_c,                    direction: alta, functional_group: egt}
+  - {name: egt_15,                 source_column: egt_15_c,                    direction: alta, functional_group: egt}
+  - {name: egt_16,                 source_column: egt_16_c,                    direction: alta, functional_group: egt}
+  - {name: egt_bank_diff,          derived: "abs(egt_lb_c - egt_rb_c)",        direction: alta, functional_group: egt}
+
+  - {name: pre_filter_oil_pressure, source_column: pre_filter_oil_pressure_psi, direction: baja, functional_group: oil_pressure}
+  - {name: oil_diff_pressure,       source_column: oil_diff_pressure_psi,       direction: alta, functional_group: oil_pressure}
+  - {name: oil_filter_dp,           source_column: oil_filter_dp_psi,           direction: alta, functional_group: oil_pressure}
+  - {name: oil_filter_dp_ext,       source_column: oil_filter_dp_mcrs_psi,      direction: alta, functional_group: oil_pressure}
+
+  - {name: rifle_oil_pressure,     source_column: rifle_oil_pressure_psi,      direction: baja, functional_group: post_filter_oil_pressure}
+  - {name: post_engine_pressure,   source_column: post_engine_pressure_psi,    direction: baja, functional_group: post_filter_oil_pressure}
+
+  - {name: imp_bank_diff,          derived: "abs(imp_lb_psi - imp_rb_psi)",    direction: alta, functional_group: intake_manifold_pressure}
+
+  - {name: crankcase_pressure,     source_column: crankcase_pressure_inh2o,    direction: alta, functional_group: crankcase_pressure}
+
+  - {name: compressor_intake_temp, source_column: compressor_intake_temp_c,    direction: alta, functional_group: turbocharger_temperature}
+
+  - {name: turbo_speed,            source_column: turbo_speed_rpm,             direction: alta, functional_group: turbocharger_speed}
+
+  - {name: fan_speed,              source_column: fan_speed_rpm,               direction: alta, functional_group: fan}
+
+# 16 diagnostic-only features — computed for the dashboard's extra-features menu, never
+# classified into zones, never scored, never alert (REQ-006).
+diagnostic_features:
+  - {name: egt_cyl_dev_01, derived: "egt_01_c - egt_avg_c", functional_group: egt}
+  - {name: egt_cyl_dev_02, derived: "egt_02_c - egt_avg_c", functional_group: egt}
+  - {name: egt_cyl_dev_03, derived: "egt_03_c - egt_avg_c", functional_group: egt}
+  - {name: egt_cyl_dev_04, derived: "egt_04_c - egt_avg_c", functional_group: egt}
+  - {name: egt_cyl_dev_05, derived: "egt_05_c - egt_avg_c", functional_group: egt}
+  - {name: egt_cyl_dev_06, derived: "egt_06_c - egt_avg_c", functional_group: egt}
+  - {name: egt_cyl_dev_07, derived: "egt_07_c - egt_avg_c", functional_group: egt}
+  - {name: egt_cyl_dev_08, derived: "egt_08_c - egt_avg_c", functional_group: egt}
+  - {name: egt_cyl_dev_09, derived: "egt_09_c - egt_avg_c", functional_group: egt}
+  - {name: egt_cyl_dev_10, derived: "egt_10_c - egt_avg_c", functional_group: egt}
+  - {name: egt_cyl_dev_11, derived: "egt_11_c - egt_avg_c", functional_group: egt}
+  - {name: egt_cyl_dev_12, derived: "egt_12_c - egt_avg_c", functional_group: egt}
+  - {name: egt_cyl_dev_13, derived: "egt_13_c - egt_avg_c", functional_group: egt}
+  - {name: egt_cyl_dev_14, derived: "egt_14_c - egt_avg_c", functional_group: egt}
+  - {name: egt_cyl_dev_15, derived: "egt_15_c - egt_avg_c", functional_group: egt}
+  - {name: egt_cyl_dev_16, derived: "egt_16_c - egt_avg_c", functional_group: egt}

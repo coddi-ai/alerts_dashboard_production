@@ -5,6 +5,14 @@ from dash import html, dcc
 import dash_bootstrap_components as dbc
 
 
+# Fixed heights for the three weekly-analysis cards (Distribución por unidad /
+# Evolución temporal / Distribución por sistema) so the row's height stays
+# constant regardless of fleet size; large unit counts scroll horizontally
+# inside the card instead of growing it vertically.
+ALERTS_CHART_CARD_HEIGHT = 500
+ALERTS_CHART_CARD_BODY_HEIGHT = 420
+
+
 def _default_alert_dates() -> tuple[str, str]:
     today = date.today()
     return (today - timedelta(days=27)).isoformat(), today.isoformat()
@@ -69,20 +77,32 @@ def create_layout() -> html.Div:
             dbc.Col([
                 dbc.Card([
                     dbc.CardHeader(html.H5([html.I(className="fas fa-truck me-2"), "Distribución por unidad"], className="mb-0"), className="bg-light"),
-                    dbc.CardBody(dcc.Loading(dcc.Graph(id="alerts-unit-distribution-chart", config={"displayModeBar": False}), type="circle")),
-                ], className="shadow-sm mb-4 h-100"),
+                    dbc.CardBody(
+                        dcc.Loading(
+                            dcc.Graph(id="alerts-unit-distribution-chart", config={"displayModeBar": False}),
+                            type="circle",
+                        ),
+                        style={"height": f"{ALERTS_CHART_CARD_BODY_HEIGHT}px", "overflow": "hidden"},
+                    ),
+                ], className="shadow-sm mb-4", style={"height": f"{ALERTS_CHART_CARD_HEIGHT}px"}),
             ], lg=4),
             dbc.Col([
                 dbc.Card([
                     dbc.CardHeader(html.H5([html.I(className="fas fa-calendar-week me-2"), "Evolución temporal"], className="mb-0"), className="bg-light"),
-                    dbc.CardBody(dcc.Loading(dcc.Graph(id="alerts-month-distribution-chart", config={"displayModeBar": False}), type="circle")),
-                ], className="shadow-sm mb-4 h-100"),
+                    dbc.CardBody(
+                        dcc.Loading(dcc.Graph(id="alerts-month-distribution-chart", config={"displayModeBar": False}), type="circle"),
+                        style={"height": f"{ALERTS_CHART_CARD_BODY_HEIGHT}px", "overflow": "hidden"},
+                    ),
+                ], className="shadow-sm mb-4", style={"height": f"{ALERTS_CHART_CARD_HEIGHT}px"}),
             ], lg=4),
             dbc.Col([
                 dbc.Card([
-                    dbc.CardHeader(html.H5([html.I(className="fas fa-cogs me-2"), "Distribución por sistema"], className="mb-0"), className="bg-light"),
-                    dbc.CardBody(dcc.Loading(dcc.Graph(id="alerts-system-distribution-chart", config={"displayModeBar": False}), type="circle")),
-                ], className="shadow-sm mb-4 h-100"),
+                    dbc.CardHeader(html.H5([html.I(className="fas fa-sitemap me-2"), "Distribución por sistema"], className="mb-0"), className="bg-light"),
+                    dbc.CardBody(
+                        dcc.Loading(dcc.Graph(id="alerts-system-distribution-chart", config={"displayModeBar": False}), type="circle"),
+                        style={"height": f"{ALERTS_CHART_CARD_BODY_HEIGHT}px", "overflow": "hidden"},
+                    ),
+                ], className="shadow-sm mb-4", style={"height": f"{ALERTS_CHART_CARD_HEIGHT}px"}),
             ], lg=4),
         ], className="g-3"),
         html.H4([html.I(className="fas fa-database me-2"), "Listado de alertas"], className="text-primary mb-3 mt-4"),

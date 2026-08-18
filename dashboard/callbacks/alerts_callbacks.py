@@ -29,7 +29,7 @@ from dashboard.components.alerts_charts import (
     create_alerts_per_unit_chart,
     create_alerts_per_month_chart,
     create_alerts_per_week_chart,
-    create_system_distribution_pie_chart,
+    create_system_signal_treemap,
     create_oil_radar_chart,
     create_sensor_trends_chart_golden,
     create_gps_route_map_golden,
@@ -221,7 +221,7 @@ def update_general_tab(client: str, start_date: str, end_date: str, active_filte
         # Create charts (using filtered data for visualization) - removed trigger_chart
         unit_chart = create_alerts_per_unit_chart(filtered_df)
         month_chart = create_alerts_per_week_chart(filtered_df)
-        system_chart = create_system_distribution_pie_chart(filtered_df)
+        system_chart = create_system_signal_treemap(filtered_df, client=client)
 
         # Calculate summary statistics
         summary = alert_summary(filtered_df)
@@ -273,8 +273,10 @@ def update_active_filters(unit_click, week_click, system_click, _chip_clicks, _c
         return current
 
     if trigger == 'alerts-unit-distribution-chart':
+        # Units sit on the X-axis of the Pareto chart (both the count bars and
+        # the cumulative-percentage line share the same category axis).
         points = (unit_click or {}).get('points') or []
-        value = points[0].get('y') if points else None
+        value = points[0].get('x') if points else None
         key = 'unit'
     elif trigger == 'alerts-month-distribution-chart':
         points = (week_click or {}).get('points') or []
@@ -282,8 +284,11 @@ def update_active_filters(unit_click, week_click, system_click, _chip_clicks, _c
         value = customdata[0] if customdata else None
         key = 'week'
     elif trigger == 'alerts-system-distribution-chart':
+        # The treemap's every node (system tile and señal/variable leaf
+        # alike) carries its owning system in customdata, so clicking
+        # anywhere in a system's branch filters by that system.
         points = (system_click or {}).get('points') or []
-        value = points[0].get('label') if points else None
+        value = points[0].get('customdata') if points else None
         key = 'system'
     else:
         raise PreventUpdate

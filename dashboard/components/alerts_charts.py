@@ -14,9 +14,16 @@ Chart components for Alerts Dashboard.
 Functions to create Plotly figures for alerts analytics.
 """
 
+import ast
+import math
+import re
+from functools import lru_cache
+from pathlib import Path
+
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import yaml
 from plotly.subplots import make_subplots
 from typing import List, Dict, Optional
 from datetime import datetime, timedelta
@@ -186,15 +193,38 @@ FEATURE_NAMES_ES.update({
 OMITTED_FEATURES = list(OMITTED_SIGNALS)
 
 
+# Shared sizing for the three "Análisis semanal de alertas" charts so their
+# cards render at the same height regardless of fleet size.
+ALERTS_CHART_HEIGHT = 400
+
+# Pareto chart (Distribución por unidad) styling: bars are not segmented by
+# system, so a single accent color is used for the count bars and a
+# contrasting color for the cumulative-percentage line.
+PARETO_BAR_COLOR = '#355c7d'
+PARETO_LINE_COLOR = '#d08c60'
+
 def create_alerts_per_unit_chart(alerts_df: pd.DataFrame) -> go.Figure:
     """
-    Create horizontal bar chart showing distribution of alerts per unit.
-    
+    Create a Pareto chart of alerts per unit: units on the X-axis sorted by
+    descending alert count (bars, primary Y-axis) with a cumulative-percentage
+    line (secondary Y-axis, fixed 0-100%). Units are not segmented/colored by
+    system and no legend is shown - the axes and hover text carry that.
+
+    The two Y-axes scale independently: the primary axis fits the largest
+    unit's count (not the total alert count), so bars stay readable instead
+    of being compressed near the bottom for fleets with many total alerts.
+
+    Renders responsively (no fixed pixel width) so the whole Pareto - every
+    bar plus the secondary axis - fits inside the fixed-height card without
+    horizontal scrolling; tick/label density and on-bar text shrink or drop
+    as the fleet grows so labels stay readable instead of overlapping - full
+    per-unit detail (count + cumulative %) is always available on hover.
+
     Args:
-        alerts_df: DataFrame with columns ['UnitId', 'sistema']
-    
+        alerts_df: DataFrame with column ['UnitId']
+
     Returns:
-        Plotly Figure with horizontal bar chart
+        Plotly Figure with a bar + line combo chart
     """
     if alerts_df.empty:
         logger.warning("Cannot create alerts per unit chart: empty dataframe")
@@ -203,56 +233,119 @@ def create_alerts_per_unit_chart(alerts_df: pd.DataFrame) -> go.Figure:
             xref="paper", yref="paper",
             x=0.5, y=0.5, showarrow=False
         )
-    
+
     try:
-        # Count alerts per unit and translated display system.
-        alerts_per_unit = alerts_df.copy()
-        alerts_per_unit['_system_display'] = alerts_per_unit['sistema'].map(translate_system_label)
-        alerts_per_unit = alerts_per_unit.groupby(
-            ['UnitId', '_system_display']
-        ).size().reset_index(name='Count')
-        
-        # Sort systems in reverse alphabetical order for consistent ordering
-        alerts_per_unit['_system_display'] = pd.Categorical(
-            alerts_per_unit['_system_display'],
-            categories=sorted(alerts_per_unit['_system_display'].unique(), reverse=True),
-            ordered=True
-        )
-        alerts_per_unit = alerts_per_unit.sort_values('_system_display')
-        
-        # Create horizontal bar chart
-        fig = px.bar(
-            alerts_per_unit,
-            y='UnitId',
-            x='Count',
-            color='_system_display',
-            orientation='h',
-            title=None,
-            template='plotly_white',
-            height=500,
-            labels={'Count': 'Número de Alertas', 'UnitId': 'Unidad', '_system_display': 'Sistema'},
-            color_discrete_map=SISTEMA_COLORS
-        )
-        # Horizontal, compact legend at top right
-        fig.update_layout(
-            yaxis={'categoryorder': 'total ascending'},
-            showlegend=True,
-            legend=dict(
-                title='Sistema',
-                orientation='h',
-                x=1,
-                y=1.08,
-                xanchor='right',
-                yanchor='bottom',
-                font=dict(size=11),
-                itemwidth=80
+        counts = alerts_df.groupby('UnitId').size().reset_index(name='Count')
+        counts = counts.sort_values('Count', ascending=False).reset_index(drop=True)
+
+        total = int(counts['Count'].sum())
+        counts['CumulativePct'] = (counts['Count'].cumsum() / total * 100) if total else 0.0
+        # Guard against float drift so the last point always reads exactly 100%.
+        if len(counts):
+            counts.loc[counts.index[-1], 'CumulativePct'] = 100.0
+
+        unit_count = len(counts)
+        max_count = int(counts['Count'].max()) if unit_count else 0
+        # Shrink tick/value fonts (and rotate on-bar values) as the fleet
+        # grows, so labels keep fitting the fixed card width without
+        # overlapping - unit-level detail is still always available on hover.
+        if unit_count <= 12:
+            tick_font_size, value_font_size, value_angle = 11, 11, 0
+        elif unit_count <= 25:
+            tick_font_size, value_font_size, value_angle = 10, 9, 0
+        elif unit_count <= 45:
+            tick_font_size, value_font_size, value_angle = 8, 8, -90
+        else:
+            tick_font_size, value_font_size, value_angle = 7, 7, -90
+
+        # Above this many units, on-bar count labels start to overlap - drop
+        # them and lean on hover instead of forcing every label into view.
+        show_bar_text = unit_count <= 25
+        bar_text = counts['Count'].map(lambda value: f'{int(value)}') if show_bar_text else None
+
+        # Cumulative-% labels are shown for at most ~12 points, evenly spaced,
+        # always including the last (100%) point - the rest stay hover-only
+        # so dense fleets don't stack overlapping percentage labels.
+        label_step = max(1, math.ceil(unit_count / 12)) if unit_count else 1
+        cumulative_text = [
+            f'{value:.0f}%' if (index % label_step == 0 or index == unit_count - 1) else ''
+            for index, value in enumerate(counts['CumulativePct'])
+        ]
+
+        # Primary axis is independent of the secondary (0-100%) axis: it
+        # fits the largest bar with headroom, so bars stay legible instead
+        # of compressing toward the bottom as total alert count grows.
+        axis_max = (max_count * 1.15) if max_count else 1
+
+        fig = make_subplots(specs=[[{"secondary_y": True}]])
+        fig.add_trace(
+            go.Bar(
+                x=counts['UnitId'],
+                y=counts['Count'],
+                name='Alertas',
+                marker_color=PARETO_BAR_COLOR,
+                text=bar_text,
+                textposition='auto',
+                textangle=value_angle,
+                insidetextfont=dict(size=value_font_size, color='white'),
+                outsidetextfont=dict(size=value_font_size, color='#2c3e50'),
+                cliponaxis=False,
+                hovertemplate='Alertas: %{y}<extra></extra>',
             ),
-            hovermode='closest'
+            secondary_y=False,
         )
-        
-        logger.info("Created alerts per unit chart successfully")
+        fig.add_trace(
+            go.Scatter(
+                x=counts['UnitId'],
+                y=counts['CumulativePct'],
+                name='% acumulado',
+                mode='lines+markers+text',
+                text=cumulative_text,
+                textposition='top center',
+                textfont=dict(size=value_font_size, color=PARETO_LINE_COLOR),
+                line=dict(color=PARETO_LINE_COLOR, width=2),
+                marker=dict(size=6, color=PARETO_LINE_COLOR),
+                cliponaxis=False,
+                hovertemplate='%% acumulado: %{y:.1f}%<extra></extra>',
+            ),
+            secondary_y=True,
+        )
+
+        xaxis_kwargs = dict(
+            title_text='Identificador de Unidad',
+            type='category',
+            tickangle=-45,
+            tickfont=dict(size=tick_font_size),
+        )
+        if unit_count > 40:
+            # Thin out the X-axis tick labels (not the bars themselves) once
+            # there are too many units for every label to stay readable.
+            xaxis_kwargs.update(tickmode='linear', dtick=math.ceil(unit_count / 40))
+        fig.update_xaxes(**xaxis_kwargs)
+        fig.update_yaxes(
+            title_text='Número de Alertas',
+            range=[0, axis_max],
+            nticks=6,
+            secondary_y=False,
+        )
+        fig.update_yaxes(
+            title_text='Porcentaje Acumulado',
+            range=[0, 100],
+            tickvals=[0, 20, 40, 60, 80, 100],
+            ticksuffix='%',
+            secondary_y=True,
+        )
+        fig.update_layout(
+            template='plotly_white',
+            showlegend=False,
+            height=ALERTS_CHART_HEIGHT,
+            margin=dict(l=55, r=55, t=30, b=80),
+            hovermode='x unified',
+        )
+
+        logger.info("Created alerts per unit Pareto chart successfully")
         return fig
-    
+
     except Exception as e:
         logger.error(f"Error creating alerts per unit chart: {e}")
         return go.Figure().add_annotation(
@@ -354,21 +447,36 @@ def create_alerts_per_week_chart(alerts_df: pd.DataFrame) -> go.Figure:
     grouped = full.merge(grouped, how='left', on=['_week_start', '_system_display']).fillna({'Count': 0})
     grouped['Semana'] = grouped['_week_start'].dt.strftime('%d/%m')
     grouped['_week_start_iso'] = grouped['_week_start'].dt.strftime('%Y-%m-%d')
+    # Blank labels for zero-filled (week, system) combos so empty stack
+    # segments don't render a dangling "0" at the baseline.
+    grouped['_label'] = grouped['Count'].apply(lambda count: '' if count <= 0 else f'{int(count)}')
     fig = px.bar(
         grouped,
         x='Semana',
         y='Count',
         color='_system_display',
         barmode='stack',
-        labels={'Semana': 'Semana iniciada', 'Count': 'Alertas', '_system_display': 'Sistema'},
+        text='_label',
+        labels={'Semana': 'Semana', 'Count': 'Alertas', '_system_display': 'Sistema'},
         color_discrete_map=SISTEMA_COLORS,
         template='plotly_white',
-        height=360,
+        height=ALERTS_CHART_HEIGHT,
         custom_data=['_week_start_iso'],
     )
-    fig.update_traces(hovertemplate='<b>%{fullData.name}</b><br>Semana: %{x}<br>Alertas: %{y}<extra></extra>')
+    fig.update_traces(
+        textposition='auto',
+        insidetextfont=dict(size=10, color='white'),
+        outsidetextfont=dict(size=10, color='#2c3e50'),
+        cliponaxis=False,
+        hovertemplate='<b>%{fullData.name}</b><br>Semana: %{x}<br>Alertas: %{y}<extra></extra>',
+    )
+    # A single-system client sees every stacked bar in one color anyway, so
+    # the "Sistema" legend is redundant - only show it once there's more
+    # than one system to actually distinguish.
+    show_legend = len(systems) >= 2
     fig.update_layout(
-        margin=dict(l=45, r=15, t=18, b=55),
+        margin=dict(l=40, r=10, t=14 if show_legend else 8, b=48),
+        showlegend=show_legend,
         legend=dict(orientation='h', y=1.08, x=1, xanchor='right', yanchor='bottom', font=dict(size=10)),
         hovermode='x unified',
     )
@@ -857,59 +965,274 @@ def create_oil_radar_chart(oil_report: pd.Series, essay_cols: List[str]) -> go.F
         )
 
 
-def create_system_distribution_pie_chart(alerts_df: pd.DataFrame) -> go.Figure:
+def _first_signal_key(trigger_var) -> Optional[str]:
+    """Return the raw (untranslated) code for only the *first* Señal/Variable
+    on an alert row's ``Trigger_Var``.
+
+    ``Trigger_Var`` is a real Golden-layer column but isn't uniform: Capstone
+    stores a bare scalar code, CDA/Emin store a string-serialized Python list
+    (mixed telemetry+tribology alerts can carry several signals in one row).
+    One alert must size exactly one treemap leaf - so only the first value is
+    kept and the rest are intentionally dropped here, rather than exploding
+    one alert into multiple leaves.
     """
-    Create pie chart showing distribution of alerts per system.
-    
+    if trigger_var is None or (not isinstance(trigger_var, (list, tuple, set)) and pd.isna(trigger_var)):
+        return None
+    parsed = trigger_var
+    if isinstance(parsed, str):
+        try:
+            parsed = ast.literal_eval(parsed)
+        except (ValueError, SyntaxError):
+            pass
+    if isinstance(parsed, (list, tuple, set)):
+        parsed = next(iter(parsed), None)
+    if parsed is None:
+        return None
+    signal_key = str(parsed).strip()
+    return signal_key or None
+
+
+def _first_signal_display(trigger_var) -> Optional[str]:
+    """Return the Spanish display label for `_first_signal_key`."""
+    key = _first_signal_key(trigger_var)
+    if key is None:
+        return None
+    return FEATURE_NAMES_ES.get(key, key)
+
+
+# Spanish "Familia" labels for the `functional_group` identifiers a client's
+# config/features/{client}.yaml can define. These identifiers are internal
+# engineering names and must never reach the UI directly; unmapped groups
+# (future clients) fall back to an auto-formatted label in
+# `_functional_group_label` rather than blocking on this table.
+FUNCTIONAL_GROUP_LABELS_ES = {
+    'engine_core': 'Motor',
+    'coolant': 'Refrigerante',
+    'ecu_temperature': 'Temperatura ECU',
+    'oil_temperature': 'Temperatura de aceite',
+    'intake_temperature': 'Temperatura de admisión',
+    'egt': 'Gases de escape (EGT)',
+    'oil_pressure': 'Presión de aceite',
+    'post_filter_oil_pressure': 'Presión de aceite post-filtro',
+    'intake_manifold_pressure': 'Presión del múltiple de admisión',
+    'crankcase_pressure': 'Presión del cárter',
+    'turbocharger_temperature': 'Temperatura del turbocompresor',
+    'turbocharger_speed': 'Velocidad del turbocompresor',
+    'fan': 'Ventilador',
+}
+
+
+def _functional_group_label(group_key: str) -> str:
+    """Spanish display label for a functional_group id, with a readable
+    auto-formatted fallback so a future client's config never leaks a raw
+    snake_case identifier into the UI."""
+    label = FUNCTIONAL_GROUP_LABELS_ES.get(group_key)
+    if label:
+        return label
+    return group_key.replace('_', ' ').strip().capitalize()
+
+
+_IDENTIFIER_RE = re.compile(r'[A-Za-z_][A-Za-z0-9_]*')
+# Function/operator names that can appear in a `derived` formula string but
+# are never themselves signal identifiers.
+_DERIVED_FORMULA_KEYWORDS = {'abs', 'min', 'max', 'round'}
+
+
+@lru_cache(maxsize=8)
+def _load_functional_group_map(client: str) -> Dict[str, str]:
+    """Map every raw signal code a client's alerts can carry in
+    ``Trigger_Var`` (a feature's ``source_column``, its own ``name``, or a
+    bare identifier referenced inside a ``derived`` formula) to that
+    feature's ``functional_group``.
+
+    Generic across clients: any ``config/features/{client}.yaml`` matching
+    the ``features: [{name, source_column?, derived?, functional_group}]``
+    shape works, not just Capstone's. Returns {} when the client has no such
+    config file - callers treat that as "no functional_group mapping
+    available" and fall back to the Sistema-based treemap.
+    """
+    path = Path('config/features') / f'{client}.yaml'
+    if not path.exists():
+        return {}
+    try:
+        with open(path, 'r', encoding='utf-8') as handle:
+            config = yaml.safe_load(handle) or {}
+    except Exception as e:
+        logger.warning(f"Could not load feature config for client '{client}': {e}")
+        return {}
+
+    mapping: Dict[str, str] = {}
+    all_features = list(config.get('features') or []) + list(config.get('diagnostic_features') or [])
+    for feature in all_features:
+        group = feature.get('functional_group')
+        if not group:
+            continue
+        name = feature.get('name')
+        if name:
+            mapping.setdefault(name, group)
+        source_column = feature.get('source_column')
+        if source_column:
+            mapping.setdefault(source_column, group)
+        derived = feature.get('derived')
+        if derived:
+            # A `derived` formula (e.g. "abs(egt_lb_c - egt_rb_c)") can
+            # reference raw signal columns that have no feature entry of
+            # their own, yet Trigger_Var can still point at them directly.
+            for token in _IDENTIFIER_RE.findall(str(derived)):
+                if token in _DERIVED_FORMULA_KEYWORDS:
+                    continue
+                mapping.setdefault(token, group)
+    return mapping
+
+
+def _treemap_root_colors(root_labels) -> Dict[str, str]:
+    """Assign a stable color per treemap root label. Known systems keep the
+    shared SISTEMA_COLORS palette; unrecognized roots (Familia labels, or a
+    future client's system names) cycle a qualitative palette instead of all
+    collapsing onto one fallback color."""
+    palette = plotly.colors.qualitative.Set2
+    colors: Dict[str, str] = {}
+    next_index = 0
+    for label in sorted(set(root_labels)):
+        if label in SISTEMA_COLORS:
+            colors[label] = SISTEMA_COLORS[label]
+            continue
+        colors[label] = palette[next_index % len(palette)]
+        next_index += 1
+    return colors
+
+
+def create_system_signal_treemap(alerts_df: pd.DataFrame, client: Optional[str] = None) -> go.Figure:
+    """
+    Create a two-level treemap of alerts, area sized by alert count.
+
+    Multi-system clients (2+ distinct ``sistema`` values in the filtered
+    data): Sistema -> Señal/Variable, as before.
+
+    Single-system clients: a single "Sistema" root tile wastes roughly half
+    the treemap on a grouping that no longer distinguishes anything, so when
+    ``config/features/{client}.yaml`` maps the first signal of each alert to
+    a ``functional_group``, use Familia -> Señal/Variable instead. This is
+    generic (driven entirely by the config file's shape, not a Capstone
+    special-case) and falls back to Sistema -> Señal/Variable - never
+    fabricating a grouping - when no client config or mapping is available.
+
+    Each alert contributes to exactly one leaf either way: when
+    ``Trigger_Var`` carries several signals, only the first is used (see
+    `_first_signal_key`), so the treemap's total area always equals the
+    total alert count - no alert is double-counted.
+
     Args:
-        alerts_df: DataFrame with column ['sistema']
-    
+        alerts_df: DataFrame with columns ['sistema', 'Trigger_Var']
+        client: Client identifier, used to look up config/features/{client}.yaml
+            for the single-system Familia fallback. Optional - omitting it
+            (or having no matching config) keeps the Sistema-based treemap.
+
     Returns:
-        Plotly Figure with pie chart
+        Plotly Figure with a go.Treemap
     """
     if alerts_df.empty:
-        logger.warning("Cannot create system distribution pie chart: empty dataframe")
+        logger.warning("Cannot create system/signal treemap: empty dataframe")
         return go.Figure().add_annotation(
             text="No data available",
             xref="paper", yref="paper",
             x=0.5, y=0.5, showarrow=False
         )
-    
+
     try:
-        # Count alerts by translated display system.
-        system_counts = alerts_df.copy()
-        system_counts['_system_display'] = system_counts['sistema'].map(translate_system_label)
-        system_counts = system_counts['_system_display'].value_counts().reset_index()
-        system_counts.columns = ['_system_display', 'Count']
-        
-        # Sort systems in reverse alphabetical order
-        system_counts = system_counts.sort_values('_system_display', ascending=False)
-        
-        # Create pie chart with standard color mapping
-        fig = px.pie(
-            system_counts,
-            values='Count',
-            names='_system_display',
-            title=None,  # Remove title
-            hole=0.3,  # Makes it a donut chart
-            color='_system_display',
-            color_discrete_map=SISTEMA_COLORS
+        frame = alerts_df.copy()
+        frame['_system_display'] = frame['sistema'].map(translate_system_label)
+        trigger_var = frame['Trigger_Var'] if 'Trigger_Var' in frame.columns else pd.Series(None, index=frame.index)
+        frame['_signal_key'] = trigger_var.map(_first_signal_key)
+        frame['_signal_display'] = frame['_signal_key'].map(
+            lambda key: FEATURE_NAMES_ES.get(key, key) if key else None
+        ).fillna('Sin señal registrada')
+
+        systems_present = frame['_system_display'].dropna().unique()
+        group_map = {}
+        if client and len(systems_present) <= 1:
+            group_map = _load_functional_group_map(str(client).strip().lower())
+
+        use_family = bool(group_map)
+        if use_family:
+            frame['_root_display'] = frame['_signal_key'].map(
+                lambda key: _functional_group_label(group_map[key]) if key and key in group_map else None
+            )
+            frame['_root_display'] = frame['_root_display'].fillna('Sin familia')
+            root_dimension = 'Familia'
+        else:
+            frame['_root_display'] = frame['_system_display']
+            root_dimension = 'Sistema'
+
+        total = len(frame)
+        leaves = frame.groupby(['_root_display', '_signal_display']).size().reset_index(name='Count')
+        leaves['Pct'] = (leaves['Count'] / total * 100) if total else 0.0
+        branches = leaves.groupby('_root_display')['Count'].sum().reset_index()
+        branches['Pct'] = (branches['Count'] / total * 100) if total else 0.0
+        # Familia mode still needs each root's owning system for click-to-filter
+        # (customdata) and hover context, even though it's constant here.
+        root_system = frame.groupby('_root_display')['_system_display'].first()
+        root_colors = _treemap_root_colors(branches['_root_display'])
+
+        ids, labels, parents, values, colors, hover_text, system_values = [], [], [], [], [], [], []
+        for _, row in branches.iterrows():
+            root = row['_root_display']
+            system = root_system.get(root, root)
+            ids.append(root)
+            labels.append(root)
+            parents.append('')
+            values.append(int(row['Count']))
+            colors.append(root_colors.get(root, PARETO_BAR_COLOR))
+            system_values.append(system)
+            hover_text.append(
+                f"<b>{root_dimension}:</b> {root}<br>"
+                f"<b>Alertas:</b> {int(row['Count'])}<br>"
+                f"<b>Porcentaje:</b> {row['Pct']:.1f}%"
+            )
+        for _, row in leaves.iterrows():
+            root = row['_root_display']
+            signal = row['_signal_display']
+            system = root_system.get(root, root)
+            ids.append(f'{root}||{signal}')
+            labels.append(signal)
+            parents.append(root)
+            values.append(int(row['Count']))
+            colors.append(root_colors.get(root, PARETO_BAR_COLOR))
+            system_values.append(system)
+            hover_text.append(
+                f"<b>{root_dimension}:</b> {root}<br>"
+                f"<b>Señal/Variable:</b> {signal}<br>"
+                f"<b>Alertas:</b> {int(row['Count'])}<br>"
+                f"<b>Porcentaje:</b> {row['Pct']:.1f}%"
+            )
+
+        fig = go.Figure(
+            go.Treemap(
+                ids=ids,
+                labels=labels,
+                parents=parents,
+                values=values,
+                branchvalues='total',
+                marker=dict(colors=colors),
+                customdata=system_values,
+                hovertext=hover_text,
+                hoverinfo='text',
+                texttemplate='%{label}<br>%{value}',
+                textfont=dict(size=12),
+                maxdepth=2,
+                pathbar=dict(visible=True, thickness=18),
+            )
         )
-        fig.update_traces(
-            textposition='inside',
-            textinfo='percent+label',
-            hovertemplate='<b>%{label}</b><br>Alertas: %{value}<br>Porcentaje: %{percent}<extra></extra>'
-        )
-        # Remove legend
         fig.update_layout(
-            height=500,
-            showlegend=False
+            template='plotly_white',
+            height=ALERTS_CHART_HEIGHT,
+            margin=dict(l=5, r=5, t=5, b=5),
         )
-        logger.info("Created system distribution pie chart successfully")
+        logger.info(f"Created system/signal treemap successfully (root dimension: {root_dimension})")
         return fig
-    
+
     except Exception as e:
-        logger.error(f"Error creating system distribution pie chart: {e}")
+        logger.error(f"Error creating system/signal treemap: {e}")
         return go.Figure().add_annotation(
             text=f"Error: {str(e)}",
             xref="paper", yref="paper",

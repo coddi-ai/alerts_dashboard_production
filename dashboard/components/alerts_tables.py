@@ -291,9 +291,14 @@ def create_alerts_report_table(alerts_df: pd.DataFrame) -> dash_table.DataTable:
             })
         table = dash_table.DataTable(
             id="alerts-datatable",
+            # ID, Fuente and Evidencia stay in `data` (row selection, the
+            # decision-summary card, and the Mixto row-highlight style all
+            # read them) but are dropped from the visible `columns` - the
+            # same "kept in data, absent from columns" pattern already used
+            # for diagnostico_completo/causa_completa/accion_completa above.
             columns=[
                 {"name": name, "id": name}
-                for name in ["ID", "Fecha", "Unidad", "Sistema", "Componente", "Señal / variable", "Fuente", "Diagnóstico", "Evidencia", "Acción"]
+                for name in ["Fecha", "Unidad", "Sistema", "Componente", "Señal / variable", "Diagnóstico", "Acción"]
             ],
             data=rows,
             active_cell=None,
@@ -312,7 +317,6 @@ def create_alerts_report_table(alerts_df: pd.DataFrame) -> dash_table.DataTable:
             style_cell={"textAlign": "left", "padding": "9px", "fontSize": "12px", "whiteSpace": "normal", "height": "auto", "minWidth": "90px"},
             style_header={"backgroundColor": "#23384d", "color": "white", "fontWeight": "bold", "textAlign": "center", "whiteSpace": "normal"},
             style_cell_conditional=[
-                {"if": {"column_id": "ID"}, "fontWeight": "600", "minWidth": "150px"},
                 {"if": {"column_id": "Diagnóstico"}, "minWidth": "260px", "maxWidth": "420px"},
                 {"if": {"column_id": "Acción"}, "display": "none"},
                 {"if": {"column_id": "Señal / variable"}, "minWidth": "150px"},
