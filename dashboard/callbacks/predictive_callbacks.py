@@ -290,24 +290,21 @@ def register_callbacks(app):
             if filepath:
                 _, df_latest = _load_evidence_component(filepath, component, client)
                 if df_latest is not None and not df_latest.empty:
-                    row = df_latest[df_latest["Unit"] == selected_unit]
+                    # Status from analisis_inteligente.parquet's `estado` (same
+                    # source as Estado de Flota, REQ-PR-04) so the banner never
+                    # disagrees with the priority cards for the same unit.
+                    latest_with_status = attach_status(df_latest, client, component)
+                    row = latest_with_status[latest_with_status["Unit"] == selected_unit]
                     if not row.empty:
                         row = row.iloc[0]
                         ranking_val = float(row.get("ranking", 0))
-                        avg_30d = float(row.get("avg_ranking_30d", ranking_val))
-                        max_fm = float(row.get("max_fm_30d", 0))
                         ranking_text = f"{ranking_val:.0f}/100"
-                        # Status: Crítico >= 60 OR max_fm >= 80
-                        #         Alerta >= 30 OR max_fm >= 50
-                        if avg_30d >= 60 or max_fm >= 80:
-                            status_text = "Crítica"
-                            status_color = "#e24b4a"
-                        elif avg_30d >= 30 or max_fm >= 50:
-                            status_text = "Alerta"
-                            status_color = "#ef9f27"
-                        else:
-                            status_text = "Saludable"
-                            status_color = "#1d9e75"
+                        status_text = row["status"]
+                        status_color = {
+                            "Anormal": "#e24b4a",
+                            "Alerta": "#ef9f27",
+                            "Normal": "#1d9e75",
+                        }.get(status_text, "#667eea")
 
         component_label = (component or "").title()
 
