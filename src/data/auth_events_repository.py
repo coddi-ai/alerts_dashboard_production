@@ -255,9 +255,46 @@ def _bootstrap_local_state(base_dir: Optional[Path] = None) -> bool:
     return _backfill_from_s3(base_dir)
 
 
+def _update_consolidated_parquet(event: dict, base_dir: Optional[Path] = None) -> pd.DataFrame:
+    """
+    Reflect one new event in the consolidated Parquet.
+
+    If the Parquet already exists, it already reflects every prior event, so
+    the new one is simply appended - one Parquet read instead of re-scanning
+    every historical event JSON file. Rescanning all of them (the previous
+    behavior) on every single login is expensive once there are hundreds of
+    local event files on a network filesystem like EFS: each file is its own
+    NFS round trip, so login latency grew with total login history. Falls
+    back to a full rebuild if the Parquet doesn't exist yet (e.g. right after
+    an S3 backfill added JSON files that aren't reflected anywhere yet) or
+    can't be read.
+    """
+    parquet_path = _consolidated_parquet_path(base_dir)
+    if not parquet_path.exists():
+        return _rebuild_consolidated_parquet(base_dir)
+
+    record = {field: event.get(field, "unknown") for field in ALL_FIELDS}
+    try:
+        existing = pd.read_parquet(parquet_path)
+        df = pd.concat(
+            [existing, pd.DataFrame([record], columns=list(ALL_FIELDS))],
+            ignore_index=True,
+        )
+    except Exception as e:
+        logger.warning(
+            f"Could not append to consolidated Parquet ({type(e).__name__}: {e}); rebuilding from scratch"
+        )
+        return _rebuild_consolidated_parquet(base_dir)
+
+    tmp_path = parquet_path.with_suffix(".parquet.tmp")
+    df.to_parquet(tmp_path, index=False)
+    os.replace(tmp_path, parquet_path)
+    return df
+
+
 def record_local_event(event: dict, relative_key: str, base_dir: Optional[Path] = None) -> None:
     """
-    Write one event JSON locally (mirroring the S3 key layout) and refresh the
+    Write one event JSON locally (mirroring the S3 key layout) and update the
     consolidated Parquet used by list_login_events(). Called by
     src/utils/auth_event_logger.py right after a successful login, before the
     S3 upload. Raises on failure - the caller treats this as best-effort and
@@ -271,7 +308,7 @@ def record_local_event(event: dict, relative_key: str, base_dir: Optional[Path] 
     tmp_path.write_text(json.dumps(event), encoding="utf-8")
     os.replace(tmp_path, local_path)
 
-    _rebuild_consolidated_parquet(base_dir)
+    _update_consolidated_parquet(event, base_dir)
 
 
 def list_login_events(use_cache: bool = True, base_dir: Optional[Path] = None) -> pd.DataFrame:
