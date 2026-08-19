@@ -151,7 +151,12 @@ import dashboard.pages.admin_user_registry
 import dashboard.pages.no_services
 
 # Set app layout
-app.layout = create_app_layout()
+#
+# El callable, no su resultado: Dash lo invoca en cada peticion de `_dash-layout`, y eso es
+# lo que le permite a `user-info-store` nacer con la identidad de la sesion de Flask activa.
+# Evaluado una sola vez al importar no habria request desde el cual leerla, y toda pestana
+# nueva arrancaria sin identidad. Reconstruirlo cuesta ~0.3 ms.
+app.layout = create_app_layout
 
 # Add health check endpoint for ALB
 @app.server.route('/alerts-dashboard/health')

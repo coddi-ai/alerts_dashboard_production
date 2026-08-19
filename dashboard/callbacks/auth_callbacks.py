@@ -10,6 +10,7 @@ from dashboard.auth import (
     IDENTITY_PROOF_FIELD,
     add_identity_proof,
     authenticate_user,
+    current_dashboard_user_data,
     resolve_authenticated_username,
     should_process_login,
 )
@@ -82,6 +83,26 @@ def register_auth_callbacks(app):
             isinstance(user_data, dict)
             and user_data.get(IDENTITY_PROOF_FIELD)
         )
+
+        if username and not has_identity_proof:
+            # La identidad se resolvio pero el navegador no trae el proof firmado. Pasa
+            # cuando sessionStorage esta vacio (pestana nueva, enlace directo) o cuando trae
+            # datos escritos antes de que el proof existiera -- y ese valor viejo le gana al
+            # que siembra el layout. En ambos casos el usuario esta legitimamente autenticado,
+            # asi que se reemite el proof desde la sesion en vez de mandar al login a alguien
+            # que el servidor ya reconoce.
+            #
+            # Esto no ablanda el gate. `resolve_authenticated_username` solo devuelve un
+            # nombre sin proof cuando la cookie de sesion de Flask es valida, y esa cookie es
+            # HttpOnly y va firmada con la misma llave: es la mas fuerte de las dos pruebas,
+            # no la mas debil. `current_dashboard_user_data` vuelve a resolver la sesion por
+            # su cuenta y devuelve None si no es valida, y entonces el gate manda al login.
+            user_data = current_dashboard_user_data()
+            has_identity_proof = bool(
+                isinstance(user_data, dict)
+                and user_data.get(IDENTITY_PROOF_FIELD)
+            )
+
         from dashboard.layout import create_main_dashboard
         
         # When user logs in (user_data is not None), show dashboard
