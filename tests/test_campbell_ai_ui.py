@@ -17,8 +17,10 @@ from dashboard.auth import (
     should_process_login,
 )
 from dashboard.campbell_ai.callbacks import (
+    _STATUS_NAMESPACE_JS,
     _pending_user_message,
     _resolve_outgoing_message,
+    _status_js,
     _strip_pending_messages,
     register_campbell_ai_callbacks,
 )
@@ -171,7 +173,7 @@ def test_the_view_reports_the_current_version():
 def test_the_status_badge_knows_which_text_is_its_own():
     """Two couplings that fail silently, both in the badge that shows the wait.
 
-    The badge is written by several callbacks, and `campbell_ai_status.js` decides whether
+    The badge is written by several callbacks, and `_STATUS_NAMESPACE_JS` decides whether
     to keep updating it by asking "is this still my text?". Get either half of that wrong
     and nothing raises - the badge simply freezes during the initialization, which is the
     one failure this whole mechanism exists to prevent.
@@ -189,15 +191,10 @@ def test_the_status_badge_knows_which_text_is_its_own():
         for item in _walk(create_campbell_ai_layout())
         if getattr(item, "id", None) == "campbell-ai-status"
     )
-    script = (
-        Path(__file__).resolve().parents[1]
-        / "dashboard"
-        / "assets"
-        / "campbell_ai_status.js"
-    ).read_text(encoding="utf-8")
+    script = _STATUS_NAMESPACE_JS
 
     declared = re.search(r'var INITIAL_TEXT = "([^"]+)"', script)
-    assert declared, "campbell_ai_status.js dejo de declarar INITIAL_TEXT"
+    assert declared, "_STATUS_NAMESPACE_JS dejo de declarar INITIAL_TEXT"
     assert declared.group(1) == badge.children
 
     ownership = re.search(r"function isOurs\(text\) \{(.+?)\n  \}", script, re.S)
@@ -205,6 +202,39 @@ def test_the_status_badge_knows_which_text_is_its_own():
     assert "state.written" in ownership.group(1)
     assert "INITIAL_TEXT" in ownership.group(1)
     assert not re.search(r"charAt|endsWith|\bslice\b", ownership.group(1))
+
+
+def test_the_badge_script_does_not_depend_on_a_file_under_assets():
+    """The 500 this replaced: a clientside callback whose code lived in `assets/`.
+
+    Dash registers the files in `assets/` once, on the first request the process serves, and
+    then stats each of them on every render to version it by mtime. The deployment bind-mounts
+    the checkout into the container, so a checkout that stops carrying the file while the
+    process stays alive - an older branch, a rollback - turns every page load into a 500 for a
+    script the page could have carried itself. Nothing recovers from it either: the hot reload
+    that would drop the file from the list is off in production.
+
+    So each emitted function has to install what it calls, and the namespace must not reappear
+    in a file under `assets/`.
+    """
+    emitted = _status_js("begin", "clientValue, sessionId, currentText")
+
+    assert emitted.startswith("function(clientValue, sessionId, currentText) {")
+    # Self-contained: the function builds the namespace instead of trusting that some other
+    # file already ran and left it on `window`.
+    assert "namespace.campbellAiStatus = {" in emitted
+    # Idempotent: the three callbacks emit this same installer into one page, and the state it
+    # holds (`written`, `startedAt`) has to survive across them - rebuilding it on the second
+    # call would make the badge forget what it wrote and stop recognising its own text.
+    assert "if (namespace.campbellAiStatus) return namespace.campbellAiStatus;" in emitted
+
+    assets = Path(__file__).resolve().parents[1] / "dashboard" / "assets"
+    strays = sorted(
+        path.name
+        for path in assets.glob("*.js")
+        if "campbellAiStatus" in path.read_text(encoding="utf-8")
+    )
+    assert not strays, f"el namespace del badge volvio a un archivo de assets: {strays}"
 
 
 def test_the_session_company_survives_navigation_in_session_storage():
