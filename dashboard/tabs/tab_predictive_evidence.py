@@ -30,6 +30,8 @@ from dashboard.components.predictive_charts import (
 )
 from dashboard.components.predictive_tables import create_oil_variables_table
 from dashboard.components.oil_charts import get_essay_limits_four, classify_four_limit_value
+from dashboard.components.ai_analysis_panel import create_ai_analysis_panel
+from src.data.loaders import load_analisis_inteligente
 
 logger = get_logger(__name__)
 
@@ -401,6 +403,21 @@ def _generate_insight_data(unit, df_unit, df_latest, failure_mode, component="mo
     }
 
 
+def _get_unit_ai_analysis(df_analisis, unit):
+    """
+    Return the most recent analisis_inteligente.parquet row for `unit`
+    (one row per Unit per Fecha), or None if there's no AI analysis on file.
+    """
+    if df_analisis is None or df_analisis.empty or not unit or "Unit" not in df_analisis.columns:
+        return None
+    rows = df_analisis[df_analisis["Unit"] == unit]
+    if rows.empty:
+        return None
+    if "Fecha" in rows.columns:
+        rows = rows.sort_values("Fecha")
+    return rows.iloc[-1]
+
+
 def _build_insight_panel(insight):
     """Build the AI insight panel UI component."""
     if not insight:
@@ -624,6 +641,22 @@ def render_initial_content(unit, df, df_latest, component="motor", client=None):
     scatter_fig = create_fleet_scatter(latest, unit, STATUS_COLORS, 30.0)
     bar_fig = create_comparative_bars(row, latest, failure_modes)
 
+    # AI analysis (analisis_inteligente.parquet) for the selected unit.
+    # Always render the three sections rather than hiding the panel when a
+    # unit has no row yet - the pipeline team is expected to backfill
+    # placeholder diagnostico/causa_probable/acciones for units without one
+    # (e.g. healthy units), so the "No disponible" fallback below is meant
+    # to be a rare/transitional case, not the steady-state UI.
+    ai_row = _get_unit_ai_analysis(load_analisis_inteligente(client), unit) if client else None
+    ai_section = html.Div(
+        create_ai_analysis_panel(
+            ai_row.get("diagnostico") if ai_row is not None else None,
+            ai_row.get("causa_probable") if ai_row is not None else None,
+            ai_row.get("acciones") if ai_row is not None else None,
+        ),
+        style={"marginBottom": "1.5rem"},
+    )
+
     return html.Div([
         # KPIs
         html.Div([
@@ -634,6 +667,9 @@ def render_initial_content(unit, df, df_latest, component="motor", client=None):
             ]),
             html.Div(kpis, className="kpi-row"),
         ], className="card shadow-sm", style={"marginBottom": "1.5rem"}),
+
+        # AI analysis
+        ai_section,
 
         # Fleet comparison
         html.Div([

@@ -29,3 +29,34 @@ def register_sidebar_callbacks(app: dash.Dash) -> None:
 
         navigation_items = build_navigation_items(selected_client, user_data)
         return build_menu_items(navigation_items)
+
+    # Toggle the persisted collapsed flag on button click. Clientside so the
+    # sidebar hides/shows instantly with no server round-trip.
+    app.clientside_callback(
+        """
+        function(n_clicks, collapsed) {
+            if (!n_clicks) {
+                throw window.dash_clientside.PreventUpdate;
+            }
+            return !collapsed;
+        }
+        """,
+        Output("sidebar-collapsed-store", "data"),
+        Input("sidebar-toggle-btn", "n_clicks"),
+        State("sidebar-collapsed-store", "data"),
+    )
+
+    # Apply the persisted flag to #dashboard-shell as a class - all visual
+    # effects of collapsing (sidebar width, content margin, toggle button
+    # position/icon) are pure CSS off '.sidebar-collapsed'
+    # (see dashboard/assets/custom_layout.css). Runs on load too, so a
+    # previously-collapsed preference is restored immediately.
+    app.clientside_callback(
+        """
+        function(collapsed) {
+            return collapsed ? "sidebar-collapsed" : "";
+        }
+        """,
+        Output("dashboard-shell", "className"),
+        Input("sidebar-collapsed-store", "data"),
+    )

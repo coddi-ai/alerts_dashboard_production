@@ -25,7 +25,9 @@ events yet".
 
 import json
 import os
+import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -44,6 +46,21 @@ REQUIRED_FIELDS = ("event_id", "username", "timestamp", "deploy_status")
 OPTIONAL_FIELDS = ("client_id",)
 ALL_FIELDS = REQUIRED_FIELDS + OPTIONAL_FIELDS
 CACHE_TTL_SECONDS = 300
+
+# Age at which an orphaned temp Parquet is safe to delete. Well beyond how long any single
+# rebuild can take, so a sweep can never remove a file a concurrent writer is still using.
+STALE_TEMP_FILE_SECONDS = 3600
+
+# Serializa solo el paso de publicacion, no la reconstruccion completa: en Windows
+# `os.replace` (MoveFileEx) puede devolver ERROR_ACCESS_DENIED cuando otro reemplazo del mismo
+# destino esta en vuelo. En POSIX -- o sea en el despliegue -- `rename(2)` sobre un destino
+# existente es atomico y dos nunca chocan, asi que alla esto no hace nada y no cuesta nada: el
+# candado se toma por microsegundos, despues de que el trabajo pesado ya ocurrio.
+#
+# Cubre los hilos de un mismo proceso, que es de donde viene la concurrencia real (el servidor
+# de desarrollo de Flask atiende cada request en su propio hilo). Dos procesos distintos en
+# Windows escribiendo el mismo volumen siguen pudiendo chocar; en Linux no.
+_PUBLISH_LOCK = threading.Lock()
 
 _cache: dict = {"data": None, "loaded_at": 0.0}
 
@@ -103,7 +120,14 @@ def _parse_event_file(path: Path) -> Optional[dict]:
 
 
 def _rebuild_consolidated_parquet(base_dir: Optional[Path] = None) -> pd.DataFrame:
-    """Re-scan every local event JSON file and rewrite the consolidated Parquet from scratch. Atomic (temp file + replace) so a concurrent reader never sees a half-written file."""
+    """Re-scan every local event JSON file and rewrite the consolidated Parquet from scratch.
+
+    Atomic (temp file + replace) so a concurrent reader never sees a half-written file, and so
+    concurrent writers cannot take each other's temp file away. Writers are still not ordered
+    among themselves: with two overlapping logins, whichever one replaces last wins, and its
+    scan may have missed the other's event. That is harmless here - the JSON files are the
+    source of truth and the next rebuild picks up whatever a previous one missed.
+    """
     events_dir = _local_events_dir(base_dir)
 
     records = []
@@ -117,11 +141,48 @@ def _rebuild_consolidated_parquet(base_dir: Optional[Path] = None) -> pd.DataFra
 
     parquet_path = _consolidated_parquet_path(base_dir)
     parquet_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = parquet_path.with_suffix(".parquet.tmp")
-    df.to_parquet(tmp_path, index=False)
-    os.replace(tmp_path, parquet_path)
+
+    # Un nombre temporal por escritor. Uno compartido no solo no es atomico entre escritores:
+    # los rompe activamente. Dos logins solapados escriben el mismo temporal, el primer
+    # `os.replace` se lo lleva, y todos los demas fallan sobre un origen que ya no esta -- el
+    # "No such file or directory: ...parquet.tmp -> ...parquet" que aparecia una vez por login
+    # solapado, tanto en el despliegue como en local. Los eventos nunca estuvieron en riesgo
+    # (cada JSON tiene su propio nombre unico y este Parquet es solo un derivado), pero el
+    # ruido tapaba fallas de verdad. El pid va en el nombre para poder rastrear un huerfano
+    # hasta el proceso que lo dejo.
+    tmp_path = parquet_path.with_name(
+        f"{parquet_path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    )
+    try:
+        df.to_parquet(tmp_path, index=False)
+        with _PUBLISH_LOCK:
+            os.replace(tmp_path, parquet_path)
+    except BaseException:
+        # Con un nombre unico, una escritura fallida ya no la sobreescribe la siguiente, asi
+        # que hay que limpiarla aca.
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+    _discard_stale_temp_files(parquet_path)
 
     return df
+
+
+def _discard_stale_temp_files(parquet_path: Path) -> None:
+    """Borra temporales huerfanos por una muerte abrupta del proceso, no por una excepcion.
+
+    Con un nombre por escritor, un proceso que muere a mitad de la escritura (OOM kill, SIGKILL)
+    deja un archivo que nadie va a sobreescribir nunca; sin esto se acumularian para siempre en
+    un volumen compartido. Es best-effort a proposito: perder esta limpieza no puede hacer
+    fallar un login.
+    """
+    cutoff = time.time() - STALE_TEMP_FILE_SECONDS
+    for orphan in parquet_path.parent.glob(f"{parquet_path.name}.*.tmp"):
+        try:
+            if orphan.stat().st_mtime < cutoff:
+                orphan.unlink()
+        except OSError:
+            continue
 
 
 def _backfill_from_s3(base_dir: Optional[Path] = None) -> bool:
@@ -194,9 +255,46 @@ def _bootstrap_local_state(base_dir: Optional[Path] = None) -> bool:
     return _backfill_from_s3(base_dir)
 
 
+def _update_consolidated_parquet(event: dict, base_dir: Optional[Path] = None) -> pd.DataFrame:
+    """
+    Reflect one new event in the consolidated Parquet.
+
+    If the Parquet already exists, it already reflects every prior event, so
+    the new one is simply appended - one Parquet read instead of re-scanning
+    every historical event JSON file. Rescanning all of them (the previous
+    behavior) on every single login is expensive once there are hundreds of
+    local event files on a network filesystem like EFS: each file is its own
+    NFS round trip, so login latency grew with total login history. Falls
+    back to a full rebuild if the Parquet doesn't exist yet (e.g. right after
+    an S3 backfill added JSON files that aren't reflected anywhere yet) or
+    can't be read.
+    """
+    parquet_path = _consolidated_parquet_path(base_dir)
+    if not parquet_path.exists():
+        return _rebuild_consolidated_parquet(base_dir)
+
+    record = {field: event.get(field, "unknown") for field in ALL_FIELDS}
+    try:
+        existing = pd.read_parquet(parquet_path)
+        df = pd.concat(
+            [existing, pd.DataFrame([record], columns=list(ALL_FIELDS))],
+            ignore_index=True,
+        )
+    except Exception as e:
+        logger.warning(
+            f"Could not append to consolidated Parquet ({type(e).__name__}: {e}); rebuilding from scratch"
+        )
+        return _rebuild_consolidated_parquet(base_dir)
+
+    tmp_path = parquet_path.with_suffix(".parquet.tmp")
+    df.to_parquet(tmp_path, index=False)
+    os.replace(tmp_path, parquet_path)
+    return df
+
+
 def record_local_event(event: dict, relative_key: str, base_dir: Optional[Path] = None) -> None:
     """
-    Write one event JSON locally (mirroring the S3 key layout) and refresh the
+    Write one event JSON locally (mirroring the S3 key layout) and update the
     consolidated Parquet used by list_login_events(). Called by
     src/utils/auth_event_logger.py right after a successful login, before the
     S3 upload. Raises on failure - the caller treats this as best-effort and
@@ -210,7 +308,7 @@ def record_local_event(event: dict, relative_key: str, base_dir: Optional[Path] 
     tmp_path.write_text(json.dumps(event), encoding="utf-8")
     os.replace(tmp_path, local_path)
 
-    _rebuild_consolidated_parquet(base_dir)
+    _update_consolidated_parquet(event, base_dir)
 
 
 def list_login_events(use_cache: bool = True, base_dir: Optional[Path] = None) -> pd.DataFrame:

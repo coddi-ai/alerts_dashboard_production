@@ -6,6 +6,7 @@ Supports multi-component model: auto-discovers component CSVs (motor, transmisio
 from dash import html, dcc
 import pandas as pd
 import os
+from functools import lru_cache
 from pathlib import Path
 from config.settings import get_settings
 from src.utils.logger import get_logger
@@ -26,8 +27,14 @@ logger = get_logger(__name__)
 
 # ── Data Loading (Multi-Component) ────────────────────────────────────────────
 
+@lru_cache(maxsize=8)
 def _discover_components(client: str) -> dict:
-    """Auto-discover available component CSV files for a client."""
+    """Auto-discover available component CSV files for a client.
+
+    Cached per client: this lists the predictive golden-layer directory,
+    which on a network filesystem is a round trip and doesn't need repeating
+    on every callback firing within the same process lifetime.
+    """
     settings = get_settings()
     data_dir = Path(settings.data_root) / "predictive" / "golden" / client
 
@@ -43,8 +50,19 @@ def _discover_components(client: str) -> dict:
     return components
 
 
+@lru_cache(maxsize=16)
 def _load_component_data(filepath: Path, component: str, client: str = "cda"):
-    """Load and precompute predictive data for a single component."""
+    """Load and precompute predictive data for a single component.
+
+    Cached per (filepath, component, client): this CSV can be 20+MB and the
+    rolling-window computation below isn't cheap, so re-parsing it on every
+    callback firing (filter change, tab switch) is wasted work. Cache clears
+    on process restart, matching the data-refresh boundary already used for
+    the other client-keyed loaders in src/data/loaders.py. The only current
+    caller treats the returned DataFrames as read-only (copies before any
+    mutation) — any future caller that needs to mutate df/df_latest must copy
+    first, since these objects are shared across calls.
+    """
     if not filepath.exists():
         logger.warning(f"Predictive data not found: {filepath}")
         return None, None, {}
@@ -58,11 +76,16 @@ def _load_component_data(filepath: Path, component: str, client: str = "cda"):
     fm_keys = list(failure_modes.keys())
     score_cols = [c for c in fm_keys if c in df.columns] + ["ranking"]
 
+    # Sort once by Unit+Fecha. Every per-unit "last row" / rolling computation
+    # below reuses this ordering instead of re-sorting the full frame again —
+    # each Unit's rows are already chronological within their block, which is
+    # all groupby("Unit").last()/rolling() need.
+    df_sorted = df.sort_values(["Unit", "Fecha"]).copy()
+
     # Latest snapshot per unit
-    df_latest = df.sort_values("Fecha").groupby("Unit").last().reset_index()
+    df_latest = df_sorted.groupby("Unit").last().reset_index()
 
     # Rolling averages - compute all at once to avoid fragmentation
-    df_sorted = df.sort_values(["Unit", "Fecha"]).copy()
     rolling_cols = {}
     for col in score_cols:
         if col in df_sorted.columns:
@@ -80,8 +103,9 @@ def _load_component_data(filepath: Path, component: str, client: str = "cda"):
     if rolling_cols:
         df_sorted = pd.concat([df_sorted, pd.DataFrame(rolling_cols, index=df_sorted.index)], axis=1)
 
-    # Get latest rolling values
-    latest_rolling = df_sorted.sort_values("Fecha").groupby("Unit").last().reset_index()
+    # Get latest rolling values (df_sorted is still Unit+Fecha ordered here —
+    # concat above doesn't reorder rows, so no re-sort is needed)
+    latest_rolling = df_sorted.groupby("Unit").last().reset_index()
 
     # Merge rolling into df_latest (all at once to avoid fragmentation)
     new_cols = {}

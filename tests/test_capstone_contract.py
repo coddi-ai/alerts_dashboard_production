@@ -4,9 +4,10 @@ import pandas as pd
 
 from dashboard.components.alerts_charts import (
     FEATURE_NAMES_ES,
+    PARETO_BAR_COLOR,
     create_alerts_per_unit_chart,
     create_alerts_per_week_chart,
-    create_system_distribution_pie_chart,
+    create_system_signal_treemap,
     create_context_kpis_cards_golden,
     create_sensor_trends_chart_golden,
 )
@@ -160,14 +161,67 @@ def test_capstone_system_labels_are_translated_in_alert_charts():
 
     unit_chart = create_alerts_per_unit_chart(alerts)
     week_chart = create_alerts_per_week_chart(alerts)
-    pie_chart = create_system_distribution_pie_chart(alerts)
+    system_chart = create_system_signal_treemap(alerts)
 
     assert translate_alert_system("motor") == "Motor"
-    assert {trace.name for trace in unit_chart.data} == {"Motor"}
-    assert unit_chart.data[0].marker.color == "#355c7d"
+    # Pareto chart: units on X, a single (non-system) bar color, and a
+    # cumulative-percentage line that reaches 100% at the last point.
+    assert list(unit_chart.data[0].x) == ["CA-42"]
+    assert unit_chart.data[0].marker.color == PARETO_BAR_COLOR
+    assert unit_chart.data[1].y[-1] == 100
     assert {trace.name for trace in week_chart.data} == {"Motor"}
-    assert set(pie_chart.data[0].labels) == {"Motor"}
-    assert list(pie_chart.data[0].marker.colors) == ["#355c7d"]
+    # System/signal treemap: translated Sistema is the sole level-1 node,
+    # colored via the shared system palette, and every node (including its
+    # signal leaf) carries the system in customdata for click-to-filter.
+    assert list(system_chart.data[0].labels) == ["Motor", "Sin señal registrada"]
+    assert list(system_chart.data[0].parents) == ["", "Motor"]
+    assert list(system_chart.data[0].marker.colors) == ["#355c7d", "#355c7d"]
+    assert list(system_chart.data[0].customdata) == ["Motor", "Motor"]
+
+
+def test_capstone_single_system_treemap_groups_by_familia():
+    # Capstone alerts are all "motor" (a single system), so the treemap
+    # should switch to Familia -> Señal/Variable using the real
+    # config/features/capstone.yaml functional_group mapping instead of
+    # collapsing everything under one "Motor" system tile.
+    alerts = pd.DataFrame(
+        [
+            {"UnitId": "CA-1", "sistema": "motor", "Timestamp": "2026-07-10T12:00:00", "Trigger_Var": "coolant_temp_c"},
+            {"UnitId": "CA-2", "sistema": "motor", "Timestamp": "2026-07-10T12:05:00", "Trigger_Var": "coolant_pressure_psi"},
+            {"UnitId": "CA-3", "sistema": "motor", "Timestamp": "2026-07-10T12:10:00", "Trigger_Var": "egt_01_c"},
+            # 'egt_lb_c' has no standalone feature entry - it only appears
+            # inside egt_bank_diff's `derived` formula - so this also proves
+            # the derived-formula token fallback resolves to the same
+            # functional_group ('egt') as its sibling source_column.
+            {"UnitId": "CA-4", "sistema": "motor", "Timestamp": "2026-07-10T12:15:00", "Trigger_Var": "egt_lb_c"},
+        ]
+    )
+
+    system_chart = create_system_signal_treemap(alerts, client="CAPSTONE")
+
+    root_labels = set(system_chart.data[0].parents) | set(system_chart.data[0].labels)
+    assert "Refrigerante" in root_labels  # coolant
+    assert "Gases de escape (EGT)" in root_labels  # egt
+    # No raw functional_group identifier (e.g. "coolant", "egt") should leak.
+    assert "coolant" not in root_labels
+    assert "egt" not in root_labels
+    # Every node still carries the (single, constant) owning system in
+    # customdata, so click-to-filter keeps working unchanged.
+    assert set(system_chart.data[0].customdata) == {"Motor"}
+
+
+def test_capstone_treemap_falls_back_to_sistema_without_client_or_mapping():
+    alerts = pd.DataFrame(
+        [{"UnitId": "CA-1", "sistema": "motor", "Timestamp": "2026-07-10T12:00:00", "Trigger_Var": "coolant_temp_c"}]
+    )
+
+    # No client passed at all.
+    no_client_chart = create_system_signal_treemap(alerts)
+    assert list(no_client_chart.data[0].labels) == ["Motor", "Temperatura del refrigerante"]
+
+    # Client with no matching config/features/{client}.yaml.
+    unknown_client_chart = create_system_signal_treemap(alerts, client="UNKNOWN_CLIENT")
+    assert list(unknown_client_chart.data[0].labels) == ["Motor", "Temperatura del refrigerante"]
 
 
 def test_capstone_state_markers_and_legend_use_semantic_colors():

@@ -104,6 +104,13 @@ USERS: Dict[str, Dict[str, any]] = {
         "clients": ALL,
         "role": "admin"
     },
+    # Francisco Vilches - Coddi Administrator with access to all data
+    "r.monsalves": {
+        "password": hash_password("Coddi.2026"),  # Change in production!
+        "name": "Rodrigo Monsalves",
+        "clients": ALL,
+        "role": "admin"
+    },
     # Data Team - Coddi Administrator with access to all data
     "data_team": {
         "password": hash_password("Coddi.2026"),  # Change in production!

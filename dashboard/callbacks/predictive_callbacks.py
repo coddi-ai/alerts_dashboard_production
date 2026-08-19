@@ -27,6 +27,16 @@ from dashboard.tabs.tab_predictive_evidence import (
 
 logger = get_logger(__name__)
 
+# Predictivo component key -> oil componentNameNormalized values it should
+# match, for clients whose oil naming is more specific than Predictivo's
+# coarse key. Applies across all clients (not just the ones that currently
+# need it) - e.g. Capstone's engine oil samples are grouped under "motor
+# diesel" rather than the bare "motor" that CDA uses, but "motor" should
+# always resolve to the diesel engine, never to a traction motor.
+_OIL_COMPONENT_ALIASES = {
+    "motor": {"motor", "motor diesel"},
+}
+
 
 def _normalize_unit_id(unit_id):
     """T_09 -> T_9, same criterion used across the predictive module."""
@@ -44,20 +54,25 @@ def _load_real_oil_samples(client, component, unit):
     Load real (non-forward-filled) oil samples for a component/unit from the
     oil technique's golden layer (data/oil/golden/{client}/classified.parquet).
 
-    Predictivo's component.csv carries oil values forward across every daily
-    row between samples, which makes the timeseries chart look like a
-    staircase. This reads the actual lab reports instead - one row per real
-    sample - so the chart reflects true sample-to-sample variation.
+    Predictivo's component key ("motor", "transmision") is the grouped/coarse
+    granularity, so it's matched against componentNameNormalized (Oil Data
+    Contract v2.8: componentName is the fine-grained original name, e.g.
+    "mando final izquierdo"; componentNameNormalized is the grouped version,
+    e.g. "mando final" - the one that lines up with Predictivo's key). Falls
+    back to componentName only if a client's classified.parquet has no
+    componentNameNormalized column at all.
 
-    Matches on componentName / componentNameNormalized (case-insensitive,
-    exact) - this works for clients where the oil naming already aligns with
-    the Predictivo component key (e.g. CDA's "motor"/"transmision"). Returns
-    None when no matching rows are found, so the caller can fall back to the
-    component.csv data instead of showing an empty chart.
+    Also consults _OIL_COMPONENT_ALIASES so a Predictivo key can match a more
+    specific oil component name (e.g. "motor" -> "motor diesel"), without
+    pulling in unrelated components that merely start with the same word
+    (e.g. Capstone's traction motors).
+
+    Returns None when nothing matches, so the caller can show an empty state
+    instead of a fabricated chart.
     """
     try:
         df_classified = load_oil_classified(client)
-    except Exception as exc:  # noqa: BLE001 - fall back to component.csv on any issue
+    except Exception as exc:  # noqa: BLE001 - treat as no data on any load issue
         logger.warning(f"No se pudo cargar classified.parquet para {client}: {exc}")
         return None
 
@@ -65,15 +80,15 @@ def _load_real_oil_samples(client, component, unit):
         return None
 
     comp_key = (component or "").strip().lower()
-    name_cols = [c for c in ("componentName", "componentNameNormalized") if c in df_classified.columns]
-    if not name_cols:
+    match_keys = _OIL_COMPONENT_ALIASES.get(comp_key, {comp_key})
+    if "componentNameNormalized" in df_classified.columns:
+        name_col = "componentNameNormalized"
+    elif "componentName" in df_classified.columns:
+        name_col = "componentName"
+    else:
         return None
 
-    mask = pd.Series(False, index=df_classified.index)
-    for col in name_cols:
-        mask = mask | (df_classified[col].astype(str).str.strip().str.lower() == comp_key)
-
-    comp_rows = df_classified[mask]
+    comp_rows = df_classified[df_classified[name_col].astype(str).str.strip().str.lower().isin(match_keys)]
     if comp_rows.empty or "unitId" not in comp_rows.columns:
         return None
 
@@ -516,30 +531,19 @@ def register_callbacks(app):
         oil_labels = OIL_LABELS.get(_ckey, OIL_LABELS["cda"])
         oil_limits_four = load_predictive_oil_limits_four(_ckey, component)
 
-        components = _discover_components(client)
-        filepath = components.get(component)
-        if not filepath:
-            return html.P("No hay datos disponibles.", className="text-muted")
-
-        df, _ = _load_evidence_component(filepath, component, client)
-        if df is None:
-            return html.P("No hay datos disponibles.", className="text-muted")
-
-        df_unit = df[df["Unit"] == selected_unit].sort_values("Fecha")
-        if df_unit.empty:
-            return html.P("No hay datos para esta unidad.", className="text-muted")
-
-        # Prefer real (non-forward-filled) samples from the oil golden layer so
-        # the chart shows true sample-to-sample variation instead of a
-        # staircase. Falls back to component.csv when the oil dataset has no
-        # matching component/unit rows (e.g. naming mismatch for this client).
+        # Real (non-forward-filled) samples from the oil technique's golden
+        # layer - component.csv forward-fills oil values across every daily
+        # row between samples, which is what produced the staircase. This is
+        # now the sole source for this chart; if there are no matching real
+        # samples we show an empty state instead of falling back to it.
         df_oil_real = _load_real_oil_samples(client, component, selected_unit)
-        use_real = df_oil_real is not None and any(v in df_oil_real.columns for v in selected_vars)
-        df_for_chart = df_oil_real if use_real else df_unit
+        if df_oil_real is None or not any(v in df_oil_real.columns for v in selected_vars):
+            return html.P("No hay muestras de aceite reales disponibles para este componente.",
+                         className="text-muted", style={"fontSize": "13px", "padding": "20px", "textAlign": "center"})
 
         # Always pass limits — the chart function shows limit lines when len(vars)==1
         fig = create_oil_timeseries_90d(
-            df_for_chart, selected_vars, oil_labels,
+            df_oil_real, selected_vars, oil_labels,
             oil_limits_four=oil_limits_four,
             oil_range=oil_range,
         )
