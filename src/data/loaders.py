@@ -788,6 +788,50 @@ def load_analisis_inteligente(client: str) -> pd.DataFrame:
     return _load_analisis_inteligente_cached((client or '').lower()).copy(deep=True)
 
 
+def _filter_analisis_inteligente_component(df: pd.DataFrame, component: str = None) -> pd.DataFrame:
+    """Narrow analisis_inteligente rows to `component` when the column supports it.
+
+    Falls back to the unfiltered frame if `componente` is absent or the filter
+    would drop every row, so callers on clients/files without this column
+    keep working exactly as before.
+    """
+    if not component or "componente" not in df.columns:
+        return df
+    filtered = df[df["componente"].astype(str).str.lower() == str(component).lower()]
+    return filtered if not filtered.empty else df
+
+
+def get_latest_analisis_inteligente(client: str, component: str = None) -> pd.DataFrame:
+    """One row per Unit: the most recent analisis_inteligente.parquet row.
+
+    Used by Predictivo -> Estado de Flota (REQ-PR-04) to read `estado` per
+    unit instead of computing status from ranking thresholds, mirroring how
+    Evidencia (REQ-PR-03) already reads this file.
+    """
+    df = load_analisis_inteligente(client)
+    if df.empty or "Unit" not in df.columns:
+        return df
+    df = _filter_analisis_inteligente_component(df, component)
+    if "Fecha" in df.columns:
+        df = df.sort_values("Fecha")
+    return df.groupby("Unit", as_index=False).last()
+
+
+def get_model_run_date(client: str, component: str = None):
+    """Latest `Fecha` in analisis_inteligente.parquet — the model's last run date.
+
+    Shared by Estado de Flota and Evidencia (REQ-PR-08) so both tabs always
+    show the same date. Returns None if unavailable.
+    """
+    df = load_analisis_inteligente(client)
+    if df.empty or "Fecha" not in df.columns:
+        return None
+    df = _filter_analisis_inteligente_component(df, component)
+    if df.empty:
+        return None
+    return df["Fecha"].max()
+
+
 @lru_cache(maxsize=8)
 def _load_machine_status_cached(client: str) -> pd.DataFrame:
     """

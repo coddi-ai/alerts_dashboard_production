@@ -31,7 +31,7 @@ from dashboard.components.predictive_charts import (
 from dashboard.components.predictive_tables import create_oil_variables_table
 from dashboard.components.oil_charts import get_essay_limits_four, classify_four_limit_value
 from dashboard.components.ai_analysis_panel import create_ai_analysis_panel
-from src.data.loaders import load_analisis_inteligente
+from src.data.loaders import load_analisis_inteligente, get_model_run_date
 
 logger = get_logger(__name__)
 
@@ -629,12 +629,18 @@ def render_initial_content(unit, df, df_latest, component="motor", client=None):
 
     component_label = (component or "").title()
 
+    # Model run date (REQ-PR-08) - same source/value as Estado de Flota's KPI,
+    # so the two tabs never disagree.
+    model_run_date = get_model_run_date(client, component) if client else None
+    model_run_date_str = model_run_date.strftime("%d %b %Y") if model_run_date is not None else "—"
+
     kpis = [
         _kpi_card("Ranking actual", f"{ranking_val:.0f}", _ranking_color(ranking_val), "escala 0-100"),
         _kpi_card("Riesgo acum. 90d", f"{ranking_90d_val:.1f}", _ranking_color(ranking_90d_val), "índice histórico"),
         _kpi_card(f"Horas del {component_label}", horometro_value, "#0891B2", horometro_sub),
         _kpi_card("Modo dominante", dominant_label, "#7C3AED", f"Score: {fm_scores[dominant_mode]:.1f}"),
         _kpi_card("Última evidencia", last_date_str, "#6B7280", "fecha más reciente"),
+        _kpi_card("Fecha Ejecución Modelo", model_run_date_str, "#6B7280", "analisis_inteligente.parquet"),
     ]
 
     # Fleet charts

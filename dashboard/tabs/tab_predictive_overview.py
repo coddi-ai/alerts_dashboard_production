@@ -6,6 +6,7 @@ Supports multi-component model: auto-discovers component CSVs (motor, transmisio
 from dash import html, dcc
 import pandas as pd
 import os
+import re
 from functools import lru_cache
 from pathlib import Path
 from config.settings import get_settings
@@ -21,6 +22,7 @@ from dashboard.components.accumulated_curve import (
     build_accumulated_figure,
     _empty_state as _accumulated_empty_state,
 )
+from src.data.loaders import get_latest_analisis_inteligente, get_model_run_date
 
 logger = get_logger(__name__)
 
@@ -143,10 +145,53 @@ def _load_component_data(filepath: Path, component: str, client: str = "cda"):
 
 def _status_colors(status: str) -> dict:
     return {
-        "Crítica":   {"border": "#e24b4a", "bg": "#fcebeb", "text": "#a32d2d"},
-        "Alerta":    {"border": "#ef9f27", "bg": "#faeeda", "text": "#854f0b"},
-        "Saludable": {"border": "#1d9e75", "bg": "#eaf3de", "text": "#3b6d11"},
+        "Anormal": {"border": "#e24b4a", "bg": "#fcebeb", "text": "#a32d2d"},
+        "Alerta":  {"border": "#ef9f27", "bg": "#faeeda", "text": "#854f0b"},
+        "Normal":  {"border": "#1d9e75", "bg": "#eaf3de", "text": "#3b6d11"},
     }.get(status, {"border": "#888", "bg": "#f0f0f0", "text": "#444"})
+
+
+# Group order for priority cards: Anormal, then Alerta, then Normal (REQ-PR-07)
+_STATUS_RANK = {"Anormal": 0, "Alerta": 1, "Normal": 2}
+
+# Section header text above each status group (REQ-PR-11)
+_STATUS_GROUP_LABELS = {
+    "Anormal": "Unidades Anormales",
+    "Alerta": "Unidades Alerta",
+    "Normal": "Unidades Normales",
+}
+
+
+def _normalize_unit_id(uid) -> str:
+    """T_09 -> T_9. Component CSVs zero-pad unit ids; analisis_inteligente.parquet
+    doesn't, so lookups against it must normalize both sides first."""
+    m = re.match(r"^([A-Za-z]+_)0*(\d+)$", str(uid))
+    return f"{m.group(1)}{m.group(2)}" if m else str(uid)
+
+
+def attach_status(latest: pd.DataFrame, client: str, component: str) -> pd.DataFrame:
+    """Attach `estado` from analisis_inteligente.parquet as `status` (REQ-PR-04).
+
+    Units with no analisis_inteligente row (e.g. not yet scored) default to
+    "Normal" so only the three file-defined labels ever appear (REQ-PR-05).
+    """
+    latest = latest.copy()
+    ai_latest = get_latest_analisis_inteligente(client, component) if client else pd.DataFrame()
+    if not ai_latest.empty and "estado" in ai_latest.columns:
+        # Title-case the raw value: the file's casing isn't guaranteed (seen as
+        # both "Normal" and "normal"), but status/color/sort lookups below key
+        # off the exact capitalized labels "Normal"/"Alerta"/"Anormal".
+        estado_map = {
+            _normalize_unit_id(u): str(e).strip().title()
+            for u, e in zip(ai_latest["Unit"], ai_latest["estado"])
+        }
+    else:
+        estado_map = {}
+    latest["status"] = latest["Unit"].apply(
+        lambda u: estado_map.get(_normalize_unit_id(u), "Normal")
+    )
+    latest["_status_rank"] = latest["status"].map(_STATUS_RANK).fillna(3)
+    return latest
 
 
 def _score_cell_style(value: float) -> dict:
@@ -197,11 +242,13 @@ def _priority_card(unit, score, acum_30d, delta, status, drivers, horometro_text
                       style={"background": colors["bg"], "color": colors["text"]}),
         ], className="pc-header"),
         html.Div([
-            html.Span(f"{score:.0f}", className="pc-score"),
-            html.Span(delta_txt, className=delta_cls),
+            html.Span(f"{acum_30d:.0f}", className="pc-score"),
         ], className="pc-score-row"),
         html.Div([
-            html.Span(f"Prom 30d: {acum_30d:.1f}", className="pc-acum"),
+            html.Span([
+                html.Span(f"Reciente: {score:.1f}", className="pc-acum"),
+                html.Span(delta_txt, className=delta_cls, style={"marginLeft": "6px"}),
+            ], style={"display": "inline-flex", "alignItems": "center"}),
             html.Span([
                 html.I(className="fas fa-clock", style={"fontSize": "10px", "marginRight": "4px", "opacity": "0.7"}),
                 horometro_text,
@@ -216,65 +263,86 @@ def _priority_card(unit, score, acum_30d, delta, status, drivers, horometro_text
        style={"borderLeftColor": colors["border"]})
 
 
-def _failure_table(sorted_df, sort_col, failure_modes):
+# Ranking window options for the bottom table's single ranking column (REQ-PR-09)
+WINDOW_LABELS = {
+    "ranking": "Hoy",
+    "avg_ranking_30d": "Prom 30d",
+    "avg_ranking_60d": "Prom 60d",
+    "ranking_acum_90d": "Prom 90d",
+}
+WINDOW_SUFFIX = {
+    "ranking": "",
+    "avg_ranking_30d": "_30d",
+    "avg_ranking_60d": "_60d",
+    "ranking_acum_90d": "_90d",
+}
+
+
+def _failure_table(sorted_df, window, sort_by, ascending, failure_modes):
+    """Bottom ranking table: one ranking column driven by `window`, plus one
+    column per failure mode. `sort_by` is either `window` itself or a failure
+    mode key - clicking a failure-mode header sorts by that column (REQ-PR-10)
+    while the ranking column stays a single value driven by the window
+    dropdown (REQ-PR-09, option ii).
+    """
     fm_keys = list(failure_modes.keys())
     fm_labels = list(failure_modes.values())
+    fm_suffix = WINDOW_SUFFIX.get(window, "_30d")
 
-    _fm_suffix_map = {
-        "ranking": "",
-        "avg_ranking_30d": "_30d",
-        "avg_ranking_60d": "_60d",
-        "ranking_acum_90d": "_90d",
-    }
-    fm_suffix = _fm_suffix_map.get(sort_col, "_30d")
+    def _arrow(is_active):
+        return ("↑" if ascending else "↓") if is_active else ""
 
-    def _th(label, col_id):
-        is_active = col_id == sort_col
+    def _th_label(label, is_active):
+        return html.Div([
+            html.Span(label),
+            html.Span(_arrow(is_active), style={
+                "marginLeft": "4px", "fontSize": "10px", "opacity": "0.6",
+            }),
+        ], style={"display": "flex", "alignItems": "center", "gap": "2px"})
+
+    ranking_active = sort_by == window
+    ranking_th = html.Th(
+        _th_label(WINDOW_LABELS.get(window, "Prom 30d"), ranking_active),
+        className="fm-th fm-th-active" if ranking_active else "fm-th",
+    )
+
+    def _fm_th(label, key):
+        is_active = key == sort_by
         return html.Th(
-            html.Div([
-                html.Span(label),
-                html.Span("↓" if is_active else "", style={
-                    "marginLeft": "4px", "fontSize": "10px", "opacity": "0.6",
-                }),
-            ], style={"display": "flex", "alignItems": "center", "gap": "2px"}),
+            html.Button(
+                _th_label(label, is_active),
+                id={"type": "predictive-fm-col-header", "key": key},
+                n_clicks=0,
+                style={
+                    "background": "none", "border": "none", "padding": 0, "margin": 0,
+                    "font": "inherit", "color": "inherit", "cursor": "pointer", "width": "100%",
+                },
+            ),
             className="fm-th fm-th-active" if is_active else "fm-th",
         )
 
     header = html.Thead(html.Tr([
         html.Th("Unidad", className="fm-th fm-th-unit"),
-        _th("Hoy", "ranking"),
-        _th("Prom 30d", "avg_ranking_30d"),
-        _th("Prom 60d", "avg_ranking_60d"),
-        _th("Prom 90d", "ranking_acum_90d"),
+        ranking_th,
         html.Th("Status", className="fm-th"),
-        *[_th(lbl, key) for key, lbl in zip(fm_keys, fm_labels)],
+        *[_fm_th(lbl, key) for key, lbl in zip(fm_keys, fm_labels)],
     ]))
 
     rows = []
     for _, r in sorted_df.iterrows():
         status = r["status"]
         colors = _status_colors(status)
-        ranking_today = float(r.get("ranking", 0))
-        avg30 = float(r.get("avg_ranking_30d", 0))
-        avg60 = float(r.get("avg_ranking_60d", 0))
-        avg90 = float(r.get("ranking_acum_90d", 0))
+        ranking_val = float(r[window]) if window in r.index and pd.notna(r[window]) else 0.0
 
-        def _avg_cell(val, col_id):
-            s = _score_cell_style(val)
-            is_sort = col_id == sort_col
-            return html.Td(
-                f"{val:.1f}",
-                className="fm-td fm-td-score fm-td-active" if is_sort else "fm-td fm-td-score",
-                style={"background": s["background"], "color": s["text"],
-                       "fontWeight": "600" if is_sort else "500"},
-            )
-
+        style = _score_cell_style(ranking_val)
         cells = [
             html.Td(r["Unit"], className="fm-td fm-td-unit"),
-            _avg_cell(ranking_today, "ranking"),
-            _avg_cell(avg30, "avg_ranking_30d"),
-            _avg_cell(avg60, "avg_ranking_60d"),
-            _avg_cell(avg90, "ranking_acum_90d"),
+            html.Td(
+                f"{ranking_val:.1f}",
+                className="fm-td fm-td-score fm-td-active" if ranking_active else "fm-td fm-td-score",
+                style={"background": style["background"], "color": style["text"],
+                       "fontWeight": "600" if ranking_active else "500"},
+            ),
             html.Td(
                 html.Span(status, className="status-badge",
                           style={"background": colors["bg"], "color": colors["text"]}),
@@ -285,12 +353,12 @@ def _failure_table(sorted_df, sort_col, failure_modes):
         for key in fm_keys:
             col_name = f"{key}{fm_suffix}" if fm_suffix else key
             val = float(r[col_name]) if col_name in r.index and pd.notna(r[col_name]) else 0.0
-            style = _score_cell_style(val)
-            is_sort = key == sort_col
+            fm_style = _score_cell_style(val)
+            is_sort = key == sort_by
             cells.append(html.Td(
                 f"{val:.0f}",
                 className="fm-td fm-td-score fm-td-active" if is_sort else "fm-td fm-td-score",
-                style={"background": style["background"], "color": style["text"],
+                style={"background": fm_style["background"], "color": fm_style["text"],
                        "fontWeight": "600" if is_sort else "500"},
             ))
 
@@ -343,11 +411,11 @@ def _render_component_overview(df_latest, prev_ranking, component: str,
     """
     Render overview content for a specific component.
 
-    Si el cliente tiene datos de horas de componente disponibles (archivo
-    parquet presente) y la curva acumulada se puede construir, el hero de KPIs
-    se reemplaza por el "Estado de Flota" clasificado según la curva acumulada
-    (Anormal / Alerta / Normal) y se inserta la curva acumulada entre el hero y
-    las priority cards. Si no hay datos de horas, se usa el hero clásico.
+    Status (Anormal / Alerta / Normal) comes from `estado` in
+    analisis_inteligente.parquet for every client (REQ-PR-04/05) - there is a
+    single hero regardless of whether component-hours data is available. The
+    accumulated-risk curve, when buildable, is still shown as its own section
+    further down the page; it no longer drives the hero's counts.
 
     Args:
         df: histórico completo del componente (Unit, Fecha, ranking, ...),
@@ -355,70 +423,35 @@ def _render_component_overview(df_latest, prev_ranking, component: str,
     """
     failure_modes = get_failure_modes_dict(component, client)
 
-    # Status classification (fixed thresholds)
-    latest = df_latest.copy()
+    latest = attach_status(df_latest, client, component)
     avg_ranking = float(latest["ranking"].mean())
 
-    latest["status"] = "Saludable"
-    latest.loc[
-        (latest["avg_ranking_30d"] >= 30) | (latest["max_fm_30d"] >= 50),
-        "status",
-    ] = "Alerta"
-    latest.loc[
-        (latest["avg_ranking_30d"] >= 60) | (latest["max_fm_30d"] >= 80),
-        "status",
-    ] = "Crítica"
-
     counts = latest["status"].value_counts()
-    n_critical = counts.get("Crítica", 0)
+    n_anormal = counts.get("Anormal", 0)
     n_alert = counts.get("Alerta", 0)
-    n_healthy = counts.get("Saludable", 0)
+    n_normal = counts.get("Normal", 0)
 
-    # ── Intentar curva acumulada + hero por zonas (solo si hay horas) ──
+    model_run_date = get_model_run_date(client, component) if client else None
+    model_run_date_str = model_run_date.strftime("%d %b %Y") if model_run_date is not None else "—"
+
+    # ── Curva acumulada (solo si hay horas de componente) ──
     # Requiere el histórico completo (df) y que exista el parquet de horas para
-    # este cliente. Si algo falta, se usa el hero clásico de más abajo.
+    # este cliente; si algo falta, la sección se omite (no afecta el hero).
     df_component_hours = _load_component_hours_if_available(client)
     accumulated = None
-    zone_hero = None
 
     if df is not None and not df.empty and df_component_hours is not None:
         try:
             df_acum = build_accumulated_data(df, df_component_hours, component)
             if not df_acum.empty:
-                _fig, resumen = build_accumulated_figure(df_acum, component=component)
+                _fig, _resumen = build_accumulated_figure(df_acum, component=component)
                 if _fig is not None:
-                    # Conteos por zona desde la clasificación de la curva
-                    n_anormal = n_zone_alert = n_zone_normal = 0
-                    if resumen is not None and not resumen.empty and "zona_final" in resumen.columns:
-                        zc = resumen["zona_final"].value_counts()
-                        n_anormal = int(zc.get("Anormal", 0))
-                        n_zone_alert = int(zc.get("Alerta", 0))
-                        n_zone_normal = int(zc.get("Normal", 0))
-
-                    zone_hero = html.Div([
-                        html.Div([
-                            html.Div([
-                                html.I(className="fas fa-chart-bar me-2"),
-                                f"Estado de Flota — {component.title()}"
-                            ], className="page-title", style={"display": "flex", "alignItems": "center"}),
-                            html.Div("Clasificación según curva acumulada de riesgo", className="page-subtitle"),
-                        ], style={"marginBottom": "16px"}),
-                        create_kpi_row([
-                            create_kpi_card(n_anormal, "Unidades Anormal", "fas fa-exclamation-triangle", "danger", "> media + 2σ"),
-                            create_kpi_card(n_zone_alert, "Unidades en Alerta", "fas fa-exclamation-circle", "warning", "entre media y media + 2σ"),
-                            create_kpi_card(n_zone_normal, "Unidades Normal", "fas fa-check-circle", "success", "bajo la media de flota"),
-                        ])
-                    ])
-
-                    # La sección de curva se inserta entre el hero y las cards
                     accumulated = render_accumulated_section(df, df_component_hours, component)
         except Exception as exc:  # noqa: BLE001 - la curva nunca rompe el overview
             logger.warning(f"No se pudo construir la curva acumulada para {client}/{component}: {exc}")
             accumulated = None
-            zone_hero = None
 
-    # ── Hero clásico (fallback cuando no hay horas / no hay curva) ──
-    classic_hero = html.Div([
+    hero = html.Div([
         html.Div([
             html.Div([
                 html.I(className="fas fa-chart-bar me-2"),
@@ -428,14 +461,12 @@ def _render_component_overview(df_latest, prev_ranking, component: str,
         ], style={"marginBottom": "16px"}),
         create_kpi_row([
             create_kpi_card(f"{avg_ranking:.1f}", "Ranking Flota", "fas fa-tachometer-alt", "primary", "promedio actual"),
-            create_kpi_card(n_critical, "Unidades Críticas", "fas fa-exclamation-triangle", "danger", "media 30d ≥60 ó modo falla ≥80"),
-            create_kpi_card(n_alert, "Unidades en Alerta", "fas fa-exclamation-circle", "warning", "media 30d ≥30 ó modo falla ≥50"),
-            create_kpi_card(n_healthy, "Unidades Saludables", "fas fa-check-circle", "success", "media 30d <30 y modos falla <50"),
+            create_kpi_card(n_anormal, "Unidades Anormales", "fas fa-exclamation-triangle", "danger"),
+            create_kpi_card(n_alert, "Unidades en Alerta", "fas fa-exclamation-circle", "warning"),
+            create_kpi_card(n_normal, "Unidades Normales", "fas fa-check-circle", "success"),
+            create_kpi_card(model_run_date_str, "Fecha Ejecución Modelo", "fas fa-calendar-check", "info"),
         ])
     ])
-
-    # Zone hero reemplaza al clásico solo si se pudo construir
-    hero = zone_hero if zone_hero is not None else classic_hero
 
     # Priority cards — load horómetro data
     import re as _re
@@ -471,8 +502,8 @@ def _render_component_overview(df_latest, prev_ranking, component: str,
         m = _re.match(r'^([A-Za-z]+_)0*(\d+)$', str(uid))
         return f"{m.group(1)}{m.group(2)}" if m else str(uid)
 
-    cards = []
-    for _, r in latest.sort_values("avg_ranking_30d", ascending=False).iterrows():
+    cards_by_status = {"Anormal": [], "Alerta": [], "Normal": []}
+    for _, r in latest.sort_values(["_status_rank", "avg_ranking_30d"], ascending=[True, False]).iterrows():
         score = r["ranking"]
         delta = score - prev_ranking.get(r["Unit"], score)
         drivers = sorted(
@@ -482,12 +513,41 @@ def _render_component_overview(df_latest, prev_ranking, component: str,
         )[:3]
         unit_norm = _norm_uid_simple(r["Unit"])
         horo_text = horometro_map.get(unit_norm, "—")
-        cards.append(_priority_card(
+        card = _priority_card(
             unit=r["Unit"], score=score,
             acum_30d=float(r["avg_ranking_30d"]),
             delta=delta, status=r["status"], drivers=drivers,
             horometro_text=horo_text,
-        ))
+        )
+        cards_by_status.setdefault(r["status"], []).append(card)
+
+    # Section headers above each status group (REQ-PR-11) - groups with no
+    # units are skipped rather than shown empty. Any status outside the three
+    # known ones (shouldn't happen post attach_status, but don't silently
+    # drop cards if it does) is appended after, rather than lost.
+    known_statuses = ["Anormal", "Alerta", "Normal"]
+    extra_statuses = [s for s in cards_by_status if s not in known_statuses]
+    group_sections = []
+    for status in known_statuses + extra_statuses:
+        group_cards = cards_by_status.get(status, [])
+        if not group_cards:
+            continue
+        colors = _status_colors(status)
+        group_sections.append(html.Div([
+            html.Div([
+                html.Span(_STATUS_GROUP_LABELS.get(status, f"Unidades {status}"), style={
+                    "fontWeight": "700", "fontSize": "13px", "color": colors["text"],
+                    "textTransform": "uppercase", "letterSpacing": "0.04em",
+                }),
+                html.Span(f"({len(group_cards)})", style={
+                    "fontSize": "12px", "color": "var(--text-light)", "marginLeft": "6px",
+                }),
+            ], style={
+                "borderLeft": f"3px solid {colors['border']}",
+                "paddingLeft": "10px", "margin": "18px 0 10px",
+            }),
+            html.Div(group_cards, className="priority-grid"),
+        ]))
 
     priority = html.Div([
         html.Div([
@@ -495,9 +555,10 @@ def _render_component_overview(df_latest, prev_ranking, component: str,
                 html.I(className="fas fa-bullseye me-2"),
                 "Estado Flota — Prioridad"
             ], className="text-primary mb-3 mt-4"),
-            html.P("Unidades ordenadas por promedio de ranking de 30 días", className="text-muted mb-3"),
+            html.P("Agrupadas por estado (Anormal, Alerta, Normal) y ordenadas por promedio de ranking de 30 días",
+                   className="text-muted mb-3"),
         ]),
-        html.Div(cards, className="priority-grid"),
+        html.Div(group_sections),
     ])
 
     # Failure mode table
@@ -534,8 +595,12 @@ def _render_component_overview(df_latest, prev_ranking, component: str,
                    className="text-muted mb-3", style={"fontSize": "0.85rem"}),
         ]),
         html.Div(
-            _failure_table(sorted_df, "avg_ranking_30d", failure_modes),
+            _failure_table(sorted_df, "avg_ranking_30d", "avg_ranking_30d", False, failure_modes),
             id="predictive-fm-table-container",
+        ),
+        dcc.Store(
+            id="predictive-fm-table-state",
+            data={"window": "avg_ranking_30d", "sort_by": "avg_ranking_30d", "ascending": False},
         ),
     ], className="card", style={"marginTop": "16px"})
 

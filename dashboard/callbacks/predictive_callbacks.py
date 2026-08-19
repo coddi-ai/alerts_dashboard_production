@@ -4,7 +4,7 @@ Predictive callbacks - handles internal tab switching and evidence interactivity
 
 import re
 
-from dash import html, dcc, Input, Output, State, no_update
+from dash import html, dcc, Input, Output, State, no_update, ALL, ctx
 import pandas as pd
 from src.utils.logger import get_logger
 from config.settings import get_settings
@@ -18,6 +18,8 @@ from dashboard.tabs.tab_predictive_overview import (
     _load_component_data as _load_overview_component,
     _render_component_overview,
     _failure_table,
+    attach_status,
+    WINDOW_SUFFIX,
 )
 from dashboard.tabs.tab_predictive_evidence import (
     _load_component_data as _load_evidence_component,
@@ -202,51 +204,67 @@ def register_callbacks(app):
 
     @app.callback(
         Output("predictive-fm-table-container", "children"),
+        Output("predictive-fm-table-state", "data"),
         Input("predictive-fm-sort-selector", "value"),
+        Input({"type": "predictive-fm-col-header", "key": ALL}, "n_clicks"),
+        State("predictive-fm-table-state", "data"),
         State("predictive-ev-client-store", "data"),
         State("predictive-ev-component-store", "data"),
         prevent_initial_call=True,
     )
-    def sort_failure_mode_table(sort_col, client, component):
-        """Re-sort and re-render the failure mode table based on selected period."""
-        if not sort_col or not client or not component:
-            return no_update
+    def update_failure_mode_table(window, _header_clicks, state, client, component):
+        """Re-sort/re-render the failure mode table (REQ-PR-09/10).
+
+        The window dropdown ("Hoy"/"30 días"/"60 días"/"90 días") picks which
+        single ranking column is shown; changing it also re-sorts by that
+        column. Clicking a failure-mode column header instead sorts by that
+        mode's value at the current window, toggling ascending/descending on
+        repeated clicks of the same header.
+        """
+        if not window or not client or not component:
+            return no_update, no_update
 
         components = _discover_components(client)
         filepath = components.get(component)
         if not filepath:
-            return no_update
+            return no_update, no_update
 
         df, df_latest, _ = _load_overview_component(filepath, component, client)
         if df_latest is None or df_latest.empty:
-            return no_update
+            return no_update, no_update
 
         failure_modes = get_failure_modes_dict(component, client)
-
-        # Classify status (same logic as _render_component_overview)
-        # Saludable: avg_ranking_30d < 30 AND max_fm_30d < 50
-        # Alerta: 30 <= avg_ranking_30d < 60 OR 50 <= max_fm_30d < 80
-        # Crítico: avg_ranking_30d >= 60 OR max_fm_30d >= 80
-        latest = df_latest.copy()
-        latest["status"] = "Saludable"
-        latest.loc[
-            (latest["avg_ranking_30d"] >= 30) | (latest["max_fm_30d"] >= 50),
-            "status",
-        ] = "Alerta"
-        latest.loc[
-            (latest["avg_ranking_30d"] >= 60) | (latest["max_fm_30d"] >= 80),
-            "status",
-        ] = "Crítica"
-
-        # Sort by selected column descending (use 30d version for failure modes)
+        latest = attach_status(df_latest, client, component)
         fm_keys = list(failure_modes.keys())
-        actual_sort_col = f"{sort_col}_30d" if sort_col in fm_keys and f"{sort_col}_30d" in latest.columns else sort_col
+
+        state = dict(state or {})
+        triggered = ctx.triggered_id
+        if isinstance(triggered, dict) and triggered.get("type") == "predictive-fm-col-header":
+            key = triggered["key"]
+            if state.get("sort_by") == key:
+                state["ascending"] = not state.get("ascending", False)
+            else:
+                state["sort_by"] = key
+                state["ascending"] = False
+        else:
+            state["sort_by"] = window
+            state["ascending"] = False
+
+        sort_by = state.get("sort_by", window)
+        ascending = state.get("ascending", False)
+
+        if sort_by in fm_keys:
+            suffix = WINDOW_SUFFIX.get(window, "_30d")
+            actual_sort_col = f"{sort_by}{suffix}"
+        else:
+            actual_sort_col = sort_by
+
         if actual_sort_col in latest.columns:
-            sorted_df = latest.sort_values(actual_sort_col, ascending=False)
+            sorted_df = latest.sort_values(actual_sort_col, ascending=ascending)
         else:
             sorted_df = latest.sort_values("avg_ranking_30d", ascending=False)
 
-        return _failure_table(sorted_df, sort_col, failure_modes)
+        return _failure_table(sorted_df, window, sort_by, ascending, failure_modes), state
 
     # ══════════════════════════════════════════════════════════════════════════
     # EVIDENCE: Unit banner
