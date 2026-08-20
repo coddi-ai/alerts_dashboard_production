@@ -335,17 +335,21 @@ def update_data_freshness(_, selected_client):
             style_table={'overflowX': 'auto'},
             style_cell={
                 'textAlign': 'left',
-                'padding': '12px',
+                # General is the visual reference for the dashboard's
+                # compact status tables: smaller type and tighter cells keep
+                # the unit matrix scannable without overpowering the card.
+                'padding': '6px 12px',
                 'fontFamily': 'Arial, sans-serif',
-                'fontSize': '14px',
+                'fontSize': '13px',
                 'minWidth': '150px'
             },
             style_header={
                 'backgroundColor': '#f8f9fa',
                 'fontWeight': 'bold',
-                'border': '1px solid #dee2e6',
-                'fontSize': '14px',
-                'textAlign': 'center'
+                'borderBottom': '2px solid #dee2e6',
+                'fontSize': '12px',
+                'textAlign': 'center',
+                'padding': '8px',
             },
             # W34-02: generated from FRESHNESS_STATUS_STYLE instead of 8
             # hand-written rules repeating the same 4 colors twice (once per
