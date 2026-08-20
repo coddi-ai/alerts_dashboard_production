@@ -3,7 +3,7 @@ Callbacks for Data Freshness monitoring tab.
 Handles data loading and visualization for data update status monitoring.
 """
 
-from dash import callback, Output, Input, html, dash_table
+from dash import callback, Output, Input, html
 from dash.exceptions import PreventUpdate
 import pandas as pd
 from datetime import datetime, timedelta
@@ -255,10 +255,12 @@ def process_freshness_data(df: pd.DataFrame) -> pd.DataFrame:
             telem_row = telem_data.iloc[0]
             row['Telemetría'] = f"{telem_row['Status']} - {telem_row['Tiempo_Transcurrido']}"
             row['Telemetría_Status'] = telem_row['Status']
+            row['Telemetría_Tiempo'] = telem_row['Tiempo_Transcurrido']
             row['Telemetría_Color'] = telem_row['Color']
         else:
             row['Telemetría'] = 'Sin Datos - N/A'
             row['Telemetría_Status'] = 'Sin Datos'
+            row['Telemetría_Tiempo'] = 'N/A'
             row['Telemetría_Color'] = '#808080'
         
         # Tribology data - Combined format "Estado - Hace"
@@ -266,10 +268,12 @@ def process_freshness_data(df: pd.DataFrame) -> pd.DataFrame:
             tribo_row = tribo_data.iloc[0]
             row['Tribología'] = f"{tribo_row['Status']} - {tribo_row['Tiempo_Transcurrido']}"
             row['Tribología_Status'] = tribo_row['Status']
+            row['Tribología_Tiempo'] = tribo_row['Tiempo_Transcurrido']
             row['Tribología_Color'] = tribo_row['Color']
         else:
             row['Tribología'] = 'Sin Datos - N/A'
             row['Tribología_Status'] = 'Sin Datos'
+            row['Tribología_Tiempo'] = 'N/A'
             row['Tribología_Color'] = '#808080'
         
         pivot_data.append(row)
@@ -324,62 +328,59 @@ def update_data_freshness(_, selected_client):
         if df_processed.empty:
             return html.Div("Error procesando datos", className="text-center text-muted p-4")
         
-        # Create DataTable with conditional styling
-        table = dash_table.DataTable(
-            data=df_processed.to_dict('records'),
-            columns=[
-                {'name': 'Unidad', 'id': 'Unidad'},
-                {'name': 'Telemetría', 'id': 'Telemetría'},
-                {'name': 'Tribología', 'id': 'Tribología'},
-            ],
-            style_table={'overflowX': 'auto'},
-            style_cell={
-                'textAlign': 'left',
-                # General is the visual reference for the dashboard's
-                # compact status tables: smaller type and tighter cells keep
-                # the unit matrix scannable without overpowering the card.
-                'padding': '6px 12px',
-                'fontFamily': 'Arial, sans-serif',
-                'fontSize': '13px',
-                'minWidth': '150px'
-            },
-            style_header={
-                'backgroundColor': '#f8f9fa',
-                'fontWeight': 'bold',
-                'borderBottom': '2px solid #dee2e6',
-                'fontSize': '12px',
-                'textAlign': 'center',
-                'padding': '8px',
-            },
-            # W34-02: generated from FRESHNESS_STATUS_STYLE instead of 8
-            # hand-written rules repeating the same 4 colors twice (once per
-            # column) — the single source of truth also used by the legend.
-            style_data_conditional=[
-                *[
-                    {
-                        'if': {
-                            'filter_query': f'{{{column}_Status}} = "{status_label}"',
-                            'column_id': column,
-                        },
-                        'backgroundColor': style['bg'],
-                        'color': style['text'],
-                        'fontWeight': 'bold' if status_label != 'Sin Datos' else 'normal',
-                    }
-                    for column in ('Telemetría', 'Tribología')
-                    for status_label, style in FRESHNESS_STATUS_STYLE.items()
-                ],
-                # Alternate row colors
-                {
-                    'if': {'row_index': 'odd'},
-                    'backgroundColor': '#f9f9f9'
-                }
-            ],
-            page_size=20,
-            sort_action='native',
-            filter_action='native',
-        )
-        
-        return table
+        def make_status_badge(status: str, elapsed: str, data_type: str) -> html.Div:
+            """Render freshness using General's compact status-pill language."""
+            style_info = FRESHNESS_STATUS_STYLE.get(status, FRESHNESS_STATUS_STYLE['Sin Datos'])
+            label = f"{status} - {elapsed}"
+            return html.Div(
+                html.Span(
+                    f"{style_info['icon']} {label}",
+                    title=f"{data_type}: {label}",
+                    style={
+                        'backgroundColor': style_info['bg'],
+                        'color': style_info['text'],
+                        'padding': '2px 8px',
+                        'borderRadius': '4px',
+                        'fontWeight': 'normal' if status == 'Sin Datos' else 'bold',
+                        'fontSize': '11px',
+                        'cursor': 'help',
+                        'display': 'inline-block',
+                        'whiteSpace': 'nowrap',
+                    },
+                ),
+                style={'textAlign': 'center'},
+            )
+
+        table_rows = []
+        for _, row in df_processed.iterrows():
+            table_rows.append(html.Tr([
+                html.Td(row['Unidad'], style={
+                    'fontWeight': 'bold', 'fontSize': '13px', 'padding': '6px 12px'
+                }),
+                html.Td(make_status_badge(
+                    row['Telemetría_Status'], row['Telemetría_Tiempo'], 'Telemetría'
+                )),
+                html.Td(make_status_badge(
+                    row['Tribología_Status'], row['Tribología_Tiempo'], 'Tribología'
+                )),
+            ]))
+
+        table = html.Table([
+            html.Thead(html.Tr([
+                html.Th(col, style={
+                    'backgroundColor': '#f8f9fa', 'fontWeight': 'bold',
+                    'textAlign': 'center', 'fontSize': '12px', 'padding': '8px',
+                    'borderBottom': '2px solid #dee2e6',
+                    'position': 'sticky', 'top': '0', 'zIndex': '1',
+                })
+                for col in ['Unidad', 'Telemetría', 'Tribología']
+            ])),
+            html.Tbody(table_rows),
+        ], style={
+            'width': '100%', 'borderCollapse': 'collapse', 'fontSize': '13px'
+        })
+
+        return html.Div(table, style={'overflowX': 'auto'})
         
     except Exception as e:
         logger.error(f"Error in update_data_freshness: {e}", exc_info=True)
