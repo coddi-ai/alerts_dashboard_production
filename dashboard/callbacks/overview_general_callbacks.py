@@ -669,15 +669,31 @@ def create_critical_equipment_summary_table(df_telemetry: pd.DataFrame, df_oil: 
                 'equipo': equipo,
                 'priority': max(STATUS_PRIORITY.get(telem_status, 0), STATUS_PRIORITY.get(oil_status, 0)),
                 'row': html.Tr([
-                    html.Td(equipo, style={'fontWeight': 'bold', 'fontSize': '13px', 'padding': '6px 12px'}),
-                    html.Td(make_badge(telem_status, telem_reason)),
-                    html.Td(make_badge(oil_status, oil_reason)),
-                    html.Td(description, style={
-                        'fontSize': '11px', 'padding': '6px 12px',
-                        'color': '#495057', 'lineHeight': '1.4',
-                        'maxWidth': '400px',
+                    html.Td(equipo, style={
+                        'fontWeight': 'bold', 'fontSize': '14px', 'padding': '12px',
+                        'fontFamily': 'Arial, sans-serif', 'minWidth': '150px',
                     }),
-                ])
+                    html.Td(make_badge(telem_status, telem_reason), style={
+                        'padding': '12px', 'fontFamily': 'Arial, sans-serif',
+                        'fontSize': '14px', 'minWidth': '150px',
+                    }),
+                    html.Td(make_badge(oil_status, oil_reason), style={
+                        'padding': '12px', 'fontFamily': 'Arial, sans-serif',
+                        'fontSize': '14px', 'minWidth': '150px',
+                    }),
+                    html.Td(description, style={
+                        'fontSize': '14px', 'padding': '12px',
+                        'fontFamily': 'Arial, sans-serif',
+                        'color': '#495057', 'lineHeight': '1.4',
+                        'maxWidth': '520px', 'whiteSpace': 'normal',
+                    }),
+                ], style={
+                    # Match Estado de Datos' native table: subtle zebra rows
+                    # keep the wider General table easy to scan without
+                    # changing its existing priority ordering.
+                    'backgroundColor': '#f9f9f9' if len(table_rows) % 2 == 1 else '#ffffff',
+                    'borderBottom': '1px solid #dee2e6',
+                })
             })
         
         # ── Sort rows: most critical first, then alphabetical ──
@@ -696,16 +712,18 @@ def create_critical_equipment_summary_table(df_telemetry: pd.DataFrame, df_oil: 
             html.Thead(html.Tr([
                 html.Th(col, style={
                     'backgroundColor': '#f8f9fa', 'fontWeight': 'bold',
-                    'textAlign': 'center', 'fontSize': '12px', 'padding': '8px',
-                    'borderBottom': '2px solid #dee2e6', 'position': 'sticky', 'top': '0', 'zIndex': '1'
+                    'textAlign': 'center', 'fontSize': '14px', 'padding': '12px',
+                    'fontFamily': 'Arial, sans-serif', 'border': '1px solid #dee2e6',
+                    'position': 'sticky', 'top': '0', 'zIndex': '1'
                 })
                 for col in ['Unidad', col_telemetria, col_tribologia, 'Descripción']
             ])),
             html.Tbody(sorted_rows)
         ], style={
             'width': '100%', 'borderCollapse': 'collapse',
-            'fontSize': '13px'
-        })
+            'fontSize': '14px', 'fontFamily': 'Arial, sans-serif',
+            'border': '1px solid #dee2e6',
+        }, className='dashboard-status-table')
         
         return html.Div(table, style={
             'overflowX': 'auto'

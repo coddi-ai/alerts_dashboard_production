@@ -728,10 +728,24 @@ def _alert_case_header(row: pd.Series) -> html.Div:
                     # multitécnicas" KPI card (tab_alerts_general.py), not a
                     # solid fill with an implied (and untested) white text
                     # color — one visual rule for SOURCE_STYLE, not two.
-                    dbc.Badge(source_label, style={
+                    # Use a plain span instead of dbc.Badge here. Bootstrap's
+                    # badge defaults can add a dark secondary background that
+                    # makes the source color unreadable (especially for
+                    # Telemetría and Multitécnica). This explicit pill keeps
+                    # the shared source accent while matching the dashboard's
+                    # light, outlined status language.
+                    html.Span(source_label, className='alert-source-badge', style={
                         'backgroundColor': light_tint(source_badge_color),
                         'color': source_badge_color,
+                        'border': f'1px solid {source_badge_color}',
+                        'borderRadius': '999px',
+                        'display': 'inline-flex',
+                        'alignItems': 'center',
+                        'padding': '0.35rem 0.7rem',
+                        'fontSize': '0.75rem',
+                        'lineHeight': '1.1',
                         'fontWeight': '600',
+                        'whiteSpace': 'nowrap',
                     }),
                 ], xs=6, lg=2),
             ], className='g-3'),
