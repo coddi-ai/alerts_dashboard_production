@@ -302,6 +302,148 @@ _BLOCKING_FAILURES = {
 }
 
 
+# Estado visible mientras Campbell AI se inicializa.
+#
+# El badge nace con un texto fijo y solo cambia cuando el callback de servidor termina. Ese
+# callback hace una llamada HTTP bloqueante — dos al refrescar, porque la sesion sobrevive en
+# sessionStorage y entonces ademas se recupera el hilo — y un callback de Dash es atomico: no
+# puede emitir un valor intermedio. Durante toda la espera el texto no se mueve, y un texto
+# que no se mueve se lee como "se colgo".
+#
+# Todo lo que esto muestra es medido, nunca supuesto:
+#
+# - **La fase viene del servidor.** La API publica en que paso esta la llamada en vuelo y un
+#   callback de servidor la trae al store `campbell-ai-init-phase`. Cuando llega, el badge
+#   dice ese paso: "Leyendo datos", "Buscando conversacion".
+# - **La etiqueta de respaldo es real.** Si el servidor no contesta, o contesta que no sabe
+#   nada, se usa un hecho conocido aca: si el navegador trae `session_id`, el trabajo incluye
+#   recuperar la conversacion; si no, no.
+# - **El contador es real.** Es tiempo transcurrido, medido.
+#
+# Lo que no se hace, y es deliberado: una version anterior cambiaba el texto a los 8 y a los
+# 25 segundos ("validando fuentes de datos", "esperando a la API") como si supiera donde esta
+# el servidor. No lo sabia: eran nombres inventados disparados por un reloj. De ahi la regla
+# de este codigo — si el paso no vino del servidor, no se nombra.
+#
+# Por que vive aca y no en `dashboard/assets/`, que es donde estuvo y de donde se revirtio:
+# Dash registra los archivos de `assets/` una sola vez, en la primera request que atiende el
+# proceso, y despues hace `stat` de cada uno en cada render para versionarlo por mtime. El
+# despliegue monta el checkout dentro del contenedor (`./dashboard:/app/dashboard`), asi que
+# si el archivo deja de estar en el checkout mientras el proceso sigue vivo — una rama
+# anterior, un rollback — cada carga de pagina pasa a ser un 500 de Flask, y no se recupera
+# sola: el hot reload que limpiaria la lista esta apagado en produccion. Inline, el JS viaja
+# con el modulo que declara los callbacks y los dos no pueden separarse.
+#
+# El instalador es idempotente y se emite dentro de cada callback que lo usa: Dash no ofrece
+# un lugar donde correr un script una vez por pagina sin, justamente, un archivo en
+# `assets/`. La primera llamada construye el namespace; las demas reusan el ya construido.
+_STATUS_NAMESPACE_JS = """(function () {
+  var namespace = (window.dash_clientside = window.dash_clientside || {});
+  if (namespace.campbellAiStatus) return namespace.campbellAiStatus;
+
+  /* `written` es el ultimo texto que escribio este codigo, y es lo que define si el badge
+   * sigue siendo nuestro. Reconocerlo por forma no sirve: el mismo badge muestra "Pensando…
+   * 12s" y "Reintentando…" durante las respuestas, que tambien terminan en puntos
+   * suspensivos. Y reconocerlo por nombre tampoco: las fases las nombra el servidor, asi que
+   * agregar una alla dejaria a este codigo creyendo que la inicializacion termino. */
+  var state = { startedAt: 0, label: "", written: "" };
+
+  /* El texto con que nace el badge en el layout. Es nuestro aunque no lo hayamos escrito
+   * nosotros: es el estado con que arranca cada carga de pagina. */
+  var INITIAL_TEXT = "Inicializando…";
+
+  /* Antes de esto no se muestra el contador: un arranque rapido no necesita cronometro, y
+   * ponerlo desde el segundo cero convierte cualquier espera normal en algo que parece falla. */
+  var COUNTER_AFTER = 4;
+
+  /* Techo de seguridad. Si el badge sigue en progreso pasado esto, algo se perdio (un write
+   * del servidor que no llego, o un arranque que corrio despues de que el servidor termino) y
+   * seguir contando para siempre seria mentir con mas precision. */
+  var GIVE_UP_AFTER = 180;
+
+  function labelFor(sessionId) {
+    return sessionId ? "Recuperando" : "Inicializando";
+  }
+
+  /* Si el badge sigue mostrando lo ultimo que pusimos, la inicializacion sigue en curso.
+   * Cualquier otro texto vino de otro callback — "Listo · CDA", "Pensando… 12s", un error —
+   * y significa que este ciclo termino. */
+  function isOurs(text) {
+    if (typeof text !== "string" || !text) return false;
+    return text === state.written || text === INITIAL_TEXT;
+  }
+
+  /* La fase que informo el servidor, si informo alguna. */
+  function serverLabel(phase) {
+    if (!phase || typeof phase.label !== "string") return "";
+    return phase.label;
+  }
+
+  function write(text) {
+    state.written = text;
+    return text;
+  }
+
+  namespace.campbellAiStatus = {
+    /*
+     * Arranca el ciclo, salvo que el badge ya muestre un estado final: Dash no garantiza el
+     * orden entre este callback y el de servidor, y si el servidor gana la carrera, arrancar
+     * el latido aca dejaria el badge contando para siempre sobre una sesion ya lista.
+     */
+    begin: function (_clientValue, sessionId, currentText) {
+      var nu = window.dash_clientside.no_update;
+      if (currentText && !isOurs(currentText)) {
+        return [nu, nu, true];
+      }
+      state.startedAt = Date.now();
+      state.label = labelFor(sessionId);
+      return [write(state.label + "…"), "secondary", false];
+    },
+
+    /* Un tick por medio segundo: la fase que informo el servidor si la hay, la etiqueta de
+     * respaldo si no, y los segundos cuando la espera se nota. */
+    tick: function (_ticks, currentText, sessionId, phase) {
+      var nu = window.dash_clientside.no_update;
+      if (!isOurs(currentText)) {
+        /* Otro callback ya escribio el badge; no lo pisamos. */
+        return [nu, nu];
+      }
+      var elapsed = Math.round((Date.now() - state.startedAt) / 1000);
+      var label = serverLabel(phase) || state.label || labelFor(sessionId);
+      if (elapsed >= GIVE_UP_AFTER) {
+        /* Se deja de contar y de reclamar el badge: a partir de aca es un estado final. */
+        state.written = "";
+        return ["Sin respuesta", "warning"];
+      }
+      if (elapsed < COUNTER_AFTER) {
+        return [write(label + "…"), nu];
+      }
+      return [write(label + "… " + elapsed + "s"), nu];
+    },
+
+    /* Apaga el latido en cuanto el badge deja de ser nuestro. */
+    settle: function (currentText) {
+      return !isOurs(currentText);
+    },
+  };
+
+  return namespace.campbellAiStatus;
+})()"""
+
+
+def _status_js(function_name: str, params: str) -> str:
+    """Una funcion clientside que instala el namespace del badge y llama dentro de el.
+
+    Los parametros se escriben explicitos en vez de usar rest args porque Dash inyecta esta
+    funcion tal cual en la pagina y la llama con las entradas en orden; una firma variadica
+    reportaria `length` cero y no hay razon para averiguar si eso le importa.
+    """
+    return (
+        f"function({params}) {{"
+        f" return {_STATUS_NAMESPACE_JS}.{function_name}({params}); }}"
+    )
+
+
 def register_campbell_ai_callbacks(app: dash.Dash) -> None:
     """Register state, API and rendering callbacks for Campbell AI.
 
@@ -1110,9 +1252,7 @@ def register_campbell_ai_callbacks(app: dash.Dash) -> None:
     # al servidor que ya esta ocupado, y no hubo que tocar `synchronize_chat`, que tiene diez
     # salidas y ocho puntos de retorno.
     app.clientside_callback(
-        "function(clientValue, sessionId, currentText) {"
-        " return window.dash_clientside.campbellAiStatus"
-        ".begin(clientValue, sessionId, currentText); }",
+        _status_js("begin", "clientValue, sessionId, currentText"),
         Output("campbell-ai-status", "children", allow_duplicate=True),
         Output("campbell-ai-status", "color", allow_duplicate=True),
         Output("campbell-ai-init-poll", "disabled", allow_duplicate=True),
@@ -1163,9 +1303,7 @@ def register_campbell_ai_callbacks(app: dash.Dash) -> None:
         return {"label": state["label"], "phase": state.get("phase", "")}
 
     app.clientside_callback(
-        "function(ticks, currentText, sessionId, phase) {"
-        " return window.dash_clientside.campbellAiStatus"
-        ".tick(ticks, currentText, sessionId, phase); }",
+        _status_js("tick", "ticks, currentText, sessionId, phase"),
         Output("campbell-ai-status", "children", allow_duplicate=True),
         Output("campbell-ai-status", "color", allow_duplicate=True),
         Input("campbell-ai-init-poll", "n_intervals"),
@@ -1178,8 +1316,7 @@ def register_campbell_ai_callbacks(app: dash.Dash) -> None:
     # El badge es la fuente de verdad del ciclo: cuando deja de decir un estado de progreso,
     # la inicializacion termino y el latido se apaga.
     app.clientside_callback(
-        "function(currentText) {"
-        " return window.dash_clientside.campbellAiStatus.settle(currentText); }",
+        _status_js("settle", "currentText"),
         Output("campbell-ai-init-poll", "disabled", allow_duplicate=True),
         Input("campbell-ai-status", "children"),
         prevent_initial_call=True,

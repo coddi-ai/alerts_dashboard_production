@@ -10,11 +10,17 @@ Tests, using a real temp directory as the local data root (no network calls):
 6. record_local_event() writes the file and keeps the consolidated Parquet in sync
 7. record_local_event() on a brand new environment recovers S3-only history
    before adding the new event, instead of silently dropping it
+8. Overlapping rebuilds don't take each other's temp file away
+9. A failed write doesn't leave its temp file behind
+10. Temp files orphaned by a crash are swept, and in-flight ones are left alone
 """
 
 import json
+import os
 import sys
 import tempfile
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 project_root = Path(__file__).parent.parent
@@ -226,6 +232,148 @@ def test_record_local_event_recovers_s3_history_first():
     return True
 
 
+def test_overlapping_rebuilds_do_not_steal_each_others_temp_file():
+    """La carrera que ensuciaba los logs: un solo nombre de temporal para todos los escritores.
+
+    Con el nombre compartido, dos logins solapados escribian el mismo `.parquet.tmp`, el primer
+    `os.replace` se lo llevaba y el resto reventaba con "No such file or directory:
+    ...parquet.tmp -> ...parquet" -- un error por login solapado, en el despliegue y en local.
+    Las escrituras siguen sin estar ordenadas entre si (gana la ultima), y eso esta bien: los
+    JSON son la fuente de verdad. Lo que no puede volver a pasar es que se pisen el temporal.
+    """
+    print("\n" + "=" * 80)
+    print("TEST 8: Overlapping rebuilds don't take each other's temp file away")
+    print("=" * 80)
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        base_dir = Path(tmp_dir)
+        for i in range(12):
+            _write_event_file(
+                base_dir,
+                f"year=2026/month=08/day=19/evt-{i}.json",
+                {
+                    "event_id": f"evt-{i}",
+                    "username": "admin",
+                    "timestamp": "2026-08-19T12:54:58.000Z",
+                    "deploy_status": "local",
+                    "client_id": "cda",
+                },
+            )
+
+        def rebuild(_):
+            try:
+                auth_events_repository._rebuild_consolidated_parquet(base_dir)
+                return None
+            except Exception as exc:  # noqa: BLE001 - lo que se esta midiendo
+                return f"{type(exc).__name__}: {exc}"
+
+        writers = 10
+        with ThreadPoolExecutor(max_workers=writers) as pool:
+            failures = [f for f in pool.map(rebuild, range(writers)) if f]
+
+        print(f"   {writers} escrituras simultaneas -> {len(failures)} errores")
+        for failure in failures[:3]:
+            print(f"      {failure}")
+        assert not failures, f"{len(failures)} de {writers} escrituras concurrentes fallaron"
+
+        parquet_path = auth_events_repository._consolidated_parquet_path(base_dir)
+        assert parquet_path.exists()
+
+        df = auth_events_repository.list_login_events(use_cache=False, base_dir=base_dir)
+        assert len(df) == 12, f"se esperaban 12 eventos, hay {len(df)}"
+
+        leftovers = list(parquet_path.parent.glob("*.tmp"))
+        assert not leftovers, f"quedaron temporales sin limpiar: {leftovers}"
+
+    print("✅ Concurrent writers no longer destroy each other's temp file")
+    return True
+
+
+def test_a_failed_write_leaves_no_temp_file_behind():
+    """El costo de un nombre unico: ya no lo sobreescribe el siguiente, hay que limpiarlo.
+
+    Con el nombre compartido, un temporal de una escritura fallida lo reciclaba la siguiente
+    escritura. Con uno por escritor eso deja basura acumulandose en un volumen compartido, asi
+    que la falla tiene que limpiar lo suyo -- y seguir propagando el error, que es lo que el
+    llamador registra.
+    """
+    print("\n" + "=" * 80)
+    print("TEST 9: A failed write doesn't leave its temp file behind")
+    print("=" * 80)
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        base_dir = Path(tmp_dir)
+        _write_event_file(
+            base_dir,
+            "year=2026/month=08/day=19/evt-1.json",
+            {
+                "event_id": "evt-1",
+                "username": "admin",
+                "timestamp": "2026-08-19T12:54:58.000Z",
+                "deploy_status": "local",
+                "client_id": "cda",
+            },
+        )
+
+        parquet_dir = auth_events_repository._consolidated_parquet_path(base_dir).parent
+        parquet_dir.mkdir(parents=True, exist_ok=True)
+
+        original = auth_events_repository.pd.DataFrame.to_parquet
+        boom = RuntimeError("disk full")
+
+        def exploding_to_parquet(self, path, *args, **kwargs):
+            Path(path).write_bytes(b"escritura a medias")  # como una que muere a mitad
+            raise boom
+
+        auth_events_repository.pd.DataFrame.to_parquet = exploding_to_parquet
+        try:
+            auth_events_repository._rebuild_consolidated_parquet(base_dir)
+        except RuntimeError as exc:
+            assert exc is boom, "se esperaba que el error original se propagara"
+            print("   el error se propago al llamador")
+        else:
+            raise AssertionError("la escritura fallida no propago el error")
+        finally:
+            auth_events_repository.pd.DataFrame.to_parquet = original
+
+        leftovers = list(parquet_dir.glob("*.tmp"))
+        print(f"   temporales que quedaron: {leftovers}")
+        assert not leftovers, f"la escritura fallida dejo basura: {leftovers}"
+
+    print("✅ A failed write cleans up its own temp file and still raises")
+    return True
+
+
+def test_crashed_temp_files_are_swept_but_in_flight_ones_are_kept():
+    """La limpieza no puede tocar el temporal de un escritor que sigue trabajando."""
+    print("\n" + "=" * 80)
+    print("TEST 10: Orphaned temp files are swept, in-flight ones are kept")
+    print("=" * 80)
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        base_dir = Path(tmp_dir)
+        parquet_path = auth_events_repository._consolidated_parquet_path(base_dir)
+        parquet_path.parent.mkdir(parents=True, exist_ok=True)
+
+        orphan = parquet_path.with_name(f"{parquet_path.name}.999999.deadbeef.tmp")
+        orphan.write_bytes(b"huerfano de un OOM kill")
+        stale = time.time() - auth_events_repository.STALE_TEMP_FILE_SECONDS - 60
+        os.utime(orphan, (stale, stale))
+
+        in_flight = parquet_path.with_name(f"{parquet_path.name}.111111.c0ffee.tmp")
+        in_flight.write_bytes(b"un escritor que sigue escribiendo")
+
+        auth_events_repository._discard_stale_temp_files(parquet_path)
+
+        print(f"   huerfano viejo borrado:   {not orphan.exists()}")
+        print(f"   temporal en vuelo intacto: {in_flight.exists()}")
+        assert not orphan.exists(), "no se limpio el huerfano"
+        assert in_flight.exists(), "la limpieza se llevo el temporal de un escritor activo"
+
+    print("✅ Only genuinely orphaned temp files are removed")
+    return True
+
+
 def main():
     tests = [
         ("Malformed events skipped", test_malformed_events_are_skipped),
@@ -234,6 +382,9 @@ def main():
         ("Unavailable when no local events and no S3", test_unavailable_when_no_local_events_and_no_s3),
         ("record_local_event updates Parquet", test_record_local_event_updates_parquet),
         ("record_local_event recovers S3 history first", test_record_local_event_recovers_s3_history_first),
+        ("Overlapping rebuilds keep their own temp file", test_overlapping_rebuilds_do_not_steal_each_others_temp_file),
+        ("A failed write leaves no temp file behind", test_a_failed_write_leaves_no_temp_file_behind),
+        ("Orphaned temp files swept, in-flight kept", test_crashed_temp_files_are_swept_but_in_flight_ones_are_kept),
     ]
 
     results = []
