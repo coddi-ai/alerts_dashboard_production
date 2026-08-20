@@ -17,6 +17,7 @@ IMPORTANTE (datos de dominio de Capstone):
 """
 
 from src.utils.logger import get_logger
+from src.charts.signals import SIGNAL_LABELS
 
 logger = get_logger(__name__)
 
@@ -222,40 +223,47 @@ FAILURE_MODE_CONFIG = {
 # TELEMETRY_LABELS  —  client -> {signal: label}
 # =============================================================================
 
+# W34-12 — every code below reads its label from src/charts/signals.py's
+# shared SIGNAL_LABELS catalogue instead of retyping its own copy; the small
+# number of codes where the two used to name genuinely different things
+# (not just different phrasing) were resolved by explicit domain decisions —
+# see "Fase 7"/"Fase 9" in documentation/general/W34_HANDOFF.md for the
+# per-code history. gear_mismatch is the only code with no SIGNAL_LABELS
+# entry (genuinely telemetry-only) and keeps its own literal below.
 TELEMETRY_LABELS = {
     "cda": {
-        "CnkcasePres": "Presión Cárter",
-        "DeltaExh": "Delta Escape",
-        "EngOilPres": "Presión Aceite Motor",
-        "LtExhTemp": "Temp. Escape Izq.",
-        "RtExhTemp": "Temp. Escape Der.",
-        "LckupSlip": "Deslizamiento Lock-up",
-        "TCOutTemp": "Temp. Salida Convertidor",
-        "TrnLubeTemp": "Temp. Aceite Transmisión",
-        "TrnSlip": "Deslizamiento Transmisión",
-        "gear_mismatch": "Desajuste de Marcha",
+        "CnkcasePres": SIGNAL_LABELS["CnkcasePres"],
+        "DeltaExh": SIGNAL_LABELS["DeltaExh"],
+        "EngOilPres": SIGNAL_LABELS["EngOilPres"],
+        "LtExhTemp": SIGNAL_LABELS["LtExhTemp"],
+        "RtExhTemp": SIGNAL_LABELS["RtExhTemp"],
+        "LckupSlip": SIGNAL_LABELS["LckupSlip"],
+        "TCOutTemp": SIGNAL_LABELS["TCOutTemp"],
+        "TrnLubeTemp": SIGNAL_LABELS["TrnLubeTemp"],
+        "TrnSlip": SIGNAL_LABELS["TrnSlip"],
+        "gear_mismatch": "Desajuste de Marcha",  # no SIGNAL_LABELS entry
     },
     # Nombres QSK60 en snake_case (fuente nueva, temperaturas en Celsius).
     # Se eliminaron 3 señales que no existen en la fuente nueva:
     # Commanded Engine Fuel Rail Pressure, Engine coolant level, Injector Metering.
     "capstone": {
-        "DeltaExh":                       "Delta Escape entre Bancos",
-        "coolant_pressure_psi":           "Presión Refrigerante",
-        "coolant_temp_c":                 "Temp. Refrigerante",
-        "crankcase_pressure_inh2o":       "Presión Cárter",
-        "egt_avg_c":                      "Temp. Escape Promedio",
-        "egt_lb_c":                       "Temp. Escape Banco Izq.",
-        "egt_rb_c":                       "Temp. Escape Banco Der.",
-        "fuel_pump_intake_pressure_psi":  "Presión Entrega Combustible",
-        "imp_lb_psi":                     "Presión Admisión Banco Izq.",
-        "imp_rb_psi":                     "Presión Admisión Banco Der.",
-        "imt_lbf_c":                      "Temp. Admisión Banco Izq.",
-        "imt_rbf_c":                      "Temp. Admisión Banco Der.",
-        "oil_diff_pressure_psi":          "Presión Diferencial Filtro Aceite",
-        "oil_level_pct":                  "Nivel Tanque Reserva",
-        "oil_temp_c":                     "Temp. Aceite Motor",
-        "rifle_oil_pressure_psi":         "Presión Aceite Galería",
-        "turbo_speed_rpm":                "Velocidad Turbocompresor",
+        "DeltaExh": SIGNAL_LABELS["DeltaExh"],
+        "coolant_pressure_psi": SIGNAL_LABELS["coolant_pressure_psi"],
+        "coolant_temp_c": SIGNAL_LABELS["coolant_temp_c"],
+        "crankcase_pressure_inh2o": SIGNAL_LABELS["crankcase_pressure_inh2o"],
+        "egt_avg_c": SIGNAL_LABELS["egt_avg_c"],
+        "egt_lb_c": SIGNAL_LABELS["egt_lb_c"],
+        "egt_rb_c": SIGNAL_LABELS["egt_rb_c"],
+        "fuel_pump_intake_pressure_psi": SIGNAL_LABELS["fuel_pump_intake_pressure_psi"],
+        "imp_lb_psi": SIGNAL_LABELS["imp_lb_psi"],
+        "imp_rb_psi": SIGNAL_LABELS["imp_rb_psi"],
+        "imt_lbf_c": SIGNAL_LABELS["imt_lbf_c"],
+        "imt_rbf_c": SIGNAL_LABELS["imt_rbf_c"],
+        "oil_diff_pressure_psi": SIGNAL_LABELS["oil_diff_pressure_psi"],
+        "oil_level_pct": SIGNAL_LABELS["oil_level_pct"],
+        "oil_temp_c": SIGNAL_LABELS["oil_temp_c"],
+        "rifle_oil_pressure_psi": SIGNAL_LABELS["rifle_oil_pressure_psi"],
+        "turbo_speed_rpm": SIGNAL_LABELS["turbo_speed_rpm"],
     },
 }
 

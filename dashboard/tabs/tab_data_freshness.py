@@ -8,7 +8,7 @@ showing telemetry and tribology data freshness with color-coded indicators.
 from dash import html, dcc
 import dash_bootstrap_components as dbc
 from src.utils.logger import get_logger
-from dashboard.callbacks.data_freshness_callbacks import FRESHNESS_CRITERIA
+from dashboard.callbacks.data_freshness_callbacks import FRESHNESS_CRITERIA, FRESHNESS_STATUS_STYLE
 
 logger = get_logger(__name__)
 
@@ -24,19 +24,23 @@ def _format_timedelta(td):
 
 
 def _build_legend():
-    """Build legend spans dynamically from FRESHNESS_CRITERIA."""
+    """Build legend spans dynamically from FRESHNESS_CRITERIA.
+
+    W34-02: icon/color come from FRESHNESS_STATUS_STYLE — the same source
+    the table's row/cell coloring reads — instead of a third, independently
+    hand-picked palette that happened to roughly agree with the other two.
+    """
     telem = FRESHNESS_CRITERIA.get('Telemetria', [])
     tribo = FRESHNESS_CRITERIA.get('Tribologia', [])
-    
+
     # Map label → (telem_threshold, tribo_threshold) for display
     # Criteria are ordered: Ok (< t1), Atención (< t2), Preocupante (>= t2)
     legend_items = []
-    icons = {'Ok': '🟢', 'Atención': '🟡', 'Preocupante': '🔴'}
-    colors = {'Ok': '#28a745', 'Atención': '#ffc107', 'Preocupante': '#dc3545'}
-    
+
     for i, (_, label, _) in enumerate(telem):
-        icon = icons.get(label, '⚪')
-        color = colors.get(label, '#6c757d')
+        style = FRESHNESS_STATUS_STYLE.get(label, FRESHNESS_STATUS_STYLE['Sin Datos'])
+        icon = style['icon']
+        color = style['accent']
         
         # Telemetry description
         if i < len(telem) - 1:

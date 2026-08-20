@@ -32,6 +32,8 @@ from dashboard.components.predictive_tables import create_oil_variables_table
 from dashboard.components.oil_charts import get_essay_limits_four, classify_four_limit_value
 from dashboard.components.ai_analysis_panel import create_ai_analysis_panel
 from src.data.loaders import load_analisis_inteligente
+from dashboard.tabs.tab_predictive_overview import attach_status
+from src.charts.signals import SIGNAL_LABELS
 
 logger = get_logger(__name__)
 
@@ -50,7 +52,15 @@ def _resolve_client_dicts(client, component):
     """
     ckey = (client or "cda").lower()
     oil_labels = OIL_LABELS.get(ckey, OIL_LABELS["cda"])
-    telem_labels = TELEMETRY_LABELS.get(ckey, TELEMETRY_LABELS["cda"])
+    # Quality-review follow-up: TELEMETRY_LABELS is a curated per-client dict
+    # (only the codes someone has explicitly reviewed for this client), not
+    # the full catalogue. Layering it over SIGNAL_LABELS means a signal that
+    # is genuinely new to this client's TELEMETRY_LABELS entry but already
+    # catalogued in signals.py still shows its real label here instead of
+    # the raw code — the per-client dict keeps final say (it wins on
+    # overlapping keys), this is only a fallback for what it hasn't been
+    # given a chance to override yet.
+    telem_labels = {**SIGNAL_LABELS, **TELEMETRY_LABELS.get(ckey, TELEMETRY_LABELS["cda"])}
     oil_limits_four = load_predictive_oil_limits_four(ckey, component)
     return oil_labels, telem_labels, oil_limits_four
 
@@ -545,19 +555,12 @@ def render_initial_content(unit, df, df_latest, component="motor", client=None):
     """Render KPIs and fleet comparison for a unit."""
     failure_modes = get_failure_modes_dict(component, client)
 
-    latest = df_latest.copy()
-    # Status classification (fixed thresholds)
-    latest["status"] = "Saludable"
-    latest.loc[
-        (latest["avg_ranking_30d"] >= 30) | (latest["max_fm_30d"] >= 50),
-        "status",
-    ] = "Alerta"
-    latest.loc[
-        (latest["avg_ranking_30d"] >= 60) | (latest["max_fm_30d"] >= 80),
-        "status",
-    ] = "Crítica"
+    # Status from analisis_inteligente.parquet's `estado` (same source as
+    # Estado de Flota, REQ-PR-04) so the fleet scatter never disagrees with
+    # the priority cards for the same unit.
+    latest = attach_status(df_latest, client, component)
 
-    STATUS_COLORS = {"Crítica": "#e24b4a", "Alerta": "#ef9f27", "Saludable": "#1d9e75"}
+    STATUS_COLORS = {"Anormal": "#e24b4a", "Alerta": "#ef9f27", "Normal": "#1d9e75"}
 
     if not unit or unit not in df["Unit"].values:
         return html.Div(html.P("No hay datos disponibles.", className="text-muted text-center", style={"padding": "40px"}))
@@ -575,7 +578,7 @@ def render_initial_content(unit, df, df_latest, component="motor", client=None):
 
     # KPIs
     ranking_val = float(row["ranking"])
-    ranking_90d_val = float(row.get("ranking_acum_90d", 0))
+    ranking_30d_val = float(row.get("avg_ranking_30d", 0))
 
     df_unit = df[df["Unit"] == unit].sort_values("Fecha")
     last_evidence_date = df_unit["Fecha"].max() if not df_unit.empty else None
@@ -631,7 +634,7 @@ def render_initial_content(unit, df, df_latest, component="motor", client=None):
 
     kpis = [
         _kpi_card("Ranking actual", f"{ranking_val:.0f}", _ranking_color(ranking_val), "escala 0-100"),
-        _kpi_card("Riesgo acum. 90d", f"{ranking_90d_val:.1f}", _ranking_color(ranking_90d_val), "índice histórico"),
+        _kpi_card("Riesgo acum. 30d", f"{ranking_30d_val:.1f}", _ranking_color(ranking_30d_val), "índice histórico"),
         _kpi_card(f"Horas del {component_label}", horometro_value, "#0891B2", horometro_sub),
         _kpi_card("Modo dominante", dominant_label, "#7C3AED", f"Score: {fm_scores[dominant_mode]:.1f}"),
         _kpi_card("Última evidencia", last_date_str, "#6B7280", "fecha más reciente"),
@@ -683,7 +686,7 @@ def render_initial_content(unit, df, df_latest, component="motor", client=None):
                     html.Div([
                         html.Span([html.I(className="fas fa-dot-circle me-1"), "Posición en la flota"],
                                   className="card-subtitle fw-500"),
-                        html.Span("Ranking actual vs riesgo acumulado 90 días",
+                        html.Span("Ranking actual vs riesgo acumulado 30 días",
                                   style={"fontSize": "11px", "color": "var(--text-light)"}),
                     ], style={"marginBottom": "8px"}),
                     dcc.Graph(figure=scatter_fig, config={"displayModeBar": False}),

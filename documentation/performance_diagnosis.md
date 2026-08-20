@@ -1,7 +1,11 @@
 # Performance Diagnosis — Slow-Loading Tabs (EC2 + EFS deployment)
 
-**Status**: Diagnosis only. No code changes were made. This document is meant to guide
-what to check next and what fixes to prioritize.
+**Status**: Originally a diagnosis-only document (2026-08-18 draft, no code changes).
+Since then, the code-level fixes described in §3.2/§3.3 (and a related post-login fix) have
+been **implemented and verified** — see §1a for what changed. Everything else in this
+document (§3.1, §3.4-§3.7 infra/architecture items) is still open. §5 has been updated to
+reflect what's done vs. what's still worth considering, and §7 lists concrete next steps in
+priority order.
 
 **Scope**: This covers the dashboard app (`dashboard/`, `src/data/`, `config/`) and how it
 reads from the EFS-backed `data/` mesh. It does not touch the Campbell AI sidecar's own
@@ -29,6 +33,56 @@ each other, roughly in order of expected impact:
 None of this requires a rewrite. The fixes are incremental: add caching where it's already
 missing (a pattern that already exists elsewhere in the codebase), and put a real WSGI
 server in front of the app.
+
+---
+
+## 1a. Applied changes (code-level, done)
+
+The caching gaps identified in §3.2 and §3.3 have been fixed, following the existing
+`@lru_cache`-per-client pattern in `src/data/loaders.py` (private cached loader + public
+function returning a defensive `.copy(deep=True)`). No infrastructure changes were made —
+these are all in-process, code-only fixes.
+
+- **Aceite / Detalle de Reporte** (`dashboard/callbacks/reports_callbacks.py`): all 10
+  direct `safe_read_parquet(reports_file)` call sites now go through the existing
+  `load_oil_classified(client)` cached loader instead of re-reading `classified.parquet`
+  from EFS on every callback.
+- **Aceite / Visión de Flota** (`dashboard/callbacks/machines_callbacks.py`): all 9
+  `classified.parquet` reads now go through `load_oil_classified(client)`; all 3
+  `machine_status.parquet` reads now go through a new cached loader,
+  `load_machine_status_for_client(client)` (added to `src/data/loaders.py`, same
+  `_cached`/public-wrapper pattern).
+- **Predictivo** (`dashboard/tabs/tab_predictive_overview.py`): `_discover_components` and
+  `_load_component_data` (the 25MB CSV parse + rolling-window aggregation) are now
+  `@lru_cache`-wrapped, so repeat views of the same client+component reuse the parsed
+  result instead of re-parsing. Also removed one redundant full-frame sort inside
+  `_load_component_data` (it previously sorted the same data twice via two independent
+  `sort_values` passes).
+- **Post-login "Updating" delay** (found while investigating a related user report, not in
+  the original diagnosis): the "Resumen → General" landing page's aggregator callback
+  (`load_overview_data` in `dashboard/callbacks/overview_general_callbacks.py`) fires on
+  every login/client switch and was doing two uncached reads on the critical path —
+  `machine_status.parquet` directly, and `load_telemetry_unit_health()`. Both are now
+  cached: the former reuses `load_machine_status_for_client` above, and
+  `load_telemetry_unit_health` in `loaders.py` got the same private-cached/public-copy
+  treatment. Verified mutation-safety explicitly, since this callback mutates the returned
+  telemetry frame in place (`evaluation_timestamp` column reassignment) — confirmed this
+  does not corrupt the shared cache for subsequent calls.
+- Checked `MaintenanceRepository`/`get_repository` (used by the Mantenciones tab) as part of
+  this pass — it already caches correctly via a per-`(mode, client)` singleton instance, so
+  no change was needed there.
+
+All changes were verified against real local data: `py_compile` checks, before/after output
+comparison (including NaN-safe comparison for the Predictivo rolling averages) confirming
+byte-identical results, and cache-hit timing (e.g. `load_telemetry_unit_health` dropped from
+~136ms cold to effectively 0ms on a cache hit).
+
+**Not changed, and explicitly out of scope for this pass**: the WSGI server (§3.1), EFS
+configuration (§3.4), `iterrows()` usage (checked, low ROI — see §3.2's original notes),
+`DataTable` pagination (no confirmed problem), column projection (§3.4), and consolidating
+the duplicated `_discover_components` across three files (only the Predictivo overview copy
+was cached; the other two copies noted in `documentation/codebase_explaining.md` are
+untouched).
 
 ---
 
@@ -97,7 +151,7 @@ worker or replica must use `redis`." This means the team has already anticipated
 a multi-worker setup — the Campbell AI side is ready for it, the Dash side (`app.run`) is
 the piece still on the dev server.
 
-### 3.2 The same large file is read and re-parsed multiple times per tab
+### 3.2 The same large file is read and re-parsed multiple times per tab — ✅ RESOLVED (see §1a)
 
 This is the most concrete, most fixable finding. Two Aceite (oil) callback files bypass
 `src/data/loaders.py` entirely and call `safe_read_parquet` directly, with **no caching**:
@@ -129,7 +183,7 @@ Telemetría is comparatively better protected — which is consistent with Aceit
 being the more likely "slow tab" candidates if the slowness is code-driven rather than
 infra-driven.
 
-### 3.3 Predictivo: a 25MB CSV is parsed and aggregated synchronously, uncached
+### 3.3 Predictivo: a 25MB CSV is parsed and aggregated synchronously, uncached — ✅ RESOLVED (see §1a)
 
 `data/predictive/golden/cda/motor.csv` and `transmision.csv` are **~22-25 MB each**
 (confirmed by file size). `dashboard/tabs/tab_predictive_overview.py::_load_component_data`
@@ -225,55 +279,88 @@ out a coincidental AI request spike.
 ## 4. Likely ranking (to confirm via §2, not assumed)
 
 1. Single-threaded dev server (§3.1) — affects *every* tab, worse under concurrent users.
-2. Repeated uncached reads of `classified.parquet`/`machine_status.parquet` in Aceite
-   (§3.2) — specific to Visión de Flota and Detalle de Reporte.
-3. Uncached 25MB CSV parse + aggregation in Predictivo (§3.3) — specific to that tab.
-4. EFS throughput/IOPS mode and AZ placement (§2) — amplifies #2 and #3, can't be confirmed
-   from the repo alone.
-5. Directory-listing-before-read pattern for partitioned telemetry files (§3.4) — likely
-   secondary, since Telemetría already has partial caching (§3.2's Telemetría note).
+   **Still open — now the single highest-leverage remaining item**, since #2 and #3 below
+   are resolved.
+2. ~~Repeated uncached reads of `classified.parquet`/`machine_status.parquet` in Aceite
+   (§3.2)~~ — **resolved**, see §1a.
+3. ~~Uncached 25MB CSV parse + aggregation in Predictivo (§3.3)~~ — **resolved**, see §1a.
+4. EFS throughput/IOPS mode and AZ placement (§2) — still open, can't be confirmed from the
+   repo alone. With #2/#3 fixed, this now matters mainly for first-load-per-client (cold
+   cache) rather than every interaction.
+5. Directory-listing-before-read pattern for partitioned telemetry files (§3.4) — still
+   open, likely secondary.
 
 ---
 
-## 5. Options to consider (not applied — for discussion)
+## 5. Options to consider
 
-Roughly ordered by effort:
+Roughly ordered by effort. Items marked done are covered in §1a.
 
-- **Put a real WSGI server in front of Dash.** Options: `gunicorn` with multiple sync
-  workers (Linux-friendly, simplest), or `waitress` if you need something that also runs
-  well on Windows dev machines. This directly addresses §3.1 and is likely the single
-  highest-leverage change given it affects every tab, not just the ones with heavy data
-  loading.
-- **Cache the repeated same-file reads.** Wrap the `classified.parquet` /
-  `machine_status.parquet` reads in `reports_callbacks.py` and `machines_callbacks.py`
-  behind the same `@lru_cache`-per-client pattern already used in `loaders.py` (§3.2), and
-  do the same for `_load_component_data` in Predictivo (§3.3). This is a small, localized
-  change per file and follows a pattern the codebase already trusts.
-- **Invalidate on data refresh, not just process restart.** The existing `lru_cache`
+- ~~**Cache the repeated same-file reads.**~~ **Done** — see §1a (Aceite, Predictivo, and
+  the post-login aggregator).
+- **Put a real WSGI server in front of Dash.** *Not yet applied.* Options: `gunicorn` with
+  multiple sync workers (Linux-friendly, simplest), or `waitress` if you need something that
+  also runs well on Windows dev machines. This directly addresses §3.1 and is now the single
+  highest-leverage remaining change given it affects every tab, not just the ones with heavy
+  data loading. **Caveat worth planning for**: `functools.lru_cache` is per-process. Adding
+  `threaded=True` (or a gunicorn thread worker) keeps the cache shared and is the simplest
+  upgrade. Adding multiple *process* workers (gunicorn `-w N`) gives each worker its own
+  cache — first request to each worker pays the cold-read cost independently, so the
+  practical benefit of the caching in §1a would be diluted unless paired with the shared
+  cache backend below.
+- **Invalidate on data refresh, not just process restart.** *Not yet applied.* The existing `lru_cache`
   comment says the cache boundary is "the normal data refresh boundary for the mounted data
   directory" — i.e. it assumes a container restart accompanies every data sync. If that's
   not actually guaranteed operationally, consider keying the cache off file mtime (e.g.
   cache key includes `path.stat().st_mtime`) instead of relying on restarts, so stale data
   can't linger silently.
-- **Move to a shared cache backend if/when workers become multi-process.** Flask-Caching
-  (filesystem or Redis backend) instead of `functools.lru_cache`, consistent with how
-  Campbell AI already handles this via `CAMPBELL_AI_SESSION_BACKEND=redis`.
+- **Move to a shared cache backend if/when workers become multi-process.** *Not yet
+  applied.* Flask-Caching (filesystem or Redis backend) instead of `functools.lru_cache`,
+  consistent with how Campbell AI already handles this via
+  `CAMPBELL_AI_SESSION_BACKEND=redis`. Only becomes necessary if the WSGI move above uses
+  multiple processes rather than threads.
 - **Column projection on the heavy oil/predictive reads**, mirroring what
-  `_load_latest_telemetry_output` already does for telemetry (§3.4) — read only the columns
-  a given callback actually uses instead of the full file.
+  `_load_latest_telemetry_output` already does for telemetry (§3.4). *Not yet applied* —
+  and now lower priority than before, since caching (§1a) already eliminates the repeated
+  re-reads; this would only shrink the cost of the first (cold) read per client.
 - **EFS-level changes**, pending the CloudWatch check in §2: switch from General Purpose
   bursting mode to Provisioned Throughput or Elastic Throughput if burst credits are
   depleting under load; confirm the mount target is in the same AZ as the EC2 instance.
+  *Not yet applied — needs AWS console access to confirm first.*
 - **Instance sizing**, pending the CloudWatch check in §2: if on a burstable (`t3`/`t4g`)
   instance type and CPU credits are being exhausted, either move to a non-burstable type or
-  enable unlimited credit mode.
+  enable unlimited credit mode. *Not yet applied.*
 - **Reduce directory-listing-then-read round trips** for partitioned telemetry files (§3.4)
   — e.g. cache the "latest partition" resolution itself (it only changes when new data
-  lands), rather than re-globbing on every callback call.
+  lands), rather than re-globbing on every callback call. *Not yet applied* — same pattern
+  as §1a's fixes, just not yet extended to `_latest_telemetry_partition` and the
+  baseline/limits glob lookups.
 
 ---
 
-## 6. What this diagnosis deliberately does not cover
+## 6. Next steps, in priority order
+
+With §3.2/§3.3 resolved, the remaining items in rough priority order:
+
+1. **Put a real WSGI server in front of Dash** (§3.1/§5) — the single highest-leverage
+   remaining change; affects every tab, not just data-heavy ones. Decide threads vs.
+   processes up front given the `lru_cache` caveat noted in §5.
+2. **Confirm EFS access patterns via CloudWatch** (§3.4/§2) — check `PermittedThroughput`
+   vs. actual, `BurstCreditBalance`, and AZ alignment. Matters less now that repeated reads
+   are cached, but still relevant for cold-cache/first-load latency.
+3. **Shared cache backend** (§5) — only needed if step 1 goes multi-process rather than
+   multi-threaded.
+4. **Campbell AI sidecar resource contention** (§3.7) — quick CloudWatch check for CPU/
+   memory contention on the shared host, low effort to rule out.
+5. **Directory-listing caching for telemetry partitions, column projection, mtime-based
+   cache invalidation** (§5) — smaller, lower-urgency follow-ups once the above are
+   addressed.
+
+Logging overhead (§3.6) is minor and not worth prioritizing on its own.
+
+---
+
+## 7. What this diagnosis deliberately does not cover
 
 - Frontend/browser-side rendering cost (large Plotly figures, DataTable client-side
   rendering) — worth a follow-up pass with the browser's Performance tab if server-side

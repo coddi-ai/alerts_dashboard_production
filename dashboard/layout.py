@@ -14,7 +14,7 @@ import os
 from pathlib import Path
 from config.settings import get_settings, APP_VERSION
 from config.client_services import is_service_enabled
-from dashboard.auth import is_admin
+from dashboard.auth import current_dashboard_user_data, is_admin
 from dashboard.services_registry import SERVICE_SECTIONS, SERVICE_LABELS, nav_path as _nav_path
 
 
@@ -595,8 +595,24 @@ def create_app_layout() -> html.Div:
         Root layout with stores and page content
     """
     return html.Div([
-        # Store user info (initialized to None to trigger initial callback)
-        dcc.Store(id='user-info-store', storage_type='session', data=None),
+        # Identidad del usuario, sembrada desde la sesion de Flask en cada render en vez de
+        # nacer en None. El store es `session`, o sea sessionStorage, que es por pestana: una
+        # pestana nueva o un enlace directo llegan sin nada, y `display_page` exige el proof
+        # firmado para mostrar el dashboard, asi que sin esto alguien con sesion valida en el
+        # servidor ve el login. Devuelve None cuando no hay sesion, y entonces un visitante
+        # sigue viendo el login, que es lo correcto.
+        #
+        # Solo funciona porque `dashboard/app.py` asigna el callable `create_app_layout` y no
+        # su resultado; evaluado al importar no hay request desde el cual leer la sesion.
+        #
+        # Ojo con el alcance: cuando sessionStorage ya tiene un valor, `dcc.Store` le da
+        # precedencia a ese y pisa esto. Por eso `display_page` reemite el proof por su
+        # cuenta -- sembrar aca cubre la pestana nueva, no la que arrastra un valor viejo.
+        dcc.Store(
+            id='user-info-store',
+            storage_type='session',
+            data=current_dashboard_user_data(),
+        ),
 
         # Session-scoped operator name for ERP notice validation (Validación de Avisos)
         dcc.Store(id='erp-validator-operator-store', storage_type='session', data=None),

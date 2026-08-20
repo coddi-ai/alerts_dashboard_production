@@ -9,9 +9,11 @@ import pandas as pd
 from datetime import datetime, timedelta
 from pathlib import Path
 import logging
+import os
 import pytz
 
 from src.utils.logger import get_logger
+from dashboard.components.labels import NO_DATA_ICON, NO_DATA_BG, NO_DATA_TEXT
 
 logger = get_logger(__name__)
 
@@ -19,16 +21,21 @@ logger = get_logger(__name__)
 def load_data_freshness(client: str = "cda") -> pd.DataFrame:
     """
     Load data freshness information from Data_Date_Last_Update.csv
-    
+
     Args:
         client: Client identifier (e.g., 'cda')
-    
+
     Returns:
         DataFrame with data freshness information
     """
     try:
-        file_path = Path(f"data/auxiliar/{client.lower()}/Data_Date_Last_Update.csv")
-        
+        # W34: honor DASHBOARD_DATA_ROOT like every other loader
+        # (src/data/loaders.py::_data_path) — this was the one hardcoded
+        # "data/..." path in the codebase, which made this function
+        # untestable with a tmp_path fixture the way every other loader is.
+        data_root = Path(os.getenv("DASHBOARD_DATA_ROOT", "data")).expanduser()
+        file_path = data_root / "auxiliar" / client.lower() / "Data_Date_Last_Update.csv"
+
         if not file_path.exists():
             logger.error(f"Data freshness file not found: {file_path}")
             return pd.DataFrame()
@@ -55,12 +62,36 @@ def load_data_freshness(client: str = "cda") -> pd.DataFrame:
 def convert_utc_to_chile(utc_datetime):
     """
     Convert UTC datetime to Chile timezone (UTC-3 or UTC-4 depending on DST)
-    
+
     Args:
         utc_datetime: datetime in UTC
-        
+
     Returns:
         datetime in Chile timezone
+
+    Quality-review follow-up: this predates and duplicates
+    src/utils/date_utils.py::to_local_naive, which W34-06 introduced as the
+    single place for UTC->Chile conversion. Deliberately NOT switched to call
+    it here: to_local_naive returns a tz-NAIVE Timestamp, but every caller of
+    this function (calculate_freshness_status, both in this file and in
+    overview_general_callbacks.py) subtracts its result from a tz-AWARE
+    `current_time_chile` (`datetime.now(chile_tz)`) — swapping the return
+    type would raise `TypeError: can't subtract offset-naive and
+    offset-aware datetimes` at every call site. Changing that arithmetic to
+    naive-throughout is a real, separate fix (touching both freshness call
+    sites together), not a drop-in rename — left as a known, intentional
+    duplication rather than risking a silent behavior change here.
+
+    Second critical-review pass: a lower-risk fix path exists without
+    touching the naive-vs-aware arithmetic at all — add a tz-AWARE sibling
+    (e.g. `to_local_aware`) to date_utils.py, mirroring `to_local_naive`
+    exactly except it skips the final `.tz_localize(None)` strip, and have
+    this function delegate to it. Not applied in this pass: the "already
+    tz-aware input" branch below (`if utc_datetime.tzinfo is None`) implies a
+    caller once passed an aware value, and there is no full audit here
+    confirming every current caller only ever passes naive — a delegating
+    rewrite should preserve that defensive branch exactly, verified against
+    real call sites, not assumed.
     """
     if pd.isna(utc_datetime):
         return None
@@ -80,23 +111,49 @@ def convert_utc_to_chile(utc_datetime):
 
 
 # ========================================
+# W34-02 — single style source for freshness status
+# ========================================
+# The legend (tab_data_freshness.py::_build_legend) and this table's
+# style_data_conditional each used to hand-pick their own icon/color values
+# for the same three statuses — a third, independent palette from the one
+# below. All three now read from here. `bg`/`text` reuse the app-wide
+# :root design tokens (predictive_styles.css, loaded globally via assets/
+# on every page) instead of a fourth set of hardcoded hex values, so this
+# tab's palette is visually consistent with the rest of the dashboard
+# rather than its own island — `accent` stays a literal hex because it also
+# feeds FRESHNESS_CRITERIA's threshold tuples below, unchanged in value.
+FRESHNESS_STATUS_STYLE: dict[str, dict[str, str]] = {
+    'Ok':          {'icon': '🟢', 'accent': '#28a745', 'bg': 'var(--green-light)', 'text': 'var(--green-text)'},
+    'Atención':    {'icon': '🟡', 'accent': '#ffc107', 'bg': 'var(--amber-light)', 'text': 'var(--amber-text)'},
+    'Preocupante': {'icon': '🔴', 'accent': '#dc3545', 'bg': 'var(--red-light)',   'text': 'var(--red-text)'},
+    # W34-13 terminology: a unit with no record for this data type, distinct
+    # from a resolved Ok/Atención/Preocupante status. icon/bg/text come from
+    # labels.py's NO_DATA_* constants — the same "no data" identity Estado x
+    # Unidad and Predictivo use, not a third independently hand-picked one
+    # kept in sync only by a comment (quality-review follow-up).
+    'Sin Datos':   {'icon': NO_DATA_ICON, 'accent': '#808080', 'bg': NO_DATA_BG, 'text': NO_DATA_TEXT},
+}
+
+
+# ========================================
 # FRESHNESS CRITERIA CONFIGURATION
 # ========================================
 # Modular criteria for data freshness status.
 # Each data type defines thresholds and labels.
 # Format: list of (max_timedelta, label, color) in order of priority (best to worst).
-# The last entry is the fallback (worst status).
-
+# The last entry is the fallback (worst status). Thresholds themselves are
+# W34's "don't touch the freshness calculation" boundary — only the `color`
+# values were consolidated (W34-02) to trace to FRESHNESS_STATUS_STYLE.
 FRESHNESS_CRITERIA = {
     'Telemetria': [
-        (timedelta(hours=2),  'Ok',          '#28a745'),  # Green
-        (timedelta(hours=24), 'Atención',    '#ffc107'),  # Yellow
-        (timedelta(hours=24), 'Preocupante', '#dc3545'),  # Red (>24h)
+        (timedelta(hours=2),  'Ok',          FRESHNESS_STATUS_STYLE['Ok']['accent']),
+        (timedelta(hours=24), 'Atención',    FRESHNESS_STATUS_STYLE['Atención']['accent']),
+        (timedelta(hours=24), 'Preocupante', FRESHNESS_STATUS_STYLE['Preocupante']['accent']),
     ],
     'Tribologia': [
-        (timedelta(days=20),  'Ok',          '#28a745'),  # Green
-        (timedelta(days=40),  'Atención',    '#ffc107'),  # Yellow
-        (timedelta(days=40),  'Preocupante', '#dc3545'),  # Red (>40d)
+        (timedelta(days=20),  'Ok',          FRESHNESS_STATUS_STYLE['Ok']['accent']),
+        (timedelta(days=40),  'Atención',    FRESHNESS_STATUS_STYLE['Atención']['accent']),
+        (timedelta(days=40),  'Preocupante', FRESHNESS_STATUS_STYLE['Preocupante']['accent']),
     ],
 }
 
@@ -115,7 +172,7 @@ def calculate_freshness_status(last_update, data_type, current_time_chile):
         tuple: (status, color, time_diff_str)
     """
     if pd.isna(last_update):
-        return 'Sin Datos', '#808080', 'N/A'
+        return 'Sin Datos', FRESHNESS_STATUS_STYLE['Sin Datos']['accent'], 'N/A'
     
     # Calculate time difference
     time_diff = current_time_chile - last_update
@@ -290,81 +347,23 @@ def update_data_freshness(_, selected_client):
                 'fontSize': '14px',
                 'textAlign': 'center'
             },
+            # W34-02: generated from FRESHNESS_STATUS_STYLE instead of 8
+            # hand-written rules repeating the same 4 colors twice (once per
+            # column) — the single source of truth also used by the legend.
             style_data_conditional=[
-                # Telemetría styling - based on Status
-                {
-                    'if': {
-                        'filter_query': '{Telemetría_Status} = "Ok"',
-                        'column_id': 'Telemetría'
-                    },
-                    'backgroundColor': '#d4edda',
-                    'color': '#155724',
-                    'fontWeight': 'bold'
-                },
-                {
-                    'if': {
-                        'filter_query': '{Telemetría_Status} = "Atención"',
-                        'column_id': 'Telemetría'
-                    },
-                    'backgroundColor': '#fff3cd',
-                    'color': '#856404',
-                    'fontWeight': 'bold'
-                },
-                {
-                    'if': {
-                        'filter_query': '{Telemetría_Status} = "Preocupante"',
-                        'column_id': 'Telemetría'
-                    },
-                    'backgroundColor': '#f8d7da',
-                    'color': '#721c24',
-                    'fontWeight': 'bold'
-                },
-                {
-                    'if': {
-                        'filter_query': '{Telemetría_Status} = "Sin Datos"',
-                        'column_id': 'Telemetría'
-                    },
-                    'backgroundColor': '#e2e3e5',
-                    'color': '#6c757d'
-                },
-                
-                # Tribología styling - based on Status
-                {
-                    'if': {
-                        'filter_query': '{Tribología_Status} = "Ok"',
-                        'column_id': 'Tribología'
-                    },
-                    'backgroundColor': '#d4edda',
-                    'color': '#155724',
-                    'fontWeight': 'bold'
-                },
-                {
-                    'if': {
-                        'filter_query': '{Tribología_Status} = "Atención"',
-                        'column_id': 'Tribología'
-                    },
-                    'backgroundColor': '#fff3cd',
-                    'color': '#856404',
-                    'fontWeight': 'bold'
-                },
-                {
-                    'if': {
-                        'filter_query': '{Tribología_Status} = "Preocupante"',
-                        'column_id': 'Tribología'
-                    },
-                    'backgroundColor': '#f8d7da',
-                    'color': '#721c24',
-                    'fontWeight': 'bold'
-                },
-                {
-                    'if': {
-                        'filter_query': '{Tribología_Status} = "Sin Datos"',
-                        'column_id': 'Tribología'
-                    },
-                    'backgroundColor': '#e2e3e5',
-                    'color': '#6c757d'
-                },
-                
+                *[
+                    {
+                        'if': {
+                            'filter_query': f'{{{column}_Status}} = "{status_label}"',
+                            'column_id': column,
+                        },
+                        'backgroundColor': style['bg'],
+                        'color': style['text'],
+                        'fontWeight': 'bold' if status_label != 'Sin Datos' else 'normal',
+                    }
+                    for column in ('Telemetría', 'Tribología')
+                    for status_label, style in FRESHNESS_STATUS_STYLE.items()
+                ],
                 # Alternate row colors
                 {
                     'if': {'row_index': 'odd'},

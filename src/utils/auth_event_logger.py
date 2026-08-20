@@ -15,6 +15,7 @@ why the original single-CSV writer (src/utils/auth_logger.py) was replaced.
 
 import json
 import os
+import threading
 import uuid
 from datetime import datetime, timezone
 
@@ -63,8 +64,19 @@ def log_authentication_event(username: str, client_id: str = None) -> None:
     except Exception as e:
         logger.error(f"Failed to persist authentication event locally for user '{username}': {type(e).__name__}: {e}")
 
+    # The S3 copy is a durable backup, not something the login response needs
+    # to wait on (see module docstring) - upload it in the background so a
+    # slow/unreachable S3 endpoint never adds latency to the login itself.
+    threading.Thread(
+        target=_put_event_background,
+        args=(bucket_name, f"{S3_PREFIX}/{relative_key}", event, username),
+        daemon=True,
+    ).start()
+
+
+def _put_event_background(bucket_name: str, s3_key: str, event: dict, username: str) -> None:
     try:
-        _put_event(bucket_name, f"{S3_PREFIX}/{relative_key}", event)
+        _put_event(bucket_name, s3_key, event)
     except Exception as e:
         logger.error(
             f"Failed to log authentication event for user '{username}' "
