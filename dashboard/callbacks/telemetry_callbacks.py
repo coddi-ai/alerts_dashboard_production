@@ -639,9 +639,18 @@ def _signal_kpi_table(row: dict) -> html.Table:
 
 @callback(
     Output('telemetry-detail-signal-cards', 'children'),
-    [Input('telemetry-detail-signal-selector', 'value'), Input('telemetry-detail-system-selector', 'value'), Input('telemetry-detail-unit-selector', 'value'), Input('client-selector', 'value')],
+    [
+        Input('telemetry-detail-signal-selector', 'value'),
+        Input('telemetry-detail-system-selector', 'value'),
+        Input('telemetry-detail-unit-selector', 'value'),
+        Input('client-selector', 'value'),
+        # W34-09: the 1/7/30-day buttons only change the plotted window —
+        # unit/sistema/señal are separate Inputs above and are untouched by
+        # this one changing.
+        Input('telemetry-detail-window-days', 'value'),
+    ],
 )
-def update_signal_cards(signal, system, unit, client):
+def update_signal_cards(signal, system, unit, client, window_days):
     if not signal or not system or not unit or not client:
         return dbc.Alert("Seleccione una unidad, sistema y señal para ver evidencia.", color="info")
     try:
@@ -661,7 +670,15 @@ def update_signal_cards(signal, system, unit, client):
         event_df = _events_for_signal_cached(
             client.lower(), snapshot.cache_key, unit, signal
         )
-        figure = build_signal_timeseries_card(signal, raw, snapshot.limits, trend_df, unit, event_df)
+        # W34-09: simplified view — window_days from the button group,
+        # show_events left at its default (False): no event/anomaly
+        # overlays. event_df is still loaded above because the KPI table
+        # below (_signal_kpi_table) shows total_events/warnings independent
+        # of whether the chart draws overlays for them.
+        figure = build_signal_timeseries_card(
+            signal, raw, snapshot.limits, trend_df, unit, event_df,
+            window_days=window_days or 1,
+        )
         metadata = snapshot.signal_metadata.get(signal, {})
         coverage_notice = None
         if not has_valid_series:

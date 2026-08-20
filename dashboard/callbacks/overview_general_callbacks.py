@@ -15,8 +15,57 @@ import logging
 from src.data.loaders import load_telemetry_unit_health, load_alerts_data, load_machine_status_for_client
 from src.data.maintenance_repository import get_repository
 from dashboard.callbacks.data_freshness_callbacks import load_data_freshness
+from dashboard.components.labels import translate_component_label, NO_DATA_ICON, NO_DATA_BG, NO_DATA_TEXT
+from config.client_services import is_service_enabled
 
 logger = logging.getLogger(__name__)
+
+
+def build_component_filter_options(data: dict) -> list:
+    """Component options for `overview-component-filter`, deduplicated across
+    alerts and oil sources and labeled with the same function Alertas uses.
+
+    Pulled out as a module-level, pure function (W34-01) so the label rule is
+    unit-testable without registering the whole Dash app — the callback that
+    used to inline this logic (`populate_component_filter`, defined inside
+    `register_overview_general_callbacks`) is a nested closure and cannot be
+    called directly in a test.
+
+    `value` stays the raw, uppercased-for-dedup component (the join key used
+    by `create_critical_equipment_summary_table`'s `component_filter`
+    comparisons); only `label` goes through `translate_component_label`.
+    """
+    if not data:
+        return []
+
+    components = set()
+
+    # From alerts (uppercase)
+    alerts = data.get("alerts", [])
+    for row in alerts:
+        comp = row.get("componente", "")
+        if comp and comp != "Desconocido":
+            components.add(comp.upper())
+
+    # From oil component_details (lowercase → uppercase)
+    oil = data.get("oil", [])
+    for row in oil:
+        details = row.get("component_details", [])
+        if isinstance(details, list):
+            for d in details:
+                if isinstance(d, dict):
+                    comp = d.get("component", "")
+                    if comp:
+                        components.add(comp.upper())
+
+    if not components:
+        return []
+
+    # W34-01: same label function as Alertas and the table header, instead of
+    # a bare .title() on the raw (uppercased-for-dedup) value — "POST_ENGINE"
+    # must read "Posterior al motor" here exactly like it does in the alerts
+    # table, not "Post_Engine".
+    return [{"label": translate_component_label(c), "value": c} for c in sorted(components)]
 
 
 def clean_numpy_types(data):
@@ -290,10 +339,11 @@ def create_oil_pie_chart(df_oil: pd.DataFrame) -> go.Figure:
     return fig
 
 
-def create_critical_equipment_summary_table(df_telemetry: pd.DataFrame, df_oil: pd.DataFrame, 
+def create_critical_equipment_summary_table(df_telemetry: pd.DataFrame, df_oil: pd.DataFrame,
                                             df_alerts: pd.DataFrame, df_maintenance: pd.DataFrame,
                                             df_freshness: pd.DataFrame = None,
-                                            component_filter: str = None) -> html.Div:
+                                            component_filter: str = None,
+                                            client: str = None) -> html.Div:
     """
     Create summary table showing ALL equipment status across technical areas.
     Includes tooltip on hover with reason for each status.
@@ -304,7 +354,16 @@ def create_critical_equipment_summary_table(df_telemetry: pd.DataFrame, df_oil: 
     When component_filter is None:
       - Telemetría: overall alert score across all components
       - Tribología: overall_status from machine_status.parquet
-    
+
+    W34-13: `client` gates each column against `config/client_services.json`
+    via `is_service_enabled` — a client without the underlying service
+    (Telemetría reads from monitoring-alerts/overview-data-freshness;
+    Tribología from monitoring-oil) shows "Sin Fuente", never a default
+    "Normal"/healthy badge. Within an enabled service, a unit that simply has
+    no record yet shows "Sin Datos" — a third, distinct state from a
+    resolved Normal/Alerta/Anormal, so a missing signal is never confused
+    with a checked-and-healthy one at either level (client or unit).
+
     Returns:
         html.Div with a table using colored badges with tooltips
     """
@@ -325,7 +384,21 @@ def create_critical_equipment_summary_table(df_telemetry: pd.DataFrame, df_oil: 
         
         if not equipos:
             return html.Div(html.P("No hay equipos disponibles", className="text-muted text-center p-2 mb-0", style={'fontSize': '12px'}))
-        
+
+        # ── W34-13: source availability, once per render (client-wide, not
+        # per-unit) — a client without the underlying service must show "Sin
+        # Fuente" for every unit in that column, never a default "Normal".
+        # Telemetría reads from load_alerts_data (monitoring-alerts) and
+        # load_data_freshness (overview-data-freshness); Tribología from
+        # load_machine_status_for_client (monitoring-oil). Either telemetry
+        # source being enabled is enough — this column blends alerts and
+        # freshness, so it degrades gracefully if only one is on.
+        telemetry_source_available = (
+            is_service_enabled(client, "monitoring-alerts")
+            or is_service_enabled(client, "overview-data-freshness")
+        )
+        oil_source_available = is_service_enabled(client, "monitoring-oil")
+
         # ── Pre-compute alert scores ──
         # When filtering by component, only count alerts for that component
         df_alerts_filtered = df_alerts
@@ -359,19 +432,44 @@ def create_critical_equipment_summary_table(df_telemetry: pd.DataFrame, df_oil: 
             'Anormal': {'icon': '🔴', 'bg': '#f8d7da', 'color': '#721c24'},
             'Atención':{'icon': '🟡', 'bg': '#fff3cd', 'color': '#856404'},
             'Crítico': {'icon': '🔴', 'bg': '#f8d7da', 'color': '#721c24'},
-            'N/A':     {'icon': '⚪', 'bg': '#e2e3e5', 'color': '#6c757d'},
+            # W34-13: two distinct "no signal" reasons instead of one 'N/A'
+            # bucket. "Sin Datos": the service is enabled but this unit has
+            # no record yet (was 'N/A'). "Sin Fuente": the client doesn't
+            # have this service enabled at all — visually distinct (dashed
+            # border) so it never reads as "checked, nothing to report".
+            # Frontend-consistency pass: bg/text/icon come from labels.py's
+            # NO_DATA_* constants — the same "no data" identity Estado de
+            # Datos and Predictivo use (quality-review follow-up: previously
+            # three independent dict literals kept in sync only by a
+            # comment, now one real shared source). "Sin Fuente" keeps its
+            # own filled-circle icon (not NO_DATA_ICON's hollow one) plus a
+            # dashed border, so it still reads as "off" next to "sin
+            # datos"'s hollow/empty circle, without breaking the 🟢🟡🔴⚪ dot
+            # pattern.
+            # 'muted': True (critical-review follow-up) is the same optional-
+            # key idiom as 'border' below — one flag per status entry, not a
+            # second, separately-maintained list of "which statuses are
+            # de-emphasized" in make_badge. This is exactly the split that
+            # let this table's own de-emphasis rule go missing once already
+            # (Fase 8) until it was patched to match Estado de Datos.
+            'Sin Datos':  {'icon': NO_DATA_ICON, 'bg': NO_DATA_BG, 'color': NO_DATA_TEXT, 'muted': True},
+            'Sin Fuente': {'icon': '⚫', 'bg': NO_DATA_BG, 'color': NO_DATA_TEXT, 'border': '1px dashed var(--border-strong)', 'muted': True},
         }
         
         STATUS_PRIORITY = {
             'Anormal': 3, 'Crítico': 3,
             'Alerta': 2, 'Atención': 2,
             'Normal': 1,
-            'N/A': 0
+            # W34-13: neither "no signal" reason outranks a real status —
+            # max(real_priority, 0) always surfaces the real one when only
+            # one of the two columns is unavailable/no-data.
+            'Sin Datos': 0,
+            'Sin Fuente': 0,
         }
-        
+
         def make_badge(status, tooltip_text):
             """Create a colored badge with tooltip."""
-            style_info = STATUS_STYLE.get(status, STATUS_STYLE['N/A'])
+            style_info = STATUS_STYLE.get(status, STATUS_STYLE['Sin Datos'])
             return html.Div(
                 html.Span(
                     f"{style_info['icon']} {status}",
@@ -379,9 +477,14 @@ def create_critical_equipment_summary_table(df_telemetry: pd.DataFrame, df_oil: 
                     style={
                         'backgroundColor': style_info['bg'],
                         'color': style_info['color'],
+                        'border': style_info.get('border', 'none'),
                         'padding': '2px 8px',
                         'borderRadius': '4px',
-                        'fontWeight': 'bold',
+                        # Same de-emphasis rule as the Estado de Datos table
+                        # (FRESHNESS_STATUS_STYLE / update_data_freshness):
+                        # a "no signal" badge stays normal weight so it never
+                        # competes visually with a real, resolved status.
+                        'fontWeight': 'normal' if style_info.get('muted') else 'bold',
                         'fontSize': '11px',
                         'cursor': 'help',
                         'display': 'inline-block',
@@ -395,40 +498,59 @@ def create_critical_equipment_summary_table(df_telemetry: pd.DataFrame, df_oil: 
         table_rows = []
         for equipo in sorted(equipos):
             # --- Telemetría (alerts + data freshness only, no telemetry machine status) ---
-            telem_status = 'Normal'
-            telem_reason = 'Sin alertas recientes'
-            
-            # 1) Alerts as base status
-            if not alert_scores.empty:
-                equipo_alerts = alert_scores[alert_scores['equipo'] == equipo]
-                if not equipo_alerts.empty:
+            equipo_has_alert_record = not alert_scores.empty and (alert_scores['equipo'] == equipo).any()
+            freshness_info = freshness_by_unit.get(equipo)
+
+            if not telemetry_source_available:
+                # W34-13: the client has neither alerts nor data-freshness
+                # enabled — there is no telemetry-adjacent signal to read at
+                # all, for any unit. Must not default to 'Normal'.
+                telem_status = 'Sin Fuente'
+                telem_reason = 'Alertas y frescura de datos no disponibles para este cliente'
+            elif not equipo_has_alert_record and not freshness_info:
+                # W34-13: the service is enabled, but THIS unit has never
+                # produced an alert or a freshness record — that is an
+                # absence of evidence, not evidence of health.
+                telem_status = 'Sin Datos'
+                telem_reason = 'Sin alertas ni registro de frescura de datos para esta unidad'
+            else:
+                telem_status = 'Normal'
+                telem_reason = 'Sin alertas recientes'
+
+                # 1) Alerts as base status
+                if equipo_has_alert_record:
+                    equipo_alerts = alert_scores[alert_scores['equipo'] == equipo]
                     telem_status = equipo_alerts['status'].iloc[0]
                     n_alerts = equipo_alerts['alert_count'].iloc[0]
                     n_comps = equipo_alerts['component_count'].iloc[0]
                     score = equipo_alerts['criticality_score'].iloc[0]
                     telem_reason = f"Alertas: {n_alerts} en {n_comps} comp. (score: {score:.1f})"
-            
-            # 2) Data freshness — can escalate further
-            freshness_info = freshness_by_unit.get(equipo)
-            if freshness_info:
-                fr_status = freshness_info['status']
-                fr_time = freshness_info['time_str']
-                telem_reason += f" | Datos: {fr_status} (hace {fr_time})"
-                if fr_status == 'Preocupante':
-                    telem_status = 'Anormal'
-                    telem_reason += ' [Sin comunicación]'
-                elif fr_status == 'Atención' and STATUS_PRIORITY.get(telem_status, 0) < 2:
-                    telem_status = 'Alerta'
-                    telem_reason += ' [Datos con retraso]'
-            
+
+                # 2) Data freshness — can escalate further
+                if freshness_info:
+                    fr_status = freshness_info['status']
+                    fr_time = freshness_info['time_str']
+                    telem_reason += f" | Datos: {fr_status} (hace {fr_time})"
+                    if fr_status == 'Preocupante':
+                        telem_status = 'Anormal'
+                        telem_reason += ' [Sin comunicación]'
+                    elif fr_status == 'Atención' and STATUS_PRIORITY.get(telem_status, 0) < 2:
+                        telem_status = 'Alerta'
+                        telem_reason += ' [Datos con retraso]'
+
             # --- Tribología (from machine_status.parquet) ---
-            oil_status = 'N/A'
-            oil_reason = 'Sin datos de tribología'
-            if not df_oil.empty and 'equipo' in df_oil.columns:
+            if not oil_source_available:
+                # W34-13: the client has monitoring-oil disabled entirely.
+                oil_status = 'Sin Fuente'
+                oil_reason = 'Servicio de tribología no disponible para este cliente'
+            else:
+                oil_status = 'Sin Datos'
+                oil_reason = 'Sin datos de tribología'
+            if oil_source_available and not df_oil.empty and 'equipo' in df_oil.columns:
                 equipo_oil = df_oil[df_oil['equipo'] == equipo]
                 if not equipo_oil.empty:
                     row = equipo_oil.iloc[0]
-                    
+
                     if component_filter:
                         # ── Component-level: search inside component_details ──
                         comp_details = row.get('component_details', [])
@@ -439,9 +561,11 @@ def create_critical_equipment_summary_table(df_telemetry: pd.DataFrame, df_oil: 
                                     match = d
                                     break
                             if match:
-                                oil_status = match.get('status', 'N/A')
+                                oil_status = match.get('status', 'Sin Datos')
                                 sev = match.get('severity_score', 0)
-                                oil_reason = f"Componente: {component_filter.title()} | Estado: {oil_status} (severidad: {sev})"
+                                # W34-01: same label everywhere a component
+                                # name is shown to the user.
+                                oil_reason = f"Componente: {translate_component_label(component_filter)} | Estado: {oil_status} (severidad: {sev})"
                                 sdate = match.get('sample_date')
                                 if sdate:
                                     try:
@@ -452,8 +576,8 @@ def create_critical_equipment_summary_table(df_telemetry: pd.DataFrame, df_oil: 
                                 if rec and str(rec).strip() and str(rec) != 'None':
                                     oil_reason += f" | Rec: {str(rec)[:100]}"
                             else:
-                                oil_status = 'N/A'
-                                oil_reason = f"Sin datos de tribología para {component_filter.title()}"
+                                oil_status = 'Sin Datos'
+                                oil_reason = f"Sin datos de tribología para {translate_component_label(component_filter)}"
                     else:
                         # ── Overall machine-level status ──
                         oil_status = equipo_oil['estado'].iloc[0]
@@ -500,7 +624,9 @@ def create_critical_equipment_summary_table(df_telemetry: pd.DataFrame, df_oil: 
             # Tribology description
             if oil_status in ('Anormal', 'Crítico'):
                 if component_filter:
-                    desc_parts.append(f"muestra de {component_filter.lower()} anormal")
+                    # W34-01: translated label, lower-cased to fit mid-sentence
+                    # (was the raw crude value, e.g. "post_engine").
+                    desc_parts.append(f"muestra de {translate_component_label(component_filter).lower()} anormal")
                 elif not df_oil.empty and 'equipo' in df_oil.columns:
                     eq_o = df_oil[df_oil['equipo'] == equipo]
                     if not eq_o.empty:
@@ -515,15 +641,23 @@ def create_critical_equipment_summary_table(df_telemetry: pd.DataFrame, df_oil: 
                             desc_parts.append("muestras de aceite fuera de rango")
             elif oil_status in ('Alerta', 'Atención'):
                 if component_filter:
-                    desc_parts.append(f"muestra de {component_filter.lower()} en alerta")
+                    desc_parts.append(f"muestra de {translate_component_label(component_filter).lower()} en alerta")
                 elif not df_oil.empty and 'equipo' in df_oil.columns:
                     eq_o = df_oil[df_oil['equipo'] == equipo]
                     if not eq_o.empty:
                         _n_al = int(eq_o.iloc[0].get('components_alerta', 0)) if 'components_alerta' in eq_o.columns else 0
                         if _n_al > 0:
                             desc_parts.append(f"{_n_al} componente(s) con aceite en alerta")
-            elif oil_status == 'N/A':
+            elif oil_status == 'Sin Datos':
                 desc_parts.append("sin datos de tribología")
+            elif oil_status == 'Sin Fuente':
+                desc_parts.append("tribología no disponible para este cliente")
+
+            # W34-13: telemetry-side "no signal" reasons in the description too.
+            if telem_status == 'Sin Fuente':
+                desc_parts.append("telemetría no disponible para este cliente")
+            elif telem_status == 'Sin Datos':
+                desc_parts.append("sin datos de telemetría para esta unidad")
 
             if desc_parts:
                 description = "; ".join(desc_parts)
@@ -551,8 +685,12 @@ def create_critical_equipment_summary_table(df_telemetry: pd.DataFrame, df_oil: 
         sorted_rows = [r['row'] for r in table_rows]
         
         # ── Build HTML table ──
-        col_telemetria = f"Telemetría ({component_filter.title()})" if component_filter else "Telemetría"
-        col_tribologia = f"Tribología ({component_filter.title()})" if component_filter else "Tribología"
+        # W34-01: same label function as the filter dropdown and Alertas —
+        # a component_filter of "POST_ENGINE" reads "Posterior al motor" in
+        # the header too, matching the dropdown option the user picked.
+        component_header_label = translate_component_label(component_filter) if component_filter else None
+        col_telemetria = f"Telemetría ({component_header_label})" if component_header_label else "Telemetría"
+        col_tribologia = f"Tribología ({component_header_label})" if component_header_label else "Tribología"
         
         table = html.Table([
             html.Thead(html.Tr([
@@ -900,6 +1038,10 @@ def register_overview_general_callbacks(app):
             # Serialize to JSON with metadata about data freshness
             # Clean numpy types before serialization
             data = {
+                # W34-13: travels with the snapshot so update_critical_equipment_table
+                # can gate columns against config/client_services.json without a
+                # second Input('client-selector', 'value') dependency.
+                "client": client,
                 "telemetry": clean_numpy_types(df_telemetry.to_dict("records")) if not df_telemetry.empty else [],
                 "maintenance_status": clean_numpy_types(df_status.to_dict("records")) if not df_status.empty else [],
                 "maintenance_downtime": clean_numpy_types(df_downtime.to_dict("records")) if not df_downtime.empty else [],
@@ -1046,34 +1188,7 @@ def register_overview_general_callbacks(app):
     )
     def populate_component_filter(data):
         """Populate component filter dropdown from alerts + tribology data."""
-        if not data:
-            return []
-        
-        components = set()
-        
-        # From alerts (uppercase)
-        alerts = data.get("alerts", [])
-        for row in alerts:
-            comp = row.get("componente", "")
-            if comp and comp != "Desconocido":
-                components.add(comp.upper())
-        
-        # From oil component_details (lowercase → uppercase)
-        oil = data.get("oil", [])
-        for row in oil:
-            details = row.get("component_details", [])
-            if isinstance(details, list):
-                for d in details:
-                    if isinstance(d, dict):
-                        comp = d.get("component", "")
-                        if comp:
-                            components.add(comp.upper())
-        
-        if not components:
-            return []
-        
-        # Title-case for display
-        return [{"label": c.title(), "value": c} for c in sorted(components)]
+        return build_component_filter_options(data)
     
     @callback(
         Output("overview-oil-ranking-table", "children"),
@@ -1091,10 +1206,11 @@ def register_overview_general_callbacks(app):
             df_alerts = pd.DataFrame(data.get("alerts", []))
             df_maintenance = pd.DataFrame(data.get("maintenance_status", []))
             df_freshness = pd.DataFrame(data.get("freshness", []))
-            
+
             return create_critical_equipment_summary_table(
                 df_telemetry, df_oil, df_alerts, df_maintenance, df_freshness,
-                component_filter=selected_component
+                component_filter=selected_component,
+                client=data.get("client"),
             )
         except Exception as e:
             logger.error(f"Error updating critical equipment table: {e}")

@@ -11,24 +11,20 @@ from typing import Any, Iterable, Optional
 import pandas as pd
 
 from dashboard.components.alerts_charts import FEATURE_NAMES_ES, translate_system_label
-from dashboard.components.labels import translate_component_label
+from dashboard.components.labels import translate_component_label, source_style
 from dashboard.components.alerts_tables import parse_ia_message_sections
+from src.utils.date_utils import format_local, to_utc_naive
+from src.utils.logger import get_logger
 
+logger = get_logger(__name__)
 
-SOURCE_TRANSLATION = {
-    "Telemetria": "Telemetría",
-    "Telemetría": "Telemetría",
-    "Tribologia": "Tribología",
-    "Tribología": "Tribología",
-    "Mixto": "Mixto",
-}
 
 def translate_alert_system(value: Any) -> str:
     return translate_system_label(value)
 
 
 def translate_alert_source(value: Any) -> str:
-    return SOURCE_TRANSLATION.get(str(value), str(value or "Sin fuente"))
+    return source_style(value)[0]
 
 
 def translate_alert_component(value: Any) -> str:
@@ -78,7 +74,15 @@ def prepare_alert_rows(alerts_df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
     frame = alerts_df.copy()
     if "Timestamp" in frame.columns:
-        frame["Timestamp"] = pd.to_datetime(frame["Timestamp"], errors="coerce")
+        # W34-06: normalize through the same single entry point the loaders
+        # use, instead of a bare pd.to_datetime(errors="coerce"). That used to
+        # leave a raw offset-aware string (e.g. Capstone's "-04:00" ISO
+        # timestamps, when this function runs on data that hasn't gone
+        # through load_alerts_data's own normalization yet) as a
+        # timezone-AWARE Timestamp rather than the UTC-naive form every
+        # comparison downstream expects. Idempotent on data that is already
+        # UTC-naive — calling it twice does not shift the values again.
+        frame["Timestamp"] = to_utc_naive(frame["Timestamp"])
     frame["system_display"] = frame.get("sistema", "").map(translate_alert_system)
     frame["source_display"] = frame.get("Trigger_type", "").map(translate_alert_source)
     frame["component_display"] = frame.get("componente", "").map(translate_alert_component)
@@ -88,7 +92,9 @@ def prepare_alert_rows(alerts_df: pd.DataFrame) -> pd.DataFrame:
     frame["cause_display"] = sections.map(lambda item: item.get("causa_probable") or "Sin causa probable registrada")
     frame["action_display"] = sections.map(lambda item: item.get("acciones") or "Sin acción recomendada registrada")
     frame["evidence_display"] = frame.apply(_evidence_label, axis=1)
-    frame["date_display"] = frame["Timestamp"].dt.strftime("%d/%m/%Y %H:%M") if "Timestamp" in frame.columns else "-"
+    # W34-06: local wall-clock time, not the internal UTC-naive value — this
+    # is the instant every surface (table, header, chart, dropdown) must agree on.
+    frame["date_display"] = format_local(frame["Timestamp"]) if "Timestamp" in frame.columns else "-"
     return frame
 
 
@@ -114,9 +120,27 @@ def filter_alert_rows(
     if evidence:
         frame = frame[frame["evidence_display"].isin(list(evidence))]
     if start_date and "Timestamp" in frame.columns:
-        frame = frame[frame["Timestamp"] >= pd.to_datetime(start_date)]
+        # W34-06 (quality-review follow-up): start_date/end_date are Chile
+        # calendar days from the date-range picker; Timestamp is already
+        # UTC-naive (prepare_alert_rows), so the boundary must go through the
+        # same to_utc_naive conversion the rest of this tab uses, not a bare
+        # pd.to_datetime — otherwise this filter reads the wrong real-world
+        # day by the UTC/Chile offset, the exact defect W34-06 fixed elsewhere.
+        # Chile's own DST transition lands on local midnight, so a boundary
+        # date can itself be nonexistent/ambiguous — to_utc_naive returns NaT
+        # for that instead of raising; treat it the same as "no lower bound"
+        # rather than let a NaT comparison silently empty the whole result.
+        start_utc = to_utc_naive(pd.Timestamp(start_date), source_tz="America/Santiago")
+        if pd.isna(start_utc):
+            logger.warning(f"Fecha desde cae en una transición de horario de verano, ignorando filtro: {start_date!r}")
+        else:
+            frame = frame[frame["Timestamp"] >= start_utc]
     if end_date and "Timestamp" in frame.columns:
-        frame = frame[frame["Timestamp"] < pd.to_datetime(end_date) + pd.Timedelta(days=1)]
+        end_utc = to_utc_naive(pd.Timestamp(end_date), source_tz="America/Santiago")
+        if pd.isna(end_utc):
+            logger.warning(f"Fecha hasta cae en una transición de horario de verano, ignorando filtro: {end_date!r}")
+        else:
+            frame = frame[frame["Timestamp"] < end_utc + pd.Timedelta(days=1)]
     return frame.sort_values("Timestamp", ascending=False, na_position="last")
 
 
@@ -129,6 +153,9 @@ def alert_summary(alerts_df: pd.DataFrame) -> dict:
         "units": int(frame["UnitId"].nunique()),
         "telemetry": int(frame["has_telemetry"].map(_bool).sum()),
         "tribology": int(frame["has_tribology"].map(_bool).sum()),
-        "mixed": int((frame["source_display"] == "Mixto").sum()),
+        # W34-04: compare the raw Trigger_type value, not the translated
+        # source_display label — a future label change (the "Mixto" text is
+        # provisional) must not silently change what this KPI counts.
+        "mixed": int((frame.get("Trigger_type", "") == "Mixto").sum()),
         "latest": frame["Timestamp"].max(),
     }

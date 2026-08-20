@@ -13,8 +13,9 @@ import dash_bootstrap_components as dbc
 from typing import List, Optional, Dict
 
 from src.utils.logger import get_logger
+from src.utils.date_utils import format_local
 from dashboard.components.alerts_charts import FEATURE_NAMES_ES
-from dashboard.components.labels import translate_component_label
+from dashboard.components.labels import translate_component_label, source_style, SOURCE_STYLE
 
 logger = get_logger(__name__)
 
@@ -243,8 +244,21 @@ def create_alerts_report_table(alerts_df: pd.DataFrame) -> dash_table.DataTable:
     if alerts_df is None or alerts_df.empty:
         return html.Div([dbc.Alert("No hay alertas para los filtros seleccionados.", color="info")])
     try:
+        # W34-04: derive both the highlight rule's match text and its color
+        # from the same source of truth the cells themselves use — a
+        # hardcoded '{Fuente} = "Mixto"' would silently stop matching if the
+        # provisional "Mixto" label is ever renamed.
+        mixto_label, mixto_color = source_style("Mixto")
+        sorted_alerts_df = alerts_df.sort_values("Timestamp", ascending=False).copy()
+        # Critical-review follow-up: assign the formatted column once,
+        # directly on the frame — same pattern alerts_report.py::
+        # prepare_alert_rows already uses — instead of a separate Series
+        # indexed by `.loc[idx]` inside the loop (extra state to keep
+        # aligned, and slower: `.loc[]` per row adds real overhead on a
+        # table rebuilt on every filter change).
+        sorted_alerts_df["_fecha_local"] = format_local(sorted_alerts_df["Timestamp"])
         rows = []
-        for _, row in alerts_df.sort_values("Timestamp", ascending=False).iterrows():
+        for _, row in sorted_alerts_df.iterrows():
             sections = parse_ia_message_sections(row.get("mensaje_ia", ""))
             trigger_vars = row.get("Trigger_Var", "Sin señal registrada")
             # Mixed alerts store Trigger_Var as a serialized list. Preserve
@@ -263,9 +277,10 @@ def create_alerts_report_table(alerts_df: pd.DataFrame) -> dash_table.DataTable:
                 if signal_key and signal_key not in signal_labels:
                     signal_labels.append(FEATURE_NAMES_ES.get(signal_key, signal_key))
             signal_label = ", ".join(signal_labels) or "Sin señal registrada"
-            source = {"Telemetria": "Telemetría", "Tribologia": "Tribología"}.get(
-                str(row.get("Trigger_type", "")), str(row.get("Trigger_type", "Sin fuente"))
-            )
+            # W34-04: single source of truth for the label (SOURCE_STYLE in
+            # labels.py), instead of an inline dict duplicating the one in
+            # alerts_report.py's translate_alert_source.
+            source, _source_color = source_style(row.get("Trigger_type", ""))
             if bool(row.get("has_telemetry")) and bool(row.get("has_tribology")):
                 evidence = "Telemetría + Tribología"
             elif bool(row.get("has_telemetry")):
@@ -276,7 +291,9 @@ def create_alerts_report_table(alerts_df: pd.DataFrame) -> dash_table.DataTable:
                 evidence = "Sin evidencia"
             rows.append({
                 "ID": row.get("FusionID", "-"),
-                "Fecha": pd.to_datetime(row.get("Timestamp"), errors="coerce").strftime("%d/%m/%Y %H:%M") if pd.notna(row.get("Timestamp")) else "-",
+                # W34-06: local wall-clock time (Timestamp is already
+                # UTC-naive by the time it reaches here — no re-parse).
+                "Fecha": row["_fecha_local"],
                 "Unidad": row.get("UnitId", "-"),
                 "Sistema": _translate_system(row.get("sistema", "-")),
                 "Componente": _translate_component(row.get("componente", "-")),
@@ -322,7 +339,7 @@ def create_alerts_report_table(alerts_df: pd.DataFrame) -> dash_table.DataTable:
                 {"if": {"column_id": "Señal / variable"}, "minWidth": "150px"},
             ],
             style_data_conditional=[
-                {"if": {"filter_query": '{Fuente} = "Mixto"'}, "borderLeft": "4px solid #6f42c1"},
+                {"if": {"filter_query": f'{{Fuente}} = "{mixto_label}"'}, "borderLeft": f"4px solid {mixto_color}"},
                 {"if": {"state": "active"}, "backgroundColor": "#dbeafe", "color": "#12344d", "border": "1px solid #4f8fc0"},
             ],
         )

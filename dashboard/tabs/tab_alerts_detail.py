@@ -80,23 +80,25 @@ def create_layout() -> html.Div:
                         )
                     ], md=3),
                     
-                    # Has Telemetry Filter
+                    # W34-05: Date-from filter (replaces "Con Telemetría").
+                    # Inclusive: an alert exactly at midnight of the chosen
+                    # Chile calendar day is included. No date = no lower
+                    # bound. See filter_alert_dropdown_by_criteria for the
+                    # UTC-naive Timestamp comparison this drives.
                     dbc.Col([
                         html.Label([
-                            html.I(className="fas fa-signal me-1"),
-                            "Con Telemetría"
+                            html.I(className="fas fa-calendar-alt me-1"),
+                            "Fecha desde"
                         ], className="fw-bold mb-2"),
-                        dcc.Dropdown(
-                            id='detail-filter-telemetry',
-                            options=[
-                                {'label': '✓ Sí', 'value': 'yes'},
-                                {'label': '✗ No', 'value': 'no'}
-                            ],
-                            placeholder="Todos",
-                            clearable=True
+                        dcc.DatePickerSingle(
+                            id='detail-filter-date-from',
+                            placeholder="Sin límite",
+                            display_format='DD/MM/YYYY',
+                            clearable=True,
+                            className='w-100'
                         )
                     ], md=3),
-                    
+
                     # Has Tribology Filter
                     dbc.Col([
                         html.Label([

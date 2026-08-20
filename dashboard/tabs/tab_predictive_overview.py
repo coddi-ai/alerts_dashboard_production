@@ -23,6 +23,7 @@ from dashboard.components.accumulated_curve import (
     _empty_state as _accumulated_empty_state,
 )
 from src.data.loaders import get_latest_analisis_inteligente, get_model_run_date
+from dashboard.components.labels import NO_DATA_BG, NO_DATA_TEXT
 
 logger = get_logger(__name__)
 
@@ -194,7 +195,17 @@ def attach_status(latest: pd.DataFrame, client: str, component: str) -> pd.DataF
     return latest
 
 
-def _score_cell_style(value: float) -> dict:
+def _score_cell_style(value) -> dict:
+    """Cell style for a ranking/score value. `None`/NaN get their own
+    neutral style (W34-10) — a missing value must never look like the
+    healthiest possible score, which is what green at 0 read as before."""
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        # Same shared NO_DATA_* tokens the Estado x Unidad and Estado de
+        # Datos tables' "no data" badges use (dashboard/components/labels.py)
+        # — quality-review follow-up: this used to be its own independent
+        # literal, a third copy of the same two values kept in sync only by
+        # a comment.
+        return {"background": NO_DATA_BG, "text": NO_DATA_TEXT}
     if value >= 70:
         return {"background": "#fcebeb", "text": "#a32d2d"}
     if value >= 40:
@@ -228,7 +239,15 @@ def _driver_bar(name: str, value: float):
 def _priority_card(unit, score, acum_30d, delta, status, drivers, horometro_text="—"):
     colors = _status_colors(status)
 
-    if delta > 1:
+    # W34-10: a unit with no computed ranking yet must not render the literal
+    # text "nan"/"+nan" — found during visual QA, same "missing is not zero"
+    # gap this improvement already closed in the failure-mode table.
+    acum_headline_text = f"{acum_30d:.0f}" if pd.notna(acum_30d) else "—"
+    score_recent_text = f"Reciente: {score:.1f}" if pd.notna(score) else "Reciente: —"
+
+    if pd.isna(delta):
+        delta_cls, delta_txt = "delta-badge delta-neu", "—"
+    elif delta > 1:
         delta_cls, delta_txt = "delta-badge delta-pos", f"+{delta:.1f}"
     elif delta < -1:
         delta_cls, delta_txt = "delta-badge delta-neg", f"{delta:.1f}"
@@ -242,11 +261,11 @@ def _priority_card(unit, score, acum_30d, delta, status, drivers, horometro_text
                       style={"background": colors["bg"], "color": colors["text"]}),
         ], className="pc-header"),
         html.Div([
-            html.Span(f"{acum_30d:.0f}", className="pc-score"),
+            html.Span(acum_headline_text, className="pc-score"),
         ], className="pc-score-row"),
         html.Div([
             html.Span([
-                html.Span(f"Reciente: {score:.1f}", className="pc-acum"),
+                html.Span(score_recent_text, className="pc-acum"),
                 html.Span(delta_txt, className=delta_cls, style={"marginLeft": "6px"}),
             ], style={"display": "inline-flex", "alignItems": "center"}),
             html.Span([
@@ -324,7 +343,7 @@ def _failure_table(sorted_df, window, sort_by, ascending, failure_modes):
     header = html.Thead(html.Tr([
         html.Th("Unidad", className="fm-th fm-th-unit"),
         ranking_th,
-        html.Th("Status", className="fm-th"),
+        html.Th("Estado", className="fm-th"),  # W34-10: was "Status" (English)
         *[_fm_th(lbl, key) for key, lbl in zip(fm_keys, fm_labels)],
     ]))
 
@@ -332,13 +351,19 @@ def _failure_table(sorted_df, window, sort_by, ascending, failure_modes):
     for _, r in sorted_df.iterrows():
         status = r["status"]
         colors = _status_colors(status)
-        ranking_val = float(r[window]) if window in r.index and pd.notna(r[window]) else 0.0
+        # W34-10: `pd.notna` before the cast, not a bare `.get(key, 0)` —
+        # that only defaults when the KEY is absent, not when the row's
+        # VALUE is NaN. A present-but-NaN ranking used to sail through as
+        # the literal string "nan", styled green by _score_cell_style's old
+        # fall-through. `None` here (never `0.0`) keeps the null
+        # distinguishable all the way to render time.
+        ranking_val = float(r[window]) if window in r.index and pd.notna(r[window]) else None
 
         style = _score_cell_style(ranking_val)
         cells = [
             html.Td(r["Unit"], className="fm-td fm-td-unit"),
             html.Td(
-                f"{ranking_val:.1f}",
+                f"{ranking_val:.1f}" if ranking_val is not None else "—",
                 className="fm-td fm-td-score fm-td-active" if ranking_active else "fm-td fm-td-score",
                 style={"background": style["background"], "color": style["text"],
                        "fontWeight": "600" if ranking_active else "500"},
@@ -352,11 +377,14 @@ def _failure_table(sorted_df, window, sort_by, ascending, failure_modes):
 
         for key in fm_keys:
             col_name = f"{key}{fm_suffix}" if fm_suffix else key
-            val = float(r[col_name]) if col_name in r.index and pd.notna(r[col_name]) else 0.0
+            # W34-10: None (not 0.0) when the column is absent or the value
+            # is NaN — a missing failure-mode score must not render "0" in
+            # the same green a genuinely healthy 0 score gets.
+            val = float(r[col_name]) if col_name in r.index and pd.notna(r[col_name]) else None
             fm_style = _score_cell_style(val)
             is_sort = key == sort_by
             cells.append(html.Td(
-                f"{val:.0f}",
+                f"{val:.0f}" if val is not None else "—",
                 className="fm-td fm-td-score fm-td-active" if is_sort else "fm-td fm-td-score",
                 style={"background": fm_style["background"], "color": fm_style["text"],
                        "fontWeight": "600" if is_sort else "500"},
@@ -562,7 +590,11 @@ def _render_component_overview(df_latest, prev_ranking, component: str,
     ])
 
     # Failure mode table
-    sorted_df = latest.sort_values("avg_ranking_30d", ascending=False)
+    # W34-10: "Unit" as a secondary key makes tie order deterministic across
+    # renders — plain `sort_values` on one column falls back to an unstable
+    # quicksort for ties, so two identical-input renders could otherwise show
+    # tied units in a different order.
+    sorted_df = latest.sort_values(["avg_ranking_30d", "Unit"], ascending=[False, True])
     table_section = html.Div([
         html.Div([
             html.Div([
