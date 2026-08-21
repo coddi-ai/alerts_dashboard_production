@@ -274,5 +274,5 @@ if __name__ == '__main__':
         host=host,
         port=port,
         debug=debug,
-        # threaded=True,
+        threaded=True,
     )
