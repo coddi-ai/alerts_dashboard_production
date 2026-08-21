@@ -33,6 +33,7 @@ from dashboard.components.oil_charts import get_essay_limits_four, classify_four
 from dashboard.components.ai_analysis_panel import create_ai_analysis_panel
 from src.data.loaders import load_analisis_inteligente
 from dashboard.tabs.tab_predictive_overview import attach_status
+from src.charts.signals import SIGNAL_LABELS
 
 logger = get_logger(__name__)
 
@@ -51,7 +52,15 @@ def _resolve_client_dicts(client, component):
     """
     ckey = (client or "cda").lower()
     oil_labels = OIL_LABELS.get(ckey, OIL_LABELS["cda"])
-    telem_labels = TELEMETRY_LABELS.get(ckey, TELEMETRY_LABELS["cda"])
+    # Quality-review follow-up: TELEMETRY_LABELS is a curated per-client dict
+    # (only the codes someone has explicitly reviewed for this client), not
+    # the full catalogue. Layering it over SIGNAL_LABELS means a signal that
+    # is genuinely new to this client's TELEMETRY_LABELS entry but already
+    # catalogued in signals.py still shows its real label here instead of
+    # the raw code — the per-client dict keeps final say (it wins on
+    # overlapping keys), this is only a fallback for what it hasn't been
+    # given a chance to override yet.
+    telem_labels = {**SIGNAL_LABELS, **TELEMETRY_LABELS.get(ckey, TELEMETRY_LABELS["cda"])}
     oil_limits_four = load_predictive_oil_limits_four(ckey, component)
     return oil_labels, telem_labels, oil_limits_four
 

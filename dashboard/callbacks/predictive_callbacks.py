@@ -260,9 +260,13 @@ def register_callbacks(app):
             actual_sort_col = sort_by
 
         if actual_sort_col in latest.columns:
-            sorted_df = latest.sort_values(actual_sort_col, ascending=ascending)
+            # "Unit" as a secondary key makes tie order deterministic across
+            # renders (W34-10) instead of an unstable-quicksort fallback,
+            # while still respecting the column-header ascending/descending
+            # toggle above.
+            sorted_df = latest.sort_values([actual_sort_col, "Unit"], ascending=[ascending, True])
         else:
-            sorted_df = latest.sort_values("avg_ranking_30d", ascending=False)
+            sorted_df = latest.sort_values(["avg_ranking_30d", "Unit"], ascending=[False, True])
 
         return _failure_table(sorted_df, window, sort_by, ascending, failure_modes), state
 

@@ -17,6 +17,7 @@ from typing import Dict, List, Optional
 
 from src.utils.logger import get_logger
 from src.utils.file_utils import list_excel_files, safe_read_excel, safe_read_parquet
+from src.utils.date_utils import to_utc_naive
 
 logger = get_logger(__name__)
 
@@ -475,10 +476,14 @@ def _load_alerts_data_cached(client: str) -> pd.DataFrame:
     try:
         df = pd.read_csv(file_path)
         
-        # Normalize event timestamps to timezone-naive UTC. Capstone emits
-        # ISO timestamps with offsets while the Dash date picker emits naive
-        # calendar dates; one representation avoids aware/naive comparisons.
-        df['Timestamp'] = pd.to_datetime(df['Timestamp'], utc=True).dt.tz_convert(None)
+        # Normalize event timestamps to timezone-naive UTC (W34-06: the single
+        # normalization point — every comparison, window and filter downstream
+        # stays in this UTC-naive form; conversion to local time happens only
+        # at display time, via to_local_naive()/format_local()). Capstone
+        # emits ISO timestamps with offsets while the Dash date picker emits
+        # naive calendar dates; one representation avoids aware/naive
+        # comparisons.
+        df['Timestamp'] = to_utc_naive(df['Timestamp'])
         
         # Fill sistema, subsistema and componente missing values
         df['sistema'] = df['sistema'].fillna('Desconocido')
@@ -703,7 +708,10 @@ def _load_telemetry_alerts_detail_golden_cached(client: str) -> pd.DataFrame:
     
     try:
         df = pd.read_csv(file_path)
-        df['TimeStart'] = pd.to_datetime(df['TimeStart'], utc=True).dt.tz_convert(None)
+        # W34-06: same UTC-naive normalization point as consolidated_alerts's
+        # Timestamp column, so the alert instant and its telemetry evidence
+        # window compare against the same clock.
+        df['TimeStart'] = to_utc_naive(df['TimeStart'])
         logger.info(f"Loaded {len(df)} telemetry alert detail records from golden layer")
         return df
     

@@ -125,7 +125,24 @@ def create_telemetry_unit_detail_layout() -> html.Div:
         ], className="shadow-sm mb-3"),
         html.Div([
             html.H4([html.I(className="fas fa-chart-line me-2"), "Evidencia de la señal seleccionada"], className="text-primary mb-2 mt-4 pb-2 border-bottom"),
-            html.P("Serie temporal con límites, tendencia y eventos materializados resaltados.", className="text-muted mb-3"),
+            # W34-09: simplified view — starts at 1 day, no event overlays;
+            # the buttons below only change the window width, never
+            # unit/sistema/señal.
+            html.P("Serie temporal con límites y tendencia. Amplíe la ventana con los botones si necesita más contexto.", className="text-muted mb-2"),
+            dbc.RadioItems(
+                id="telemetry-detail-window-days",
+                options=[
+                    {"label": "1 día", "value": 1},
+                    {"label": "7 días", "value": 7},
+                    {"label": "30 días", "value": 30},
+                ],
+                value=1,
+                inline=True,
+                className="btn-group mb-3",
+                inputClassName="btn-check",
+                labelClassName="btn btn-outline-primary btn-sm",
+                labelCheckedClassName="active",
+            ),
         ]),
         dcc.Loading(html.Div(id="telemetry-detail-signal-cards"), type="circle"),
     ])

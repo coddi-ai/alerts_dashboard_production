@@ -32,6 +32,7 @@ from dash import html
 import plotly.colors
 
 from src.utils.logger import get_logger
+from src.utils.date_utils import to_local_naive
 
 logger = get_logger(__name__)
 
@@ -149,48 +150,58 @@ def _state_label(value):
 
 # Spanish feature names mapping
 # Signal labels live in src/charts/signals.py so the dashboard and Campbell AI use
-# the same catalogue; re-exported here for existing importers.
+# the same catalogue; re-exported here for existing importers. SIGNAL_LABELS is a
+# read-only view (types.MappingProxyType) \u2014 see the W34-11 note in
+# src/charts/signals.py. The Capstone canonical codes that used to be injected
+# here via `FEATURE_NAMES_ES.update(...)` at import time now live in the
+# catalogue itself, so there is exactly one definition instead of a static base
+# plus a runtime patch whose effect depended on import order.
 from src.charts.signals import OMITTED_SIGNALS, SIGNAL_LABELS
 
 FEATURE_NAMES_ES = SIGNAL_LABELS
 
-# Capstone canonical signal names. These keys are additive and do not change
-# the established CDA labels or chart rendering.
-FEATURE_NAMES_ES.update({
-    'engine_speed_rpm': 'Velocidad del motor',
-    'engine_load_pct': 'Carga del motor',
-    'coolant_temp_c': 'Temperatura del refrigerante',
-    'coolant_pressure_psi': 'Presi\u00f3n del refrigerante',
-    'ecu_temp_c': 'Temperatura de la ECU',
-    'crankcase_pressure_inh2o': 'Presi\u00f3n del c\u00e1rter',
-    'compressor_intake_temp_c': 'Temperatura de admisi\u00f3n del compresor',
-    'turbo_speed_rpm': 'Velocidad del turbo',
-    'oil_filter_dp_psi': 'Presi\u00f3n diferencial del filtro de aceite',
-    'oil_filter_dp_mcrs_psi': 'Presi\u00f3n diferencial del filtro de aceite (MCRS)',
-    'oil_temp_c': 'Temperatura del aceite',
-    'fuel_pump_intake_pressure_psi': 'Presi\u00f3n de admisi\u00f3n de la bomba de combustible',
-    'oil_diff_pressure_psi': 'Presi\u00f3n diferencial del aceite',
-    'pre_filter_oil_pressure_psi': 'Presi\u00f3n de aceite pre-filtro',
-    'rifle_oil_pressure_psi': 'Presi\u00f3n de aceite del rifle',
-    'post_engine_pressure_psi': 'Presi\u00f3n de aceite post-motor',
-    'oil_level_pct': 'Nivel de aceite',
-    'oil_priming_state': 'Estado de cebado del aceite',
-    'fan_speed_rpm': 'Velocidad del ventilador',
-    'power_hp': 'Potencia del motor',
-    'imp_lb_psi': 'Presi\u00f3n de admisi\u00f3n banco izquierdo',
-    'imp_rb_psi': 'Presi\u00f3n de admisi\u00f3n banco derecho',
-    'imt_lbf_c': 'Temperatura de admisi\u00f3n banco izquierdo frontal',
-    'imt_lbr_c': 'Temperatura de admisi\u00f3n banco izquierdo trasero',
-    'imt_rbf_c': 'Temperatura de admisi\u00f3n banco derecho frontal',
-    'imt_rbr_c': 'Temperatura de admisi\u00f3n banco derecho trasero',
-    'egt_avg_c': 'Temperatura promedio de gases de escape',
-    'egt_lb_c': 'Temperatura de escape banco izquierdo',
-    'egt_rb_c': 'Temperatura de escape banco derecho',
-    **{f'egt_{index:02d}_c': f'Temperatura de escape cilindro {index:02d}' for index in range(1, 17)},
-})
-
 # Features to omit from dashboard
 OMITTED_FEATURES = list(OMITTED_SIGNALS)
+
+# Signals that ARE catalogued (they have a real label in SIGNAL_LABELS) but
+# never get their own subplot in the sensor-trends chart because they are
+# already shown as a dedicated KPI card in create_context_kpis_cards_golden:
+# EngSpd -> "Velocidad Motor", Payload -> "Carga". This is a different concept
+# from OMITTED_SIGNALS (signals absent from the catalogue entirely, e.g.
+# GroundSpd/EngLoad) \u2014 collected here, not duplicated, so
+# create_telemetry_evidence_section (alerts_callbacks.py, the only consumer)
+# has one place to combine both exclusion reasons instead of a third
+# independently hardcoded list.
+KPI_ONLY_SIGNALS: tuple[str, ...] = ('Payload', 'EngSpd')
+
+
+def select_plottable_signals(feature_names: List[str]) -> tuple[List[str], List[str]]:
+    """Split candidate `_Value` feature names into (plottable, uncatalogued).
+
+    A signal gets its own sensor-trends panel only when it is both present in
+    the source (the caller already restricted `feature_names` to columns that
+    exist) and permitted: catalogued in SIGNAL_LABELS, and not one of the
+    signals shown elsewhere instead (KPI_ONLY_SIGNALS) or excluded from the
+    catalogue entirely (OMITTED_SIGNALS). Pulled out as a pure function (W34-11)
+    so the rule is unit-testable without building a full alert/telemetry
+    fixture; the only caller is create_telemetry_evidence_section in
+    alerts_callbacks.py.
+
+    Returns:
+        (plottable, uncatalogued) — `plottable` keeps the input order;
+        `uncatalogued` lists source columns that exist but have no catalogue
+        entry (worth a log line at the call site, not silence).
+    """
+    excluded = set(KPI_ONLY_SIGNALS) | set(OMITTED_SIGNALS)
+    uncatalogued = [
+        name for name in feature_names
+        if name not in excluded and name not in FEATURE_NAMES_ES
+    ]
+    plottable = [
+        name for name in feature_names
+        if name not in excluded and name in FEATURE_NAMES_ES
+    ]
+    return plottable, uncatalogued
 
 
 # Shared sizing for the three "Análisis semanal de alertas" charts so their
@@ -1327,6 +1338,18 @@ def create_sensor_trends_chart_golden(
         # Use filtered data for plotting
         alert_data = alert_data_filtered
 
+        # W34-06: the window above compares in UTC-naive (unchanged) — this
+        # is the last point that matters. From here on the axis itself is
+        # what a person reads, so it — and alert_time, which everything
+        # below measures itself against (the highlight box, the trigger
+        # lookup by nearest time) — shift to local wall-clock time together.
+        # A fixed offset shift does not change relative deltas (gap
+        # detection, the +/-30s highlight box width), so nothing downstream
+        # needs to know this happened.
+        alert_data = alert_data.copy()
+        alert_data['TimeStart'] = to_local_naive(alert_data['TimeStart'])
+        alert_time = to_local_naive(alert_time)
+
         # REQ-AD-03: the trigger panel is emphasized by *position* (always
         # first) plus a stronger title -- resolved once, up front.
         trigger_feature = None
@@ -1775,7 +1798,12 @@ def create_gps_route_map_golden(
                     color="#ea6648",  # Light red color for non-alert points
                 ),
                 showlegend=False,
-                text=non_alert_gps['TimeStart'].dt.strftime('%H:%M:%S'),
+                # W34-06: local wall-clock time in the hover text. The map
+                # has no time axis to keep visually aligned (unlike the
+                # sensor-trends chart), so converting only at the display
+                # site here is enough — the windowing/closest-point math
+                # above stays in UTC-naive, unchanged.
+                text=to_local_naive(non_alert_gps['TimeStart']).dt.strftime('%H:%M:%S'),
                 hovertemplate='Hora: %{text}<extra></extra>'
             ))
         
@@ -1807,7 +1835,7 @@ def create_gps_route_map_golden(
                 allowoverlap=True
             ),
             showlegend=False,
-            text=[f"⚠️ Alerta: {alert_time.strftime('%H:%M:%S')}"],
+            text=[f"⚠️ Alerta: {to_local_naive(alert_time).strftime('%H:%M:%S')}"],
             hovertemplate='%{text}<extra></extra>'
         ))
         
