@@ -19,6 +19,9 @@ EXPOSE 8000
 ENV PYTHONUNBUFFERED=1
 ENV DASHBOARD_HOST=0.0.0.0
 ENV DASHBOARD_PORT=8050
+# Speed profile: Polars is used for large CSV/Parquet reads and automatically
+# uses the CPUs assigned to the container unless POLARS_MAX_THREADS is set.
+ENV DASHBOARD_FRAME_ENGINE=polars
 
 
-CMD ["python", "dashboard/app.py"]
+CMD ["gunicorn", "--bind", "0.0.0.0:8050", "--workers", "1", "--threads", "8", "--timeout", "120", "dashboard.app:server"]

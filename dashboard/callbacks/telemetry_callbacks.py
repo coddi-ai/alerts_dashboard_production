@@ -9,7 +9,7 @@ from dash import callback, Input, Output, State, ctx, html, dcc, dash_table
 from dash.exceptions import PreventUpdate
 import dash_bootstrap_components as dbc
 
-from src.data.loaders import load_silver_telemetry_week
+from src.data.loaders import load_silver_telemetry_week, _data_path
 from dashboard.components.telemetry_charts import (
     STATUS_COLORS,
     build_fleet_heatmap,
@@ -30,6 +30,7 @@ from dashboard.components.telemetry_report import (
 )
 from dashboard.tabs.tab_telemetry_fleet import create_telemetry_fleet_layout
 from dashboard.tabs.tab_telemetry_unit_detail import create_telemetry_unit_detail_layout
+from dashboard.components.source_status import render_service_source_status
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -40,12 +41,16 @@ def update_telemetry_availability(client):
     if not client:
         return html.Div()
     snapshot = load_telemetry_snapshot(client)
+    source_status = render_service_source_status(client, "monitoring-telemetry")
     if snapshot.unit_health.empty and snapshot.system_health.empty:
-        return dbc.Alert([
-            html.I(className="fas fa-info-circle me-2"),
-            f"No hay datos de Telemetría disponibles para el cliente {str(client).upper()}."
-        ], color="info")
-    return html.Div()
+        return html.Div([
+            source_status,
+            dbc.Alert([
+                html.I(className="fas fa-info-circle me-2"),
+                f"No hay datos de Telemetría disponibles para el cliente {str(client).upper()}."
+            ], color="info"),
+        ])
+    return source_status
 
 
 @callback(
@@ -596,7 +601,7 @@ def _load_recent_telemetry_signal_cached(
     if available_weeks:
         candidates = [(anchor_year, int(w)) for w in sorted({int(w) for w in available_weeks}, reverse=True)[:weeks]]
     else:
-        silver_dir = Path(f"data/telemetry/silver/{client.lower()}/Telemetry_Wide_With_States")
+        silver_dir = _data_path("telemetry", "silver", client.lower(), "Telemetry_Wide_With_States")
         existing = [
             week for week in range(1, 54)
             if (silver_dir / f"Week{week:02d}Year{anchor_year}.parquet").exists()

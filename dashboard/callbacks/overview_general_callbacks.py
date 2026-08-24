@@ -15,6 +15,8 @@ import logging
 from src.data.loaders import load_telemetry_unit_health, load_alerts_data, load_machine_status_for_client
 from src.data.maintenance_repository import get_repository
 from dashboard.callbacks.data_freshness_callbacks import load_data_freshness
+from dashboard.components.source_status import render_service_source_status
+from src.data.catalog import availability_as_dict
 from dashboard.components.labels import translate_component_label, NO_DATA_ICON, NO_DATA_BG, NO_DATA_TEXT
 from config.client_services import is_service_enabled
 
@@ -968,6 +970,15 @@ def register_overview_general_callbacks(app):
     """
     
     @callback(
+        Output("overview-source-status", "children"),
+        [Input("client-selector", "value")],
+    )
+    def update_overview_source_status(client):
+        if not client:
+            return html.Div()
+        return render_service_source_status(client, "overview-general")
+
+    @callback(
         [
             Output("store-overview-data", "data"),
             Output("store-overview-timestamp", "data"),
@@ -1042,6 +1053,8 @@ def register_overview_general_callbacks(app):
                 # can gate columns against config/client_services.json without a
                 # second Input('client-selector', 'value') dependency.
                 "client": client,
+                # Derived provenance only; source files and schemas remain untouched.
+                "availability": availability_as_dict(client),
                 "telemetry": clean_numpy_types(df_telemetry.to_dict("records")) if not df_telemetry.empty else [],
                 "maintenance_status": clean_numpy_types(df_status.to_dict("records")) if not df_status.empty else [],
                 "maintenance_downtime": clean_numpy_types(df_downtime.to_dict("records")) if not df_downtime.empty else [],

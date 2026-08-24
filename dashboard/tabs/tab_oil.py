@@ -39,6 +39,7 @@ def create_layout() -> html.Div:
                 )
             ])
         ], className="mb-4"),
+        html.Div(id="oil-source-status"),
 
         # Internal Tabs
         dcc.Tabs(

@@ -1,5 +1,6 @@
 # Core Data Processing
 pandas>=2.1.0
+polars>=1.0.0
 numpy>=1.24.0
 pyarrow>=14.0.0
 openpyxl>=3.1.0
@@ -15,6 +16,7 @@ python-dotenv>=1.0.0
 dash>=2.14.0
 dash-bootstrap-components>=1.5.0
 plotly>=5.17.0
+gunicorn>=22.0.0; platform_system != "Windows"
 nbformat>=4.2.0
 itsdangerous>=2.2.0
 
