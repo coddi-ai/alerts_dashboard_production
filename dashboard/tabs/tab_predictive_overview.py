@@ -32,26 +32,37 @@ logger = get_logger(__name__)
 
 # ── Data Loading (Multi-Component) ────────────────────────────────────────────
 
-@lru_cache(maxsize=8)
+@lru_cache(maxsize=16)
+def _discover_components_cached(client: str, data_dir: str, directory_mtime_ns: int) -> dict:
+    """Cache component discovery until the directory generation changes."""
+
+    data_path = Path(data_dir)
+    if not data_path.exists():
+        return {}
+
+    components = {}
+    for fname in sorted(os.listdir(data_path)):
+        if fname.endswith(".csv"):
+            component_name = fname.replace(".csv", "")
+            components[component_name] = data_path / fname
+    return components
+
+
 def _discover_components(client: str) -> dict:
     """Auto-discover available component CSV files for a client.
 
-    Cached per client: this lists the predictive golden-layer directory,
-    which on a network filesystem is a round trip and doesn't need repeating
-    on every callback firing within the same process lifetime.
+    The cache key includes the directory mtime so a newly materialized
+    component becomes visible without restarting the worker.
     """
     data_dir = dashboard_data_root() / "predictive" / "golden" / client.lower()
 
     if not data_dir.exists():
         return {}
-
-    components = {}
-    for fname in sorted(os.listdir(data_dir)):
-        if fname.endswith(".csv"):
-            component_name = fname.replace(".csv", "")
-            components[component_name] = data_dir / fname
-
-    return components
+    try:
+        directory_mtime_ns = data_dir.stat().st_mtime_ns
+    except OSError:
+        return {}
+    return _discover_components_cached(client.lower(), str(data_dir), directory_mtime_ns)
 
 
 @lru_cache(maxsize=16)

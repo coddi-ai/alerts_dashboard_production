@@ -2,7 +2,11 @@
 
 from pathlib import Path
 
-from src.data.catalog import build_client_availability, resolve_data_file
+from src.data.catalog import (
+    build_client_availability,
+    clear_availability_cache,
+    resolve_data_file,
+)
 
 
 def test_auxiliary_loader_accepts_golden_layout(tmp_path: Path):
@@ -47,3 +51,14 @@ def test_telemetry_partition_is_available_without_changing_files(tmp_path: Path)
     assert probe.status == "available"
     assert probe.path == str(tmp_path / "telemetry" / "golden" / "cda" / "unit_health")
     assert source.read_bytes() == b"snapshot"
+
+
+def test_catalog_cache_can_be_refreshed_after_new_source(tmp_path: Path):
+    assert build_client_availability("CDA", tmp_path)["oil_classified"].status == "missing"
+
+    source = tmp_path / "oil" / "golden" / "cda" / "classified.parquet"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"derived")
+    clear_availability_cache()
+
+    assert build_client_availability("CDA", tmp_path)["oil_classified"].status == "available"

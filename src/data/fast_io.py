@@ -9,10 +9,13 @@ fallback during troubleshooting.
 from __future__ import annotations
 
 import os
+import logging
 from pathlib import Path
 from typing import Iterable, Mapping
 
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 
 def _polars_enabled() -> bool:
@@ -44,11 +47,11 @@ def read_csv(path: str | Path, *, columns: Iterable[str] | None = None) -> pd.Da
             if columns is not None:
                 kwargs["columns"] = list(columns)
             return _to_pandas(pl.read_csv(str(path), **kwargs))
-        except Exception:
+        except Exception as exc:
             # A malformed/legacy CSV should keep the existing pandas fallback
             # rather than making a page unavailable solely because the fast
             # engine could not infer one column.
-            pass
+            logger.warning("Polars CSV read failed for %s; falling back to pandas: %s", path, exc)
     return pd.read_csv(path, usecols=list(columns) if columns is not None else None)
 
 
@@ -66,24 +69,41 @@ def read_csv_filtered(
     """
 
     path = Path(path)
-    normalized = {key: [str(value) for value in values] for key, values in filters.items()}
+    normalized = {
+        key: [str(value).strip() for value in values]
+        for key, values in filters.items()
+    }
+    output_columns = list(columns) if columns is not None else None
+    read_columns = (
+        list(dict.fromkeys([*normalized.keys(), *output_columns]))
+        if output_columns is not None
+        else None
+    )
     if _polars_enabled():
         try:
             import polars as pl
 
             lazy = pl.scan_csv(str(path), has_header=True, try_parse_dates=False)
             for key, values in normalized.items():
-                lazy = lazy.filter(pl.col(key).cast(pl.Utf8).is_in(values))
-            if columns is not None:
-                lazy = lazy.select(list(columns))
+                lazy = lazy.filter(
+                    pl.col(key).cast(pl.Utf8).str.strip_chars().is_in(values)
+                )
+            if output_columns is not None:
+                lazy = lazy.select(output_columns)
             return _to_pandas(lazy.collect())
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(
+                "Polars filtered CSV read failed for %s; falling back to pandas: %s",
+                path,
+                exc,
+            )
 
-    frame = pd.read_csv(path, usecols=list(columns) if columns is not None else None)
+    frame = pd.read_csv(path, usecols=read_columns)
     for key, values in normalized.items():
         if key in frame.columns:
-            frame = frame[frame[key].astype(str).isin(values)]
+            frame = frame[frame[key].astype(str).str.strip().isin(values)]
+    if output_columns is not None:
+        frame = frame[output_columns]
     return frame
 
 
@@ -96,8 +116,8 @@ def read_parquet(path: str | Path, *, columns: Iterable[str] | None = None) -> p
             import polars as pl
 
             return _to_pandas(pl.read_parquet(str(path), columns=list(columns) if columns is not None else None))
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Polars Parquet read failed for %s; falling back to pandas: %s", path, exc)
     return pd.read_parquet(path, columns=list(columns) if columns is not None else None)
 
 

@@ -833,7 +833,12 @@ def load_telemetry_alert_detail_for_alert(
 
 
 @lru_cache(maxsize=8)
-def _load_oil_classified_cached(client: str) -> pd.DataFrame:
+def _load_oil_classified_cached(
+    client: str,
+    path: str,
+    mtime_ns: int,
+    size: int,
+) -> pd.DataFrame:
     """
     Load classified oil reports for alerts dashboard.
     
@@ -843,7 +848,7 @@ def _load_oil_classified_cached(client: str) -> pd.DataFrame:
     Returns:
         DataFrame with classified oil samples (sampleNumber, essay columns, report_status, etc.)
     """
-    file_path = _data_path("oil", "golden", client.lower(), "classified.parquet")
+    file_path = Path(path)
     logger.info(f"Loading oil classified data from {file_path}")
     
     if not file_path.exists():
@@ -861,12 +866,24 @@ def _load_oil_classified_cached(client: str) -> pd.DataFrame:
 
 
 def load_oil_classified(client: str) -> pd.DataFrame:
-    """Return cached classified oil data as a defensive copy."""
-    return _load_oil_classified_cached((client or '').lower()).copy(deep=True)
+    """Return the current classified oil generation as a defensive copy."""
+    client_key = (client or '').lower()
+    file_path = _data_path("oil", "golden", client_key, "classified.parquet")
+    if not file_path.exists():
+        return pd.DataFrame()
+    stat = file_path.stat()
+    return _load_oil_classified_cached(
+        client_key, str(file_path), stat.st_mtime_ns, stat.st_size
+    ).copy(deep=True)
 
 
 @lru_cache(maxsize=8)
-def _load_analisis_inteligente_cached(client: str) -> pd.DataFrame:
+def _load_analisis_inteligente_cached(
+    client: str,
+    path: str,
+    mtime_ns: int,
+    size: int,
+) -> pd.DataFrame:
     """
     Load AI-generated risk analysis/recommendation for Predictivo -> Evidencia
     (one row per Unit per Fecha). Callers filter to a single Unit and take the
@@ -879,7 +896,7 @@ def _load_analisis_inteligente_cached(client: str) -> pd.DataFrame:
         DataFrame with columns including Unit, Fecha, diagnostico,
         causa_probable, acciones. Empty DataFrame if the file is missing.
     """
-    file_path = _data_path("predictive", "golden", client.lower(), "analisis_inteligente.parquet")
+    file_path = Path(path)
     logger.info(f"Loading analisis inteligente data from {file_path}")
 
     if not file_path.exists():
@@ -899,8 +916,17 @@ def _load_analisis_inteligente_cached(client: str) -> pd.DataFrame:
 
 
 def load_analisis_inteligente(client: str) -> pd.DataFrame:
-    """Return cached AI analysis data as a defensive copy."""
-    return _load_analisis_inteligente_cached((client or '').lower()).copy(deep=True)
+    """Return the current AI analysis generation as a defensive copy."""
+    client_key = (client or '').lower()
+    file_path = _data_path(
+        "predictive", "golden", client_key, "analisis_inteligente.parquet"
+    )
+    if not file_path.exists():
+        return pd.DataFrame()
+    stat = file_path.stat()
+    return _load_analisis_inteligente_cached(
+        client_key, str(file_path), stat.st_mtime_ns, stat.st_size
+    ).copy(deep=True)
 
 
 def _filter_analisis_inteligente_component(df: pd.DataFrame, component: str = None) -> pd.DataFrame:
@@ -948,7 +974,12 @@ def get_model_run_date(client: str, component: str = None):
 
 
 @lru_cache(maxsize=8)
-def _load_machine_status_cached(client: str) -> pd.DataFrame:
+def _load_machine_status_cached(
+    client: str,
+    path: str,
+    mtime_ns: int,
+    size: int,
+) -> pd.DataFrame:
     """
     Load machine-level status aggregations for the oil dashboards (fleet
     overview KPIs, heatmap table, machine detail card).
@@ -959,7 +990,7 @@ def _load_machine_status_cached(client: str) -> pd.DataFrame:
     Returns:
         DataFrame with columns: unit_id, overall_status, machine_ai_recommendation, etc.
     """
-    file_path = _data_path("oil", "golden", client.lower(), "machine_status.parquet")
+    file_path = Path(path)
     logger.info(f"Loading machine status from {file_path}")
 
     if not file_path.exists():
@@ -977,8 +1008,15 @@ def _load_machine_status_cached(client: str) -> pd.DataFrame:
 
 
 def load_machine_status_for_client(client: str) -> pd.DataFrame:
-    """Return cached machine status data as a defensive copy."""
-    return _load_machine_status_cached((client or '').lower()).copy(deep=True)
+    """Return the current machine status generation as a defensive copy."""
+    client_key = (client or '').lower()
+    file_path = _data_path("oil", "golden", client_key, "machine_status.parquet")
+    if not file_path.exists():
+        return pd.DataFrame()
+    stat = file_path.stat()
+    return _load_machine_status_cached(
+        client_key, str(file_path), stat.st_mtime_ns, stat.st_size
+    ).copy(deep=True)
 
 
 # ========================================
@@ -1028,6 +1066,20 @@ def _latest_telemetry_partition(base: Path) -> Path:
     if not partitions:
         return base
     return max(partitions, key=lambda item: (item[0], item[1]))[2]
+
+
+def _telemetry_partition_generation(path: Path) -> tuple[int, int]:
+    """Return a lightweight generation key for a telemetry partition."""
+
+    files = tuple(item for item in path.rglob("*") if item.is_file()) if path.is_dir() else (path,)
+    if not files:
+        try:
+            stat = path.stat()
+            return stat.st_mtime_ns, stat.st_size
+        except OSError:
+            return 0, 0
+    stats = tuple(item.stat() for item in files)
+    return max(stat.st_mtime_ns for stat in stats), sum(stat.st_size for stat in stats)
 
 
 def _keep_latest_execution(df: pd.DataFrame, keys: list[str]) -> pd.DataFrame:
@@ -1088,7 +1140,13 @@ def _load_latest_telemetry_output(
 
 
 @lru_cache(maxsize=8)
-def _load_telemetry_unit_health_cached(client: str) -> pd.DataFrame:
+def _load_telemetry_unit_health_cached(
+    client: str,
+    base_path: str,
+    target_path: str,
+    mtime_ns: int,
+    size: int,
+) -> pd.DataFrame:
     """
     Load unit health assessments from golden layer.
 
@@ -1098,7 +1156,8 @@ def _load_telemetry_unit_health_cached(client: str) -> pd.DataFrame:
     Returns:
         DataFrame with unit-level health (overall_status, priority_score, executive_summary, etc.)
     """
-    base = _data_path("telemetry", "golden", client.lower(), "unit_health")
+    base = Path(base_path)
+    target = Path(target_path)
     logger.info(f"Loading telemetry unit health from {base}")
 
     if not base.exists():
@@ -1106,7 +1165,7 @@ def _load_telemetry_unit_health_cached(client: str) -> pd.DataFrame:
         return pd.DataFrame()
 
     try:
-        df = safe_read_parquet(_latest_telemetry_partition(base))
+        df = safe_read_parquet(target)
         df = _filter_latest_week(df)
         df = _keep_latest_execution(df, ["unit"])
         logger.info(f"Loaded {len(df)} unit health records")
@@ -1125,7 +1184,15 @@ def load_telemetry_unit_health(client: str) -> pd.DataFrame:
     not something to repeat on every login. A caller mutating the returned
     frame in place (e.g. reassigning a column) only affects its own copy.
     """
-    return _load_telemetry_unit_health_cached((client or '').lower()).copy(deep=True)
+    client_key = (client or '').lower()
+    base = _data_path("telemetry", "golden", client_key, "unit_health")
+    if not base.exists():
+        return pd.DataFrame()
+    target = _latest_telemetry_partition(base)
+    mtime_ns, size = _telemetry_partition_generation(target)
+    return _load_telemetry_unit_health_cached(
+        client_key, str(base), str(target), mtime_ns, size
+    ).copy(deep=True)
 
 
 def load_telemetry_system_health(client: str) -> pd.DataFrame:

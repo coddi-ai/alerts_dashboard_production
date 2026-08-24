@@ -23,5 +23,8 @@ ENV DASHBOARD_PORT=8050
 # uses the CPUs assigned to the container unless POLARS_MAX_THREADS is set.
 ENV DASHBOARD_FRAME_ENGINE=polars
 
+# Keep the default thread pool bounded on small containers. Deployments with
+# more CPU can override this without rebuilding the image.
+ENV POLARS_MAX_THREADS=4
 
 CMD ["gunicorn", "--bind", "0.0.0.0:8050", "--workers", "1", "--threads", "8", "--timeout", "120", "dashboard.app:server"]

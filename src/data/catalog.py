@@ -12,11 +12,14 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import os
+import time
+from functools import lru_cache
 from pathlib import Path
 from typing import Iterable
 
 
 CLIENTS = ("CDA", "EMIN", "ENEX", "CAPSTONE")
+_CATALOG_CACHE_TTL_SECONDS = 15
 
 
 @dataclass(frozen=True)
@@ -141,7 +144,7 @@ def _probe_partitioned(
     )
 
 
-def build_client_availability(
+def _build_client_availability_uncached(
     client: str,
     root: str | os.PathLike[str] | Path | None = None,
 ) -> dict[str, SourceProbe]:
@@ -218,6 +221,42 @@ def build_client_availability(
         )
 
     return result
+
+
+@lru_cache(maxsize=32)
+def _build_client_availability_cached(
+    client: str,
+    root: str,
+    refresh_bucket: int,
+) -> dict[str, SourceProbe]:
+    """Cache immutable source probes for a short refresh window.
+
+    The catalog is rendered by several callbacks during a single client
+    switch.  A bounded time bucket prevents each callback from recursively
+    scanning EFS partitions while still making source changes visible without
+    restarting the process.
+    """
+
+    return _build_client_availability_uncached(client, root)
+
+
+def build_client_availability(
+    client: str,
+    root: str | os.PathLike[str] | Path | None = None,
+) -> dict[str, SourceProbe]:
+    """Probe sources, reusing the catalog during the current refresh window."""
+
+    root_path = dashboard_data_root(root)
+    refresh_bucket = int(time.monotonic() // _CATALOG_CACHE_TTL_SECONDS)
+    return _build_client_availability_cached(
+        (client or "").upper(), str(root_path), refresh_bucket
+    )
+
+
+def clear_availability_cache() -> None:
+    """Clear the process-local catalog cache for tests or an explicit refresh."""
+
+    _build_client_availability_cached.cache_clear()
 
 
 def availability_status(probes: dict[str, SourceProbe]) -> str:
