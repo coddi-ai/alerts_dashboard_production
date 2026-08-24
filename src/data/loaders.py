@@ -1566,8 +1566,16 @@ def load_maintenance_actions_all_equipment(client: str = "cda", base_path: Optio
         df = pd.read_parquet(file_path)
         
         # Convert date strings to datetime (UTC to handle mixed timezones)
-        df['event_ts'] = pd.to_datetime(df['event_ts'], utc=True)
-        df['change_date'] = pd.to_datetime(df['change_date'], utc=True)
+        # Maintenance exports contain ISO-8601 variants with optional
+        # fractional seconds and a trailing ``Z``. Pandas 3 uses strict
+        # single-format inference by default, so explicitly accept mixed ISO
+        # representations while keeping a uniform UTC dtype.
+        df['event_ts'] = pd.to_datetime(
+            df['event_ts'], utc=True, format='mixed', errors='coerce'
+        )
+        df['change_date'] = pd.to_datetime(
+            df['change_date'], utc=True, format='mixed', errors='coerce'
+        )
         
         logger.info(f"Loaded {len(df)} maintenance actions for {df['machine_code'].nunique()} machines")
         return df

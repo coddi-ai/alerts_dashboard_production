@@ -1021,6 +1021,13 @@ def register_overview_general_callbacks(app):
             # Load Telemetry data using proper loader (most recent week/year available)
             df_telemetry = load_telemetry_unit_health(client)
             if not df_telemetry.empty:
+                # CDA's golden unit-health contract calls the identifier
+                # ``unit`` while General's derived view uses ``unit_id``.
+                # Add the presentation alias before projecting the Store;
+                # the source frame and its schema remain unchanged.
+                if 'unit_id' not in df_telemetry.columns and 'unit' in df_telemetry.columns:
+                    df_telemetry = df_telemetry.copy()
+                    df_telemetry['unit_id'] = df_telemetry['unit']
                 # Get most recent evaluation timestamp
                 if 'evaluation_timestamp' in df_telemetry.columns:
                     df_telemetry['evaluation_timestamp'] = pd.to_datetime(df_telemetry['evaluation_timestamp'])
