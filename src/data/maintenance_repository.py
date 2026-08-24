@@ -32,6 +32,30 @@ class MaintenanceRepository:
         self.client = client.lower()  # Normalize to lowercase
         self._dummy_cache = None
         self._parquet_cache = None
+        self._parquet_actions_cache = None
+        self._parquet_kpis_cache = None
+
+    def _get_parquet_actions(self):
+        """Load detailed actions only when a caller actually needs them."""
+        if self._parquet_actions_cache is None:
+            logger.info(
+                "Loading maintenance actions from parquet files for client: %s",
+                self.client,
+            )
+            self._parquet_actions_cache = load_maintenance_actions_all_equipment(
+                client=self.client
+            )
+        return self._parquet_actions_cache
+
+    def _get_parquet_kpis(self):
+        """Load the small KPI source independently from detailed actions."""
+        if self._parquet_kpis_cache is None:
+            logger.info(
+                "Loading maintenance KPIs from parquet files for client: %s",
+                self.client,
+            )
+            self._parquet_kpis_cache = load_business_kpis(client=self.client)
+        return self._parquet_kpis_cache
         
     def _get_dummy_data(self):
         """Get or generate dummy data."""
@@ -43,10 +67,9 @@ class MaintenanceRepository:
     def _get_parquet_data(self):
         """Get or load parquet data."""
         if self._parquet_cache is None:
-            logger.info(f"Loading maintenance data from parquet files for client: {self.client}")
             self._parquet_cache = {
-                "actions": load_maintenance_actions_all_equipment(client=self.client),
-                "kpis": load_business_kpis(client=self.client)
+                "actions": self._get_parquet_actions(),
+                "kpis": self._get_parquet_kpis(),
             }
         return self._parquet_cache
     
@@ -126,8 +149,9 @@ class MaintenanceRepository:
             return pd.DataFrame(status_data)
         
         elif self.mode == "parquet":
-            data = self._get_parquet_data()
-            df_kpis = data["kpis"]
+            # General only needs the compact KPI source for this operation;
+            # do not parse the detailed action history on the login path.
+            df_kpis = self._get_parquet_kpis()
             
             if df_kpis.empty:
                 return pd.DataFrame([
