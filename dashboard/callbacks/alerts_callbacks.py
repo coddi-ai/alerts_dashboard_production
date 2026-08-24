@@ -29,7 +29,7 @@ from dashboard.components.alerts_charts import (
     create_alerts_per_unit_chart,
     create_alerts_per_month_chart,
     create_alerts_per_week_chart,
-    create_system_distribution_pie_chart,
+    create_system_signal_treemap,
     create_oil_radar_chart,
     create_sensor_trends_chart_golden,
     create_gps_route_map_golden,
@@ -45,7 +45,11 @@ from dashboard.components.oil_charts import (
     LOWER_LIMIT_COLOR,
 )
 from dashboard.components.alerts_tables import (
-    create_alerts_datatable,
+    # W34-03: create_alerts_datatable is a legacy, unused variant of the
+    # alerts table (different columns/page size, exposes ID/Fuente as
+    # visible columns) — deliberately not imported here. The live table is
+    # create_alerts_report_table below. See test_w34_alerts_table.py for the
+    # regression guard.
     create_alerts_report_table,
     create_maintenance_display,
     parse_ia_message_sections,
@@ -57,6 +61,7 @@ from dashboard.components.alerts_report import (
     translate_alert_component,
     translate_alert_system,
 )
+from dashboard.components.labels import source_style, light_tint
 from dashboard.tabs.tab_alerts_general import (
     create_summary_stats_display,
     create_active_filter_badges,
@@ -68,6 +73,7 @@ from dashboard.tabs.tab_alerts_detail import (
     create_layout as create_detail_layout
 )
 from src.utils.logger import get_logger
+from src.utils.date_utils import format_local, to_utc_naive
 from config.settings import Settings
 
 logger = get_logger(__name__)
@@ -221,7 +227,7 @@ def update_general_tab(client: str, start_date: str, end_date: str, active_filte
         # Create charts (using filtered data for visualization) - removed trigger_chart
         unit_chart = create_alerts_per_unit_chart(filtered_df)
         month_chart = create_alerts_per_week_chart(filtered_df)
-        system_chart = create_system_distribution_pie_chart(filtered_df)
+        system_chart = create_system_signal_treemap(filtered_df, client=client)
 
         # Calculate summary statistics
         summary = alert_summary(filtered_df)
@@ -230,7 +236,7 @@ def update_general_tab(client: str, start_date: str, end_date: str, active_filte
         # Create table
         table = create_alerts_report_table(filtered_df)
 
-        latest = summary['latest'].strftime('%d/%m/%Y %H:%M') if pd.notna(summary['latest']) else '-'
+        latest = format_local(summary['latest'])  # W34-06: local wall-clock time
         filter_summary = f"Mostrando {summary['total']} alertas de {summary['units']} unidades · última alerta: {latest}"
         logger.info(f"General tab updated successfully with {summary['total']} alerts")
         return unit_chart, month_chart, system_chart, stats, table, filter_summary, badges, clear_all_style
@@ -273,8 +279,10 @@ def update_active_filters(unit_click, week_click, system_click, _chip_clicks, _c
         return current
 
     if trigger == 'alerts-unit-distribution-chart':
+        # Units sit on the X-axis of the Pareto chart (both the count bars and
+        # the cumulative-percentage line share the same category axis).
         points = (unit_click or {}).get('points') or []
-        value = points[0].get('y') if points else None
+        value = points[0].get('x') if points else None
         key = 'unit'
     elif trigger == 'alerts-month-distribution-chart':
         points = (week_click or {}).get('points') or []
@@ -282,8 +290,11 @@ def update_active_filters(unit_click, week_click, system_click, _chip_clicks, _c
         value = customdata[0] if customdata else None
         key = 'week'
     elif trigger == 'alerts-system-distribution-chart':
+        # The treemap's every node (system tile and señal/variable leaf
+        # alike) carries its owning system in customdata, so clicking
+        # anywhere in a system's branch filters by that system.
         points = (system_click or {}).get('points') or []
-        value = points[0].get('label') if points else None
+        value = points[0].get('customdata') if points else None
         key = 'system'
     else:
         raise PreventUpdate
@@ -402,11 +413,18 @@ def initialize_alert_dropdown(client: str):
     
     try:
         # Create dropdown options
+        sorted_alerts_df = alerts_df.sort_values('Timestamp', ascending=False).copy()
+        # Critical-review follow-up: assign the formatted column once,
+        # directly on the frame, instead of a separate Series indexed by
+        # `.loc[idx]` inside the loop.
+        sorted_alerts_df['_fecha_local'] = format_local(sorted_alerts_df['Timestamp'], fmt='%Y-%m-%d %H:%M')
         options = []
-        for _, row in alerts_df.sort_values('Timestamp', ascending=False).iterrows():
-            label = f"{row['FusionID']} | {row['Timestamp'].strftime('%Y-%m-%d %H:%M')} | {row['UnitId']} | {translate_alert_component(row['componente'])}"
+        for _, row in sorted_alerts_df.iterrows():
+            # W34-06: local wall-clock time in the dropdown label, matching
+            # the table/header/chart.
+            label = f"{row['FusionID']} | {row['_fecha_local']} | {row['UnitId']} | {translate_alert_component(row['componente'])}"
             options.append({'label': label, 'value': row['FusionID']})
-        
+
         logger.info(f"Dropdown initialized with {len(options)} alerts")
         return options
     
@@ -576,69 +594,96 @@ def populate_detail_filter_options(client: str):
     [
         Input('detail-filter-unit', 'value'),
         Input('detail-filter-sistema', 'value'),
-        Input('detail-filter-telemetry', 'value'),
+        Input('detail-filter-date-from', 'date'),
         Input('detail-filter-tribology', 'value'),
         Input('client-selector', 'value')
     ],
     [State('alert-selector-dropdown', 'value')],
     prevent_initial_call=True
 )
-def filter_alert_dropdown_by_criteria(units, sistemas, has_telemetry, has_tribology, client, current_value):
+def filter_alert_dropdown_by_criteria(units, sistemas, start_date, has_tribology, client, current_value):
     """
     Filter alert dropdown based on selected detail filters.
     Preserves current selection if it's still in the filtered list.
-    
+
     Args:
         units: Selected units (list)
         sistemas: Selected sistemas (list)
-        has_telemetry: Filter for telemetry presence
+        start_date: "Fecha desde" (W34-05, replaces the telemetry filter) —
+            a plain calendar date string (e.g. "2026-08-01") from
+            detail-filter-date-from, interpreted as a Chile calendar day.
+            Inclusive; None/"" means no lower bound.
         has_tribology: Filter for tribology presence
         client: Selected client
         current_value: Currently selected alert ID
-    
+
     Returns:
         Filtered alert options
     """
     logger.info(f"filter_alert_dropdown_by_criteria called with current_value={current_value}")
-    
+
     if not client:
         raise PreventUpdate
-    
+
     # Check if any filters are actually set
-    has_any_filter = any([units, sistemas, has_telemetry, has_tribology])
+    has_any_filter = any([units, sistemas, start_date, has_tribology])
     if not has_any_filter:
         logger.info("No filters set, skipping filter update")
         raise PreventUpdate
-    
+
     alerts_df = load_alerts_data(client)
-    
+
     if alerts_df.empty:
         return []
-    
+
     try:
         # Apply filters
         filtered_df = alerts_df.copy()
-        
+
         if units:
             filtered_df = filtered_df[filtered_df['UnitId'].isin(units)]
-        
+
         if sistemas:
             filtered_df = filtered_df[filtered_df['sistema'].isin(sistemas)]
-        
-        if has_telemetry == 'yes':
-            filtered_df = filtered_df[filtered_df['has_telemetry'] == True]
-        elif has_telemetry == 'no':
-            filtered_df = filtered_df[filtered_df['has_telemetry'] == False]
-        
+
+        # W34-05: "fecha desde" — inclusive, Chile calendar day. The picker
+        # gives a naive calendar date the user chose in local terms; its
+        # midnight boundary is converted to UTC (Timestamp's own
+        # representation, W34-06) before comparing, so the boundary doesn't
+        # shift by the 3-4h offset. An invalid/unparseable date degrades to
+        # "no lower bound" rather than raising — a broken date filter must
+        # not take down the whole dropdown.
+        if start_date:
+            try:
+                start_utc = to_utc_naive(pd.Timestamp(start_date), source_tz="America/Santiago")
+                # Critical-review follow-up: Chile's DST transition lands on
+                # local midnight, so a boundary date can itself be
+                # nonexistent/ambiguous — to_utc_naive returns NaT for that
+                # rather than raising, so it needs its own check here (the
+                # except below only catches an unparseable date string).
+                if pd.isna(start_utc):
+                    logger.warning(f"Fecha desde cae en una transición de horario de verano, ignorando filtro: {start_date!r}")
+                else:
+                    filtered_df = filtered_df[filtered_df['Timestamp'] >= start_utc]
+            except (ValueError, TypeError):
+                logger.warning(f"Fecha desde inválida, ignorando filtro: {start_date!r}")
+
         if has_tribology == 'yes':
             filtered_df = filtered_df[filtered_df['has_tribology'] == True]
         elif has_tribology == 'no':
             filtered_df = filtered_df[filtered_df['has_tribology'] == False]
-        
+
         # Create filtered options
+        sorted_filtered_df = filtered_df.sort_values('Timestamp', ascending=False).copy()
+        # Critical-review follow-up: assign the formatted column once,
+        # directly on the frame, instead of a separate Series indexed by
+        # `.loc[idx]` inside the loop.
+        sorted_filtered_df['_fecha_local'] = format_local(sorted_filtered_df['Timestamp'], fmt='%Y-%m-%d %H:%M')
         alert_options = []
-        for _, row in filtered_df.sort_values('Timestamp', ascending=False).iterrows():
-            label = f"{row['FusionID']} | {row['Timestamp'].strftime('%Y-%m-%d %H:%M')} | {row['UnitId']} | {translate_alert_component(row['componente'])}"
+        for _, row in sorted_filtered_df.iterrows():
+            # W34-06: local wall-clock time in the dropdown label, matching
+            # the table/header/chart.
+            label = f"{row['FusionID']} | {row['_fecha_local']} | {row['UnitId']} | {translate_alert_component(row['componente'])}"
             alert_options.append({'label': label, 'value': row['FusionID']})
         
         logger.info(f"Filtered alerts: {len(alert_options)} options")
@@ -653,6 +698,9 @@ def _alert_case_header(row: pd.Series) -> html.Div:
     prepared = prepare_alert_rows(pd.DataFrame([row])).iloc[0]
     timestamp = prepared.get('date_display', '-')
     diagnosis = parse_ia_message_sections(row.get('mensaje_ia', ''))
+    # W34-04: same (label, color) pair as the table's row-highlight, the
+    # color legend and the "Alertas mixtas" KPI card.
+    source_label, source_badge_color = source_style(prepared.get('Trigger_type', ''))
 
     def _analysis_block(title, value, icon, color='light'):
         text = value or 'No disponible'
@@ -674,7 +722,32 @@ def _alert_case_header(row: pd.Series) -> html.Div:
                 dbc.Col([html.Small('Sistema', className='text-muted d-block text-nowrap'), html.Strong(prepared.get('system_display', '-'))], xs=6, lg=2),
                 dbc.Col([html.Small('Componente', className='text-muted d-block text-nowrap'), html.Strong(prepared.get('component_display', '-'))], xs=6, lg=3),
                 dbc.Col([html.Small('Fecha', className='text-muted d-block text-nowrap'), html.Strong(timestamp)], xs=6, lg=3),
-                dbc.Col([html.Small('Fuente', className='text-muted d-block text-nowrap'), html.Strong(prepared.get('source_display', '-'))], xs=6, lg=2),
+                dbc.Col([
+                    html.Small('Fuente', className='text-muted d-block text-nowrap'),
+                    # Same accent-text-on-tint treatment as the "Alertas
+                    # multitécnicas" KPI card (tab_alerts_general.py), not a
+                    # solid fill with an implied (and untested) white text
+                    # color — one visual rule for SOURCE_STYLE, not two.
+                    # Use a plain span instead of dbc.Badge here. Bootstrap's
+                    # badge defaults can add a dark secondary background that
+                    # makes the source color unreadable (especially for
+                    # Telemetría and Multitécnica). This explicit pill keeps
+                    # the shared source accent while matching the dashboard's
+                    # light, outlined status language.
+                    html.Span(source_label, className='alert-source-badge', style={
+                        'backgroundColor': light_tint(source_badge_color),
+                        'color': source_badge_color,
+                        'border': f'1px solid {source_badge_color}',
+                        'borderRadius': '999px',
+                        'display': 'inline-flex',
+                        'alignItems': 'center',
+                        'padding': '0.35rem 0.7rem',
+                        'fontSize': '0.75rem',
+                        'lineHeight': '1.1',
+                        'fontWeight': '600',
+                        'whiteSpace': 'nowrap',
+                    }),
+                ], xs=6, lg=2),
             ], className='g-3'),
             html.Div([
                 html.Strong('Señal / variable: ', className='text-muted'),
@@ -880,26 +953,43 @@ def create_telemetry_evidence_section(alert_row: pd.Series, client: str) -> html
         trigger = alert_data_clean['Trigger'].iloc[0]
         
         logger.info(f"Processing telemetry alert: Unit={unit_id}, Time={alert_time}, Trigger={trigger}")
-        
+
         # Load feature names mapping for Spanish titles (use FEATURE_NAMES_ES from alerts_charts)
-        from dashboard.components.alerts_charts import FEATURE_NAMES_ES
+        from dashboard.components.alerts_charts import FEATURE_NAMES_ES, select_plottable_signals
         feature_name_map = FEATURE_NAMES_ES
-        
+
+        # Alert-context header shown above the telemetry charts: alert id,
+        # unit and the (Spanish) trigger signal name.
+        alert_id_display = (
+            _normalise_alert_identifier(alert_row.get('FusionID'))
+            or _normalise_alert_identifier(alert_row.get('TelemetryID'))
+            or '-'
+        )
+        trigger_display = (
+            feature_name_map.get(trigger, trigger) if pd.notna(trigger) else 'Sin señal'
+        )
+
         # Identify features to plot (columns ending with _Value)
         value_cols = [col for col in alert_data_clean.columns if col.endswith('_Value')]
         feature_names = [col.replace('_Value', '') for col in value_cols]
-        
-        # Filter out features from CHART DISPLAY ONLY (data still available for KPIs)
-        # Note: Payload, EngSpd, GroundSpd, EngLoad are excluded from charts but remain in alert_data_clean
-        excluded_features = ['Payload', 'EngSpd', 'GroundSpd', 'EngLoad']
-        feature_names = [f for f in feature_names if f not in excluded_features]
-        
+
+        # W34-11: a panel is drawn only for signals that are both present in the
+        # source (checked above) AND permitted (see select_plottable_signals).
+        # Data stays available for KPIs regardless of this filter —
+        # alert_data_clean itself is untouched.
+        feature_names, uncatalogued = select_plottable_signals(feature_names)
+        if uncatalogued:
+            logger.warning(
+                "Señales presentes en la fuente pero no catalogadas en SIGNAL_LABELS, "
+                f"omitidas del gráfico de tendencias: {uncatalogued}"
+            )
+
         if not feature_names:
             return html.Div([
                 dbc.Alert("No se encontraron señales con valores para graficar", color="warning")
             ])
-        
-        logger.info(f"Found {len(feature_names)} features to plot (excluded: {excluded_features}): {feature_names}")
+
+        logger.info(f"Found {len(feature_names)} features to plot: {feature_names}")
         
         # Create sensor trends chart (using new simplified approach)
         sensor_trends_fig = create_sensor_trends_chart_golden(
@@ -939,7 +1029,7 @@ def create_telemetry_evidence_section(alert_row: pd.Series, client: str) -> html
                            className="text-muted mb-3")
                 ])
             ]),
-            
+
             # Row 1: Sensor Trends (FULL WIDTH)
             dbc.Row([
                 dbc.Col([
@@ -948,7 +1038,26 @@ def create_telemetry_evidence_section(alert_row: pd.Series, client: str) -> html
                             html.H5([
                                 html.I(className="fas fa-chart-line me-2"),
                                 "Tendencias de Sensores"
-                            ], className="mb-0")
+                            ], className="mb-0"),
+                            html.Div(
+                                f"Alerta {alert_id_display} · {unit_id} · Gatillo: {trigger_display}",
+                                className="small fw-bold text-primary mt-1"
+                            ),
+                            # Quality-review follow-up: a signal present in the
+                            # source but not yet in SIGNAL_LABELS used to be
+                            # invisible here (logger.warning only, nothing on
+                            # screen) — this line is the only user-facing
+                            # trace that some evidence exists but isn't
+                            # charted, so it's never mistaken for "not
+                            # recorded".
+                            html.Div(
+                                [
+                                    html.I(className="fas fa-triangle-exclamation me-1"),
+                                    f"{len(uncatalogued)} señal(es) adicional(es) no catalogada(s) "
+                                    "omitida(s) de este gráfico.",
+                                ],
+                                className="small text-warning mt-1",
+                            ) if uncatalogued else None,
                         ], className="bg-light"),
                         dbc.CardBody([
                             dcc.Loading(

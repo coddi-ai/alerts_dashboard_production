@@ -23,11 +23,11 @@ def _oil_date_col(df) -> str:
 
 def create_fleet_scatter(df_latest, selected_unit, status_colors, p80_30d):
     """
-    Crear scatter de ranking vs ranking_acum_90d con todos los equipos.
+    Crear scatter de ranking vs avg_ranking_30d con todos los equipos.
     Destaca el equipo seleccionado.
     """
     x_all = df_latest["ranking"].astype(float)
-    y_all = df_latest["ranking_acum_90d"].astype(float)
+    y_all = df_latest["avg_ranking_30d"].astype(float)
 
     x_min, x_max = float(x_all.min()), float(x_all.max())
     y_min, y_max = float(y_all.min()), float(y_all.max())
@@ -81,7 +81,7 @@ def create_fleet_scatter(df_latest, selected_unit, status_colors, p80_30d):
             continue
         fig.add_trace(go.Scatter(
             x=subset["ranking"].astype(float),
-            y=subset["ranking_acum_90d"].astype(float),
+            y=subset["avg_ranking_30d"].astype(float),
             mode="markers+text",
             name=st,
             text=subset["Unit"],
@@ -91,7 +91,7 @@ def create_fleet_scatter(df_latest, selected_unit, status_colors, p80_30d):
                 color=color, size=8,
                 line=dict(color="white", width=1.2), opacity=0.5
             ),
-            hovertemplate="<b>%{text}</b><br>Ranking: %{x:.0f}<br>Acum 90d: %{y:.1f}<extra></extra>",
+            hovertemplate="<b>%{text}</b><br>Ranking: %{x:.0f}<br>Prom 30d: %{y:.1f}<extra></extra>",
         ))
 
     # Selected unit — highlighted
@@ -99,7 +99,7 @@ def create_fleet_scatter(df_latest, selected_unit, status_colors, p80_30d):
     if not sel.empty:
         fig.add_trace(go.Scatter(
             x=sel["ranking"].astype(float),
-            y=sel["ranking_acum_90d"].astype(float),
+            y=sel["avg_ranking_30d"].astype(float),
             mode="markers+text",
             name=selected_unit,
             text=[selected_unit],
@@ -109,7 +109,7 @@ def create_fleet_scatter(df_latest, selected_unit, status_colors, p80_30d):
                 color="#2563EB", size=14,
                 line=dict(color="white", width=2), opacity=1.0
             ),
-            hovertemplate=f"<b>{selected_unit}</b><br>Ranking: %{{x:.0f}}<br>Acum 90d: %{{y:.1f}}<extra></extra>",
+            hovertemplate=f"<b>{selected_unit}</b><br>Ranking: %{{x:.0f}}<br>Prom 30d: %{{y:.1f}}<extra></extra>",
         ))
 
     fig.update_layout(
@@ -125,7 +125,7 @@ def create_fleet_scatter(df_latest, selected_unit, status_colors, p80_30d):
             zeroline=False, tickfont=dict(size=10), range=[x0, x1]
         ),
         yaxis=dict(
-            title="Ranking 90 días",
+            title="Ranking 30 días",
             showgrid=True, gridcolor="rgba(0,0,0,0.05)",
             zeroline=False, tickfont=dict(size=10), range=[y0, y1]
         ),

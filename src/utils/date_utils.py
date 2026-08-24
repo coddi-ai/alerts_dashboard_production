@@ -6,7 +6,159 @@ Provides helpers for date parsing and calculations.
 
 import pandas as pd
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, Union
+
+
+# W34-06 — "Cuadrar Instante de Alertas". Alertas normalized event timestamps to
+# UTC-naive at the loading boundary but then displayed that UTC clock reading
+# directly, while Estado de Datos converted the same kind of value to Chile
+# time first — the same real-world instant read with a 3-4h difference
+# depending on which tab you were looking at.
+#
+# The fix keeps every comparison/window/filter in UTC-naive (unchanged from
+# today) and adds a single, explicit conversion step for presentation only:
+#   CSV/parquet -> to_utc_naive() -> [comparisons, windows, filters]
+#                                  -> to_local_naive()/format_local() -> UI
+# Nothing outside this module should call pytz or do its own tz_localize on an
+# alert timestamp; going through these two functions is what keeps every
+# surface (table, header, chart, selection) reading the same instant.
+DEFAULT_DISPLAY_TZ = "America/Santiago"
+
+
+def to_utc_naive(
+    value: Union[pd.Series, "pd.Timestamp", str, datetime, None],
+    source_tz: str = "UTC",
+) -> Union[pd.Series, pd.Timestamp]:
+    """Normalize a datetime-like value (or Series) to UTC, timezone-naive.
+
+    This is the single place that decides what an alert instant "is" before
+    any comparison, window or filter touches it — call it once at the loading
+    boundary, never again downstream (re-parsing an already-normalized column
+    is how a double conversion creeps in).
+
+    Args:
+        value: a scalar (str/datetime/Timestamp) or a pandas Series of them.
+            May already carry an explicit UTC offset (Capstone's ISO
+            timestamps, e.g. ``-04:00``) — that offset always wins and
+            converts correctly regardless of `source_tz`.
+        source_tz: timezone to assume for entries that arrive *naive* (no
+            offset in the string). Defaults to "UTC", identical to this
+            project's existing behavior everywhere it normalizes a timestamp
+            today (`pd.to_datetime(..., utc=True)` treats a naive value as
+            already being UTC). Declaring it explicitly — rather than that
+            silent default — is what lets a future client whose source
+            exports naive local time say so, instead of having it silently
+            misread as UTC.
+
+    Returns:
+        The same shape as `value` (Series in, Series out), tz-naive, in UTC.
+    """
+    if source_tz == "UTC":
+        # Identical to the inline calls this replaces in src/data/loaders.py.
+        if isinstance(value, pd.Series):
+            parsed = pd.to_datetime(value, utc=True, errors="coerce")
+            # A column mixing formats — e.g. legacy naive rows alongside newer
+            # offset-aware ISO rows in the same accumulating "consolidated"
+            # CSV — makes pandas infer one format from the array and silently
+            # NaT every row that doesn't match it, even though each value
+            # parses fine on its own (verified directly: a Series with one
+            # Capstone offset timestamp mixed among naive ones NaTs the
+            # offset row under the bulk call, but not when parsed alone).
+            # Retry only the values that came back NaT despite a non-null
+            # source, one at a time, so the per-element parser runs instead
+            # of the whole-array fast path.
+            mismatched = parsed.isna() & value.notna()
+            if mismatched.any():
+                parsed = parsed.copy()
+                parsed.loc[mismatched] = value.loc[mismatched].map(
+                    lambda item: pd.to_datetime(item, utc=True, errors="coerce")
+                )
+            return parsed.dt.tz_convert(None)
+        return pd.to_datetime(value, utc=True).tz_convert(None)
+
+    if isinstance(value, pd.Series):
+        parsed = pd.to_datetime(value, errors="coerce")
+        localized = (
+            parsed.dt.tz_localize(source_tz, ambiguous="NaT", nonexistent="NaT")
+            if parsed.dt.tz is None
+            else parsed.dt.tz_convert(source_tz)
+        )
+        return localized.dt.tz_convert("UTC").dt.tz_localize(None)
+
+    parsed = pd.Timestamp(value)
+    # Critical-review follow-up: mirror the Series branch's ambiguous/
+    # nonexistent handling above — without it, a scalar date landing exactly
+    # on a DST transition (Chile's own transition happens at local midnight,
+    # so any date-range boundary can hit it) raised pytz's
+    # NonExistentTimeError/AmbiguousTimeError instead of returning NaT like
+    # its Series counterpart already does for the same input shape.
+    localized = (
+        parsed.tz_localize(source_tz, ambiguous="NaT", nonexistent="NaT")
+        if parsed.tzinfo is None else parsed
+    )
+    if pd.isna(localized):
+        return pd.NaT
+    return localized.tz_convert("UTC").tz_localize(None)
+
+
+def to_local_naive(
+    value: Union[pd.Series, "pd.Timestamp", str, datetime, None],
+    tz_name: str = DEFAULT_DISPLAY_TZ,
+) -> Union[pd.Series, pd.Timestamp]:
+    """Shift an already UTC-naive value (or Series) to `tz_name` wall-clock time.
+
+    Strips tzinfo again after the shift, so the result composes with plain
+    naive-datetime arithmetic exactly like the input did — a fixed offset
+    shift does not change relative deltas, so code that only compares or
+    subtracts already-shifted values (gap detection, a ±N-minute window)
+    keeps working unchanged.
+
+    Must only be called on values already normalized by `to_utc_naive` (or
+    the equivalent inline UTC normalization in the loaders); it assumes the
+    input is UTC and does not re-detect an existing offset. Comparisons,
+    windows and filters should still happen in UTC-naive (before this call);
+    this is the conversion for the last step, right before something is shown
+    to a person.
+    """
+    if isinstance(value, pd.Series):
+        localized = value.dt.tz_localize("UTC").dt.tz_convert(tz_name)
+        return localized.dt.tz_localize(None)
+    localized = pd.Timestamp(value).tz_localize("UTC").tz_convert(tz_name)
+    return localized.tz_localize(None)
+
+
+def format_local(
+    value: Union[pd.Series, "pd.Timestamp", str, datetime, None],
+    fmt: str = "%d/%m/%Y %H:%M",
+    tz_name: str = DEFAULT_DISPLAY_TZ,
+) -> Union[str, pd.Series]:
+    """Format a UTC-naive alert timestamp (or Series of them) as local
+    wall-clock text, in one step.
+
+    The replacement for calling `.strftime()`/`.dt.strftime()` directly on a
+    UTC-naive value or column — doing that shows a UTC clock reading as if it
+    were already local time, which is the W34-06 defect this closes.
+
+    Accepts a scalar (returns `str`, `"-"` for `None`/NaT/an unparseable
+    value) or a pandas Series (returns a `str`-dtype Series, `"-"` per entry
+    for the same cases) — both forms are used across the Alertas views: a
+    single alert's header needs a scalar, a table column needs the vectorized
+    form.
+    """
+    if isinstance(value, pd.Series):
+        local = to_local_naive(value, tz_name)
+        return local.dt.strftime(fmt).where(local.notna(), "-")
+    if value is None:
+        return "-"
+    try:
+        if pd.isna(value):
+            return "-"
+    except (TypeError, ValueError):
+        pass
+    try:
+        return to_local_naive(value, tz_name).strftime(fmt)
+    except (TypeError, ValueError):
+        return "-"
 
 
 def parse_date(date_str: any, format: Optional[str] = None) -> pd.Timestamp:

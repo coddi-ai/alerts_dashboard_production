@@ -4,7 +4,7 @@ Predictive callbacks - handles internal tab switching and evidence interactivity
 
 import re
 
-from dash import html, dcc, Input, Output, State, no_update
+from dash import html, dcc, Input, Output, State, no_update, ALL, ctx
 import pandas as pd
 from src.utils.logger import get_logger
 from config.settings import get_settings
@@ -18,6 +18,8 @@ from dashboard.tabs.tab_predictive_overview import (
     _load_component_data as _load_overview_component,
     _render_component_overview,
     _failure_table,
+    attach_status,
+    WINDOW_SUFFIX,
 )
 from dashboard.tabs.tab_predictive_evidence import (
     _load_component_data as _load_evidence_component,
@@ -26,6 +28,16 @@ from dashboard.tabs.tab_predictive_evidence import (
 )
 
 logger = get_logger(__name__)
+
+# Predictivo component key -> oil componentNameNormalized values it should
+# match, for clients whose oil naming is more specific than Predictivo's
+# coarse key. Applies across all clients (not just the ones that currently
+# need it) - e.g. Capstone's engine oil samples are grouped under "motor
+# diesel" rather than the bare "motor" that CDA uses, but "motor" should
+# always resolve to the diesel engine, never to a traction motor.
+_OIL_COMPONENT_ALIASES = {
+    "motor": {"motor", "motor diesel"},
+}
 
 
 def _normalize_unit_id(unit_id):
@@ -44,20 +56,25 @@ def _load_real_oil_samples(client, component, unit):
     Load real (non-forward-filled) oil samples for a component/unit from the
     oil technique's golden layer (data/oil/golden/{client}/classified.parquet).
 
-    Predictivo's component.csv carries oil values forward across every daily
-    row between samples, which makes the timeseries chart look like a
-    staircase. This reads the actual lab reports instead - one row per real
-    sample - so the chart reflects true sample-to-sample variation.
+    Predictivo's component key ("motor", "transmision") is the grouped/coarse
+    granularity, so it's matched against componentNameNormalized (Oil Data
+    Contract v2.8: componentName is the fine-grained original name, e.g.
+    "mando final izquierdo"; componentNameNormalized is the grouped version,
+    e.g. "mando final" - the one that lines up with Predictivo's key). Falls
+    back to componentName only if a client's classified.parquet has no
+    componentNameNormalized column at all.
 
-    Matches on componentName / componentNameNormalized (case-insensitive,
-    exact) - this works for clients where the oil naming already aligns with
-    the Predictivo component key (e.g. CDA's "motor"/"transmision"). Returns
-    None when no matching rows are found, so the caller can fall back to the
-    component.csv data instead of showing an empty chart.
+    Also consults _OIL_COMPONENT_ALIASES so a Predictivo key can match a more
+    specific oil component name (e.g. "motor" -> "motor diesel"), without
+    pulling in unrelated components that merely start with the same word
+    (e.g. Capstone's traction motors).
+
+    Returns None when nothing matches, so the caller can show an empty state
+    instead of a fabricated chart.
     """
     try:
         df_classified = load_oil_classified(client)
-    except Exception as exc:  # noqa: BLE001 - fall back to component.csv on any issue
+    except Exception as exc:  # noqa: BLE001 - treat as no data on any load issue
         logger.warning(f"No se pudo cargar classified.parquet para {client}: {exc}")
         return None
 
@@ -65,15 +82,15 @@ def _load_real_oil_samples(client, component, unit):
         return None
 
     comp_key = (component or "").strip().lower()
-    name_cols = [c for c in ("componentName", "componentNameNormalized") if c in df_classified.columns]
-    if not name_cols:
+    match_keys = _OIL_COMPONENT_ALIASES.get(comp_key, {comp_key})
+    if "componentNameNormalized" in df_classified.columns:
+        name_col = "componentNameNormalized"
+    elif "componentName" in df_classified.columns:
+        name_col = "componentName"
+    else:
         return None
 
-    mask = pd.Series(False, index=df_classified.index)
-    for col in name_cols:
-        mask = mask | (df_classified[col].astype(str).str.strip().str.lower() == comp_key)
-
-    comp_rows = df_classified[mask]
+    comp_rows = df_classified[df_classified[name_col].astype(str).str.strip().str.lower().isin(match_keys)]
     if comp_rows.empty or "unitId" not in comp_rows.columns:
         return None
 
@@ -187,51 +204,71 @@ def register_callbacks(app):
 
     @app.callback(
         Output("predictive-fm-table-container", "children"),
+        Output("predictive-fm-table-state", "data"),
         Input("predictive-fm-sort-selector", "value"),
+        Input({"type": "predictive-fm-col-header", "key": ALL}, "n_clicks"),
+        State("predictive-fm-table-state", "data"),
         State("predictive-ev-client-store", "data"),
         State("predictive-ev-component-store", "data"),
         prevent_initial_call=True,
     )
-    def sort_failure_mode_table(sort_col, client, component):
-        """Re-sort and re-render the failure mode table based on selected period."""
-        if not sort_col or not client or not component:
-            return no_update
+    def update_failure_mode_table(window, _header_clicks, state, client, component):
+        """Re-sort/re-render the failure mode table (REQ-PR-09/10).
+
+        The window dropdown ("Hoy"/"30 días"/"60 días"/"90 días") picks which
+        single ranking column is shown; changing it also re-sorts by that
+        column. Clicking a failure-mode column header instead sorts by that
+        mode's value at the current window, toggling ascending/descending on
+        repeated clicks of the same header.
+        """
+        if not window or not client or not component:
+            return no_update, no_update
 
         components = _discover_components(client)
         filepath = components.get(component)
         if not filepath:
-            return no_update
+            return no_update, no_update
 
         df, df_latest, _ = _load_overview_component(filepath, component, client)
         if df_latest is None or df_latest.empty:
-            return no_update
+            return no_update, no_update
 
         failure_modes = get_failure_modes_dict(component, client)
-
-        # Classify status (same logic as _render_component_overview)
-        # Saludable: avg_ranking_30d < 30 AND max_fm_30d < 50
-        # Alerta: 30 <= avg_ranking_30d < 60 OR 50 <= max_fm_30d < 80
-        # Crítico: avg_ranking_30d >= 60 OR max_fm_30d >= 80
-        latest = df_latest.copy()
-        latest["status"] = "Saludable"
-        latest.loc[
-            (latest["avg_ranking_30d"] >= 30) | (latest["max_fm_30d"] >= 50),
-            "status",
-        ] = "Alerta"
-        latest.loc[
-            (latest["avg_ranking_30d"] >= 60) | (latest["max_fm_30d"] >= 80),
-            "status",
-        ] = "Crítica"
-
-        # Sort by selected column descending (use 30d version for failure modes)
+        latest = attach_status(df_latest, client, component)
         fm_keys = list(failure_modes.keys())
-        actual_sort_col = f"{sort_col}_30d" if sort_col in fm_keys and f"{sort_col}_30d" in latest.columns else sort_col
-        if actual_sort_col in latest.columns:
-            sorted_df = latest.sort_values(actual_sort_col, ascending=False)
-        else:
-            sorted_df = latest.sort_values("avg_ranking_30d", ascending=False)
 
-        return _failure_table(sorted_df, sort_col, failure_modes)
+        state = dict(state or {})
+        triggered = ctx.triggered_id
+        if isinstance(triggered, dict) and triggered.get("type") == "predictive-fm-col-header":
+            key = triggered["key"]
+            if state.get("sort_by") == key:
+                state["ascending"] = not state.get("ascending", False)
+            else:
+                state["sort_by"] = key
+                state["ascending"] = False
+        else:
+            state["sort_by"] = window
+            state["ascending"] = False
+
+        sort_by = state.get("sort_by", window)
+        ascending = state.get("ascending", False)
+
+        if sort_by in fm_keys:
+            suffix = WINDOW_SUFFIX.get(window, "_30d")
+            actual_sort_col = f"{sort_by}{suffix}"
+        else:
+            actual_sort_col = sort_by
+
+        if actual_sort_col in latest.columns:
+            # "Unit" as a secondary key makes tie order deterministic across
+            # renders (W34-10) instead of an unstable-quicksort fallback,
+            # while still respecting the column-header ascending/descending
+            # toggle above.
+            sorted_df = latest.sort_values([actual_sort_col, "Unit"], ascending=[ascending, True])
+        else:
+            sorted_df = latest.sort_values(["avg_ranking_30d", "Unit"], ascending=[False, True])
+
+        return _failure_table(sorted_df, window, sort_by, ascending, failure_modes), state
 
     # ══════════════════════════════════════════════════════════════════════════
     # EVIDENCE: Unit banner
@@ -257,24 +294,21 @@ def register_callbacks(app):
             if filepath:
                 _, df_latest = _load_evidence_component(filepath, component, client)
                 if df_latest is not None and not df_latest.empty:
-                    row = df_latest[df_latest["Unit"] == selected_unit]
+                    # Status from analisis_inteligente.parquet's `estado` (same
+                    # source as Estado de Flota, REQ-PR-04) so the banner never
+                    # disagrees with the priority cards for the same unit.
+                    latest_with_status = attach_status(df_latest, client, component)
+                    row = latest_with_status[latest_with_status["Unit"] == selected_unit]
                     if not row.empty:
                         row = row.iloc[0]
                         ranking_val = float(row.get("ranking", 0))
-                        avg_30d = float(row.get("avg_ranking_30d", ranking_val))
-                        max_fm = float(row.get("max_fm_30d", 0))
                         ranking_text = f"{ranking_val:.0f}/100"
-                        # Status: Crítico >= 60 OR max_fm >= 80
-                        #         Alerta >= 30 OR max_fm >= 50
-                        if avg_30d >= 60 or max_fm >= 80:
-                            status_text = "Crítica"
-                            status_color = "#e24b4a"
-                        elif avg_30d >= 30 or max_fm >= 50:
-                            status_text = "Alerta"
-                            status_color = "#ef9f27"
-                        else:
-                            status_text = "Saludable"
-                            status_color = "#1d9e75"
+                        status_text = row["status"]
+                        status_color = {
+                            "Anormal": "#e24b4a",
+                            "Alerta": "#ef9f27",
+                            "Normal": "#1d9e75",
+                        }.get(status_text, "#667eea")
 
         component_label = (component or "").title()
 
@@ -516,30 +550,19 @@ def register_callbacks(app):
         oil_labels = OIL_LABELS.get(_ckey, OIL_LABELS["cda"])
         oil_limits_four = load_predictive_oil_limits_four(_ckey, component)
 
-        components = _discover_components(client)
-        filepath = components.get(component)
-        if not filepath:
-            return html.P("No hay datos disponibles.", className="text-muted")
-
-        df, _ = _load_evidence_component(filepath, component, client)
-        if df is None:
-            return html.P("No hay datos disponibles.", className="text-muted")
-
-        df_unit = df[df["Unit"] == selected_unit].sort_values("Fecha")
-        if df_unit.empty:
-            return html.P("No hay datos para esta unidad.", className="text-muted")
-
-        # Prefer real (non-forward-filled) samples from the oil golden layer so
-        # the chart shows true sample-to-sample variation instead of a
-        # staircase. Falls back to component.csv when the oil dataset has no
-        # matching component/unit rows (e.g. naming mismatch for this client).
+        # Real (non-forward-filled) samples from the oil technique's golden
+        # layer - component.csv forward-fills oil values across every daily
+        # row between samples, which is what produced the staircase. This is
+        # now the sole source for this chart; if there are no matching real
+        # samples we show an empty state instead of falling back to it.
         df_oil_real = _load_real_oil_samples(client, component, selected_unit)
-        use_real = df_oil_real is not None and any(v in df_oil_real.columns for v in selected_vars)
-        df_for_chart = df_oil_real if use_real else df_unit
+        if df_oil_real is None or not any(v in df_oil_real.columns for v in selected_vars):
+            return html.P("No hay muestras de aceite reales disponibles para este componente.",
+                         className="text-muted", style={"fontSize": "13px", "padding": "20px", "textAlign": "center"})
 
         # Always pass limits — the chart function shows limit lines when len(vars)==1
         fig = create_oil_timeseries_90d(
-            df_for_chart, selected_vars, oil_labels,
+            df_oil_real, selected_vars, oil_labels,
             oil_limits_four=oil_limits_four,
             oil_range=oil_range,
         )

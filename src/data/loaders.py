@@ -17,6 +17,7 @@ from typing import Dict, List, Optional
 
 from src.utils.logger import get_logger
 from src.utils.file_utils import list_excel_files, safe_read_excel, safe_read_parquet
+from src.utils.date_utils import to_utc_naive
 
 logger = get_logger(__name__)
 
@@ -475,10 +476,14 @@ def _load_alerts_data_cached(client: str) -> pd.DataFrame:
     try:
         df = pd.read_csv(file_path)
         
-        # Normalize event timestamps to timezone-naive UTC. Capstone emits
-        # ISO timestamps with offsets while the Dash date picker emits naive
-        # calendar dates; one representation avoids aware/naive comparisons.
-        df['Timestamp'] = pd.to_datetime(df['Timestamp'], utc=True).dt.tz_convert(None)
+        # Normalize event timestamps to timezone-naive UTC (W34-06: the single
+        # normalization point — every comparison, window and filter downstream
+        # stays in this UTC-naive form; conversion to local time happens only
+        # at display time, via to_local_naive()/format_local()). Capstone
+        # emits ISO timestamps with offsets while the Dash date picker emits
+        # naive calendar dates; one representation avoids aware/naive
+        # comparisons.
+        df['Timestamp'] = to_utc_naive(df['Timestamp'])
         
         # Fill sistema, subsistema and componente missing values
         df['sistema'] = df['sistema'].fillna('Desconocido')
@@ -703,7 +708,10 @@ def _load_telemetry_alerts_detail_golden_cached(client: str) -> pd.DataFrame:
     
     try:
         df = pd.read_csv(file_path)
-        df['TimeStart'] = pd.to_datetime(df['TimeStart'], utc=True).dt.tz_convert(None)
+        # W34-06: same UTC-naive normalization point as consolidated_alerts's
+        # Timestamp column, so the alert instant and its telemetry evidence
+        # window compare against the same clock.
+        df['TimeStart'] = to_utc_naive(df['TimeStart'])
         logger.info(f"Loaded {len(df)} telemetry alert detail records from golden layer")
         return df
     
@@ -749,6 +757,121 @@ def load_oil_classified(client: str) -> pd.DataFrame:
     """Return cached classified oil data as a defensive copy."""
     return _load_oil_classified_cached((client or '').lower()).copy(deep=True)
 
+
+@lru_cache(maxsize=8)
+def _load_analisis_inteligente_cached(client: str) -> pd.DataFrame:
+    """
+    Load AI-generated risk analysis/recommendation for Predictivo -> Evidencia
+    (one row per Unit per Fecha). Callers filter to a single Unit and take the
+    most recent Fecha.
+
+    Args:
+        client: Client identifier (e.g., 'cda')
+
+    Returns:
+        DataFrame with columns including Unit, Fecha, diagnostico,
+        causa_probable, acciones. Empty DataFrame if the file is missing.
+    """
+    file_path = _data_path("predictive", "golden", client.lower(), "analisis_inteligente.parquet")
+    logger.info(f"Loading analisis inteligente data from {file_path}")
+
+    if not file_path.exists():
+        logger.warning(f"Analisis inteligente file not found: {file_path}")
+        return pd.DataFrame()
+
+    try:
+        df = safe_read_parquet(file_path)
+        if "Fecha" in df.columns:
+            df["Fecha"] = pd.to_datetime(df["Fecha"])
+        logger.info(f"Loaded {len(df)} analisis inteligente rows")
+        return df
+
+    except Exception as e:
+        logger.error(f"Error loading analisis inteligente data: {e}")
+        return pd.DataFrame()
+
+
+def load_analisis_inteligente(client: str) -> pd.DataFrame:
+    """Return cached AI analysis data as a defensive copy."""
+    return _load_analisis_inteligente_cached((client or '').lower()).copy(deep=True)
+
+
+def _filter_analisis_inteligente_component(df: pd.DataFrame, component: str = None) -> pd.DataFrame:
+    """Narrow analisis_inteligente rows to `component` when the column supports it.
+
+    Falls back to the unfiltered frame if `componente` is absent or the filter
+    would drop every row, so callers on clients/files without this column
+    keep working exactly as before.
+    """
+    if not component or "componente" not in df.columns:
+        return df
+    filtered = df[df["componente"].astype(str).str.lower() == str(component).lower()]
+    return filtered if not filtered.empty else df
+
+
+def get_latest_analisis_inteligente(client: str, component: str = None) -> pd.DataFrame:
+    """One row per Unit: the most recent analisis_inteligente.parquet row.
+
+    Used by Predictivo -> Estado de Flota (REQ-PR-04) to read `estado` per
+    unit instead of computing status from ranking thresholds, mirroring how
+    Evidencia (REQ-PR-03) already reads this file.
+    """
+    df = load_analisis_inteligente(client)
+    if df.empty or "Unit" not in df.columns:
+        return df
+    df = _filter_analisis_inteligente_component(df, component)
+    if "Fecha" in df.columns:
+        df = df.sort_values("Fecha")
+    return df.groupby("Unit", as_index=False).last()
+
+
+def get_model_run_date(client: str, component: str = None):
+    """Latest `Fecha` in analisis_inteligente.parquet — the model's last run date.
+
+    Shared by Estado de Flota and Evidencia (REQ-PR-08) so both tabs always
+    show the same date. Returns None if unavailable.
+    """
+    df = load_analisis_inteligente(client)
+    if df.empty or "Fecha" not in df.columns:
+        return None
+    df = _filter_analisis_inteligente_component(df, component)
+    if df.empty:
+        return None
+    return df["Fecha"].max()
+
+
+@lru_cache(maxsize=8)
+def _load_machine_status_cached(client: str) -> pd.DataFrame:
+    """
+    Load machine-level status aggregations for the oil dashboards (fleet
+    overview KPIs, heatmap table, machine detail card).
+
+    Args:
+        client: Client identifier (e.g., 'cda')
+
+    Returns:
+        DataFrame with columns: unit_id, overall_status, machine_ai_recommendation, etc.
+    """
+    file_path = _data_path("oil", "golden", client.lower(), "machine_status.parquet")
+    logger.info(f"Loading machine status from {file_path}")
+
+    if not file_path.exists():
+        logger.warning(f"Machine status file not found: {file_path}")
+        return pd.DataFrame()
+
+    try:
+        df = safe_read_parquet(file_path)
+        logger.info(f"Loaded {len(df)} machine status records")
+        return df
+
+    except Exception as e:
+        logger.error(f"Error loading machine status data: {e}")
+        return pd.DataFrame()
+
+
+def load_machine_status_for_client(client: str) -> pd.DataFrame:
+    """Return cached machine status data as a defensive copy."""
+    return _load_machine_status_cached((client or '').lower()).copy(deep=True)
 
 
 # ========================================
@@ -857,13 +980,14 @@ def _load_latest_telemetry_output(
         return pd.DataFrame()
 
 
-def load_telemetry_unit_health(client: str) -> pd.DataFrame:
+@lru_cache(maxsize=8)
+def _load_telemetry_unit_health_cached(client: str) -> pd.DataFrame:
     """
     Load unit health assessments from golden layer.
-    
+
     Args:
         client: Client identifier (e.g., 'cda')
-    
+
     Returns:
         DataFrame with unit-level health (overall_status, priority_score, executive_summary, etc.)
     """
@@ -883,6 +1007,18 @@ def load_telemetry_unit_health(client: str) -> pd.DataFrame:
     except Exception as e:
         logger.error(f"Error loading telemetry unit health: {e}")
         return pd.DataFrame()
+
+
+def load_telemetry_unit_health(client: str) -> pd.DataFrame:
+    """Return cached telemetry unit health data as a defensive copy.
+
+    Cached because this is on the post-login critical path (Resumen ->
+    General's overview aggregator calls it on every page mount / client
+    switch) and involves a directory-partition scan plus a parquet read -
+    not something to repeat on every login. A caller mutating the returned
+    frame in place (e.g. reassigning a column) only affects its own copy.
+    """
+    return _load_telemetry_unit_health_cached((client or '').lower()).copy(deep=True)
 
 
 def load_telemetry_system_health(client: str) -> pd.DataFrame:

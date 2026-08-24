@@ -224,6 +224,8 @@ def build_signal_timeseries_card(
     trend_df: pd.DataFrame,
     unit: Optional[str] = None,
     events_df: Optional[pd.DataFrame] = None,
+    window_days: int = 1,
+    show_events: bool = False,
 ) -> go.Figure:
     """
     Build time series figure for a single signal.
@@ -239,6 +241,19 @@ def build_signal_timeseries_card(
         trend_df: Trend results for this unit+signal
         unit: Unit identifier for limits lookup
         events_df: Materialized events for the selected unit/signal.
+        window_days: W34-09 — initial view width in days, counted back from
+            the latest sample. Default 1 (the simplified single-signal view);
+            the 1/7/30-day buttons in telemetry_callbacks.py pass this
+            through. Ignored when `show_events` is True (see below).
+        show_events: W34-09 — False (the default) means no event/anomaly
+            overlays (shapes or marker traces), and the initial window is a
+            fixed `window_days` back from the latest sample rather than
+            centered on the longest episode. Event/anomaly *counts* are
+            unaffected — they live in the signal KPI table
+            (telemetry_callbacks.py::_signal_kpi_table), not here, so
+            turning overlays off never hides them. The one caller
+            (update_signal_cards) always passes False; the episode-centering
+            path only runs if a future caller opts in with True.
     """
     if raw_df.empty or signal_name not in raw_df.columns:
         return _empty_figure(f"Sin datos para {signal_name}")
@@ -289,84 +304,98 @@ def build_signal_timeseries_card(
 
     fig.data[-1].name = 'Media móvil 120 min'
 
-    # Event/anomaly overlays use only the existing event labels and periods.
-    event_windows, anomaly_count, event_count = _event_windows(events_df, signal_name)
-    raw_start, raw_end = df['Fecha'].min(), df['Fecha'].max()
-    event_windows = [
-        {**window, 'start': max(window['start'], raw_start), 'end': min(window['end'], raw_end)}
-        for window in event_windows
-        if window['end'] >= raw_start and window['start'] <= raw_end
-    ]
-    event_colors = {
-        'anomaly': ('#c1121f', 'Anomal\u00eda'),
-        'event': ('#f59e0b', 'Evento'),
-    }
-    # Build all event windows in one layout update. Calling add_vrect once per
-    # window causes Plotly to revalidate the complete figure hundreds of times
-    # when a signal has many materialized episodes.
-    event_shapes = []
-    for window in event_windows:
-        color, _ = event_colors[window['kind']]
-        event_shapes.append({
-            'type': 'rect',
-            'xref': 'x',
-            'yref': 'paper',
-            'x0': window['start'],
-            'x1': window['end'],
-            'y0': 0,
-            'y1': 1,
-            'fillcolor': color,
-            'opacity': 0.14 if window['kind'] == 'event' else 0.2,
-            'line': {'color': color, 'width': 1},
-            'layer': 'below',
-        })
-    if event_shapes:
-        fig.update_layout(shapes=event_shapes)
-    # Mark materialized samples so short episodes remain visible when the
-    # chart starts with a multi-week range. Counts stay in the signal KPI table,
-    # not in this legend.
-    plot_times = pd.DatetimeIndex(plot_df['Fecha'])
-    for kind in ('anomaly', 'event'):
-        color, label = event_colors[kind]
-        windows = [window for window in event_windows if window['kind'] == kind]
-        if windows and len(plot_times):
-            # Convert intervals into a boolean coverage mask with cumulative
-            # boundaries.  This avoids filtering the complete plotted series
-            # once per event window when a signal has many episodes.
-            starts = plot_times.searchsorted(
-                pd.to_datetime([window['start'] for window in windows]), side='left'
-            )
-            ends = plot_times.searchsorted(
-                pd.to_datetime([window['end'] for window in windows]), side='right'
-            )
-            diff = np.zeros(len(plot_times) + 1, dtype=np.int32)
-            for start_idx, end_idx in zip(starts, ends):
-                diff[start_idx] += 1
-                diff[end_idx] -= 1
-            point_mask = np.cumsum(diff[:-1]) > 0
-            point_df = plot_df.loc[point_mask, ['Fecha', signal_name]].rename(
-                columns={signal_name: 'value'}
-            )
-        else:
-            point_df = pd.DataFrame()
-        if not point_df.empty:
-            fig.add_trace(go.Scatter(
-                x=point_df['Fecha'], y=point_df['value'], mode='markers', name=label,
-                marker=dict(size=6, color=color, symbol='square', line=dict(width=0.5, color='white')),
-                hovertemplate=f'{label}<br>%{{x}}<br>Valor: %{{y:.2f}}<extra></extra>',
-            ))
+    # W34-09: the simplified view (show_events=False, the default) skips
+    # event/anomaly overlays entirely \u2014 no shapes, no marker traces. Counts
+    # are unaffected: they come from telemetry_callbacks.py's own
+    # `row['total_events']`/`row['warnings']` (the signal KPI table), not
+    # from anything computed in this block.
+    anomaly_count = event_count = 0
+    if show_events:
+        # Event/anomaly overlays use only the existing event labels and periods.
+        event_windows, anomaly_count, event_count = _event_windows(events_df, signal_name)
+        raw_start, raw_end = df['Fecha'].min(), df['Fecha'].max()
+        event_windows = [
+            {**window, 'start': max(window['start'], raw_start), 'end': min(window['end'], raw_end)}
+            for window in event_windows
+            if window['end'] >= raw_start and window['start'] <= raw_end
+        ]
+        event_colors = {
+            'anomaly': ('#c1121f', 'Anomal\u00eda'),
+            'event': ('#f59e0b', 'Evento'),
+        }
+        # Build all event windows in one layout update. Calling add_vrect once per
+        # window causes Plotly to revalidate the complete figure hundreds of times
+        # when a signal has many materialized episodes.
+        event_shapes = []
+        for window in event_windows:
+            color, _ = event_colors[window['kind']]
+            event_shapes.append({
+                'type': 'rect',
+                'xref': 'x',
+                'yref': 'paper',
+                'x0': window['start'],
+                'x1': window['end'],
+                'y0': 0,
+                'y1': 1,
+                'fillcolor': color,
+                'opacity': 0.14 if window['kind'] == 'event' else 0.2,
+                'line': {'color': color, 'width': 1},
+                'layer': 'below',
+            })
+        if event_shapes:
+            fig.update_layout(shapes=event_shapes)
+        # Mark materialized samples so short episodes remain visible when the
+        # chart starts with a multi-week range. Counts stay in the signal KPI table,
+        # not in this legend.
+        plot_times = pd.DatetimeIndex(plot_df['Fecha'])
+        for kind in ('anomaly', 'event'):
+            color, label = event_colors[kind]
+            windows = [window for window in event_windows if window['kind'] == kind]
+            if windows and len(plot_times):
+                # Convert intervals into a boolean coverage mask with cumulative
+                # boundaries.  This avoids filtering the complete plotted series
+                # once per event window when a signal has many episodes.
+                starts = plot_times.searchsorted(
+                    pd.to_datetime([window['start'] for window in windows]), side='left'
+                )
+                ends = plot_times.searchsorted(
+                    pd.to_datetime([window['end'] for window in windows]), side='right'
+                )
+                diff = np.zeros(len(plot_times) + 1, dtype=np.int32)
+                for start_idx, end_idx in zip(starts, ends):
+                    diff[start_idx] += 1
+                    diff[end_idx] -= 1
+                point_mask = np.cumsum(diff[:-1]) > 0
+                point_df = plot_df.loc[point_mask, ['Fecha', signal_name]].rename(
+                    columns={signal_name: 'value'}
+                )
+            else:
+                point_df = pd.DataFrame()
+            if not point_df.empty:
+                fig.add_trace(go.Scatter(
+                    x=point_df['Fecha'], y=point_df['value'], mode='markers', name=label,
+                    marker=dict(size=6, color=color, symbol='square', line=dict(width=0.5, color='white')),
+                    hovertemplate=f'{label}<br>%{{x}}<br>Valor: %{{y:.2f}}<extra></extra>',
+                ))
 
     latest_observed = df['Fecha'].max()
-    # Open on the longest materialized episode: this chart exists to show signal
-    # evidence, and defaulting to the latest three days hides an episode that
-    # happened earlier. Fall back to that recent window when there is no episode.
-    # The range selector can still expand the view either way.
-    episode_start = _max_episode_start(events_df, signal_name)
-    recent_start = max(df['Fecha'].min(), latest_observed - pd.Timedelta(days=3))
-    if episode_start is not None and df['Fecha'].min() <= episode_start <= latest_observed:
-        initial_start = episode_start
+    if show_events:
+        # Open on the longest materialized episode: this view exists to show
+        # signal evidence, and defaulting to the latest three days hides an
+        # episode that happened earlier. Fall back to that recent window
+        # when there is no episode. The range selector can still expand the
+        # view either way.
+        episode_start = _max_episode_start(events_df, signal_name)
+        recent_start = max(df['Fecha'].min(), latest_observed - pd.Timedelta(days=3))
+        if episode_start is not None and df['Fecha'].min() <= episode_start <= latest_observed:
+            initial_start = episode_start
+        else:
+            initial_start = recent_start
     else:
-        initial_start = recent_start
+        # W34-09: simplified view \u2014 fixed window_days back from the latest
+        # sample. No episode-centering: there are no event markers to
+        # centre on since overlays are off.
+        initial_start = max(df['Fecha'].min(), latest_observed - pd.Timedelta(days=window_days))
 
     # Limits reference lines (from limits or baselines)
     if not limits_df.empty and unit:
@@ -390,10 +419,15 @@ def build_signal_timeseries_card(
             bl_row = bl.iloc[0]
             x_range = [df['Fecha'].min(), df['Fecha'].max()]
 
+            # W34-08: legend labels only — P2/P5/P95/P98 stay the parquet's
+            # actual column names (bl_row['P95'] etc., the data contract) and
+            # are not touched. Vocabulary matches the Stewart four-limit
+            # terminology already shown elsewhere (predictive_tables.py's
+            # status badges: "Superior Marginal", "Inferior Condenatorio").
             if 'P95' in bl_row.index and pd.notna(bl_row['P95']):
                 fig.add_trace(go.Scatter(
                     x=x_range, y=[bl_row['P95']] * 2,
-                    mode='lines', name='P95',
+                    mode='lines', name='Límite superior marginal',
                     line=dict(color='#9bbbd0', dash='dash', width=1),
                     legendrank=3,
                     showlegend=True
@@ -401,7 +435,7 @@ def build_signal_timeseries_card(
             if 'P98' in bl_row.index and pd.notna(bl_row['P98']):
                 fig.add_trace(go.Scatter(
                     x=x_range, y=[bl_row['P98']] * 2,
-                    mode='lines', name='P98',
+                    mode='lines', name='Límite superior condenatorio',
                     line=dict(color='#527d9c', dash='dash', width=1),
                     legendrank=4,
                     showlegend=True
@@ -409,7 +443,7 @@ def build_signal_timeseries_card(
             if 'P5' in bl_row.index and pd.notna(bl_row['P5']):
                 fig.add_trace(go.Scatter(
                     x=x_range, y=[bl_row['P5']] * 2,
-                    mode='lines', name='P5',
+                    mode='lines', name='Límite inferior marginal',
                     line=dict(color='#b8cad8', dash='dash', width=1),
                     legendrank=2,
                     showlegend=True
@@ -417,7 +451,7 @@ def build_signal_timeseries_card(
             if 'P2' in bl_row.index and pd.notna(bl_row['P2']):
                 fig.add_trace(go.Scatter(
                     x=x_range, y=[bl_row['P2']] * 2,
-                    mode='lines', name='P2',
+                    mode='lines', name='Límite inferior condenatorio',
                     line=dict(color='#789bb5', dash='dash', width=1),
                     legendrank=1,
                     showlegend=True
@@ -467,16 +501,16 @@ def build_signal_timeseries_card(
             range=[initial_start, latest_observed] if initial_start is not None else None,
             autorange=False if initial_start is not None else True,
             rangeslider=dict(visible=True, thickness=0.08),
-            rangeselector=dict(
-                buttons=[
-                    dict(count=7, label='Última semana', step='day', stepmode='backward'),
-                    dict(count=14, label='Últimas 2 semanas', step='day', stepmode='backward'),
-                    dict(count=1, label='Último mes', step='month', stepmode='backward'),
-                ],
-                x=0,
-                y=1.16,
-                xanchor='left',
-            ),
+            # W34-09 removed the Plotly-native rangeselector ("Última
+            # semana" / "Últimas 2 semanas" / "Último mes") that used to sit
+            # here: it duplicated the new 1/7/30-day Dash button group below
+            # the chart (tab_telemetry_unit_detail.py) with slightly
+            # different day-counts for similarly worded options (a calendar
+            # month vs. exactly 30 days), and — being a client-side Plotly
+            # control with no Dash Input — never matched the button group's
+            # active state or fed update_signal_cards' actual window_days.
+            # One control, one source of truth, per the plan's own
+            # "rangeselector isn't observable from a callback test" note.
         ),
         yaxis_title="Valor",
         yaxis=dict(range=y_range, autorange=y_range is None),

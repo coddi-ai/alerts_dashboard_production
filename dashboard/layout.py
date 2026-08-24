@@ -12,9 +12,9 @@ import dash_bootstrap_components as dbc
 import dash
 import os
 from pathlib import Path
-from config.settings import get_settings
+from config.settings import get_settings, APP_VERSION
 from config.client_services import is_service_enabled
-from dashboard.auth import is_admin
+from dashboard.auth import current_dashboard_user_data, is_admin
 from dashboard.services_registry import SERVICE_SECTIONS, SERVICE_LABELS, nav_path as _nav_path
 
 
@@ -186,7 +186,19 @@ def create_login_page() -> dbc.Container:
                     "overflow": "hidden"
                 })
             ], width=12, lg=5, xl=4, className='mx-auto')
-        ], className="align-items-center min-vh-100")
+        ], className="align-items-center min-vh-100"),
+
+        # Version footnote, bottom-left of the screen
+        html.Div(
+            f"v{APP_VERSION}",
+            style={
+                "position": "fixed",
+                "bottom": "12px",
+                "left": "16px",
+                "color": "rgba(255, 255, 255, 0.5)",
+                "fontSize": "0.75rem"
+            }
+        )
     ], fluid=True, style={
         "background": "#00173b",
         "minHeight": "100vh"
@@ -520,7 +532,7 @@ def create_main_dashboard(user_data: dict) -> html.Div:
             "backgroundColor": "rgba(0,0,0,0.2)",
             "borderBottom": "2px solid rgba(255,255,255,0.1)"
         }),
-        
+
         # Menu items container - re-rendered by dashboard/callbacks/sidebar_callbacks.py
         # whenever client-selector changes, so it always reflects the
         # currently selected client's enabled services.
@@ -530,7 +542,7 @@ def create_main_dashboard(user_data: dict) -> html.Div:
             className="p-3 sidebar-menu",
             style={"overflowY": "auto", "height": "calc(100vh - 142px)"}
         )
-    ], style={
+    ], id='app-sidebar', style={
         "width": "260px",
         "backgroundColor": "#2c3e50",
         "height": "100vh",
@@ -540,12 +552,26 @@ def create_main_dashboard(user_data: dict) -> html.Div:
         "boxShadow": "2px 0 8px rgba(0,0,0,0.1)",
         "zIndex": 999
     })
-    
+
+    # Floating toggle button - lives outside the sidebar so it stays
+    # reachable (to re-expand) even while the sidebar is collapsed. Its
+    # position and icon direction are driven purely by CSS off the
+    # 'sidebar-collapsed' class on #dashboard-shell (see
+    # dashboard/assets/custom_layout.css), toggled by the clientside
+    # callback in dashboard/callbacks/sidebar_callbacks.py.
+    sidebar_toggle_button = html.Button(
+        html.I(id='sidebar-toggle-icon', className="fas fa-chevron-left"),
+        id='sidebar-toggle-btn',
+        title='Ocultar/mostrar menú de navegación',
+        n_clicks=0,
+        className='sidebar-toggle-btn'
+    )
+
     # Content area with proper spacing from header and sidebar
     content_area = html.Div([
         # Routed page content
         dash.page_container
-    ], style={
+    ], id='app-content-wrapper', style={
         "marginLeft": "260px",
         "marginTop": "80px",
         "padding": "28px",
@@ -556,8 +582,9 @@ def create_main_dashboard(user_data: dict) -> html.Div:
     return html.Div([
         create_navbar(user_data, available_clients),
         left_menu,
+        sidebar_toggle_button,
         content_area
-    ])
+    ], id='dashboard-shell')
 
 
 def create_app_layout() -> html.Div:
@@ -568,8 +595,24 @@ def create_app_layout() -> html.Div:
         Root layout with stores and page content
     """
     return html.Div([
-        # Store user info (initialized to None to trigger initial callback)
-        dcc.Store(id='user-info-store', storage_type='session', data=None),
+        # Identidad del usuario, sembrada desde la sesion de Flask en cada render en vez de
+        # nacer en None. El store es `session`, o sea sessionStorage, que es por pestana: una
+        # pestana nueva o un enlace directo llegan sin nada, y `display_page` exige el proof
+        # firmado para mostrar el dashboard, asi que sin esto alguien con sesion valida en el
+        # servidor ve el login. Devuelve None cuando no hay sesion, y entonces un visitante
+        # sigue viendo el login, que es lo correcto.
+        #
+        # Solo funciona porque `dashboard/app.py` asigna el callable `create_app_layout` y no
+        # su resultado; evaluado al importar no hay request desde el cual leer la sesion.
+        #
+        # Ojo con el alcance: cuando sessionStorage ya tiene un valor, `dcc.Store` le da
+        # precedencia a ese y pisa esto. Por eso `display_page` reemite el proof por su
+        # cuenta -- sembrar aca cubre la pestana nueva, no la que arrastra un valor viejo.
+        dcc.Store(
+            id='user-info-store',
+            storage_type='session',
+            data=current_dashboard_user_data(),
+        ),
 
         # Session-scoped operator name for ERP notice validation (Validación de Avisos)
         dcc.Store(id='erp-validator-operator-store', storage_type='session', data=None),
@@ -582,6 +625,10 @@ def create_app_layout() -> html.Div:
         
         # Store for alerts internal navigation
         dcc.Store(id='alerts-navigation-state', storage_type='memory', data=None),
+
+        # Sidebar collapsed/expanded preference - persisted across page
+        # navigation and browser sessions (see dashboard/callbacks/sidebar_callbacks.py).
+        dcc.Store(id='sidebar-collapsed-store', storage_type='local', data=False),
 
         # Page content (initialized with login page, will be replaced by callback)
         html.Div(id='page-content', children=create_login_page())
