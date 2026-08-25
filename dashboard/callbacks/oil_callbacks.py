@@ -12,8 +12,19 @@ from dashboard.tabs.tab_lab_compliance import create_lab_compliance_tab
 from config.settings import get_settings
 from dash import html
 from src.utils.logger import get_logger
+from dashboard.components.source_status import render_service_source_status
 
 logger = get_logger(__name__)
+
+
+@callback(
+    Output('oil-source-status', 'children'),
+    Input('client-selector', 'value'),
+)
+def update_oil_source_status(client):
+    if not client:
+        return html.Div()
+    return render_service_source_status(client, "monitoring-oil")
 
 
 # ========================================

@@ -60,7 +60,8 @@ def translate_trend(name: str) -> str:
 @lru_cache(maxsize=1)
 def load_signal_registry(client: str = 'cda') -> Dict[str, str]:
     """Load signal registry and return name → display_name mapping."""
-    path = Path(f'data/telemetry/config/{client}/signal_registry.yaml')
+    from src.data.loaders import _data_path
+    path = _data_path("telemetry", "config", client.lower(), "signal_registry.yaml")
     if not path.exists():
         return {}
     with open(path, 'r', encoding='utf-8') as f:

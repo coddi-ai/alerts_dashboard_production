@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Dict, List
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from src.data.catalog import dashboard_data_root
 
 
 # Dashboard release version, shown as a footnote on the login page.
@@ -34,14 +35,8 @@ class Settings(BaseSettings):
     
     @property
     def data_root(self) -> Path:
-        """Get data root directory (multi-technique architecture)."""
-        # Check if running in Docker (data mounted at /app/data)
-        project_root = Path(__file__).parent.parent
-        docker_path = project_root / 'data'
-        if docker_path.exists():
-            return docker_path
-        # Local development
-        return Path("data")
+        """Get the same mounted data root used by all read-only loaders."""
+        return dashboard_data_root()
     
     # Dashboard
     secret_key: str = Field(default="dev-secret-key-change-in-production", description="Secret key for sessions")

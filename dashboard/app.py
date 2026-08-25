@@ -132,6 +132,9 @@ app.server.config.update(
     SESSION_COOKIE_SECURE=os.getenv("SESSION_COOKIE_SECURE", "false").lower() == "true",
 )
 
+# Explicit WSGI export for Gunicorn and other production servers.
+server = app.server
+
 # Import page modules so their dash.register_page() calls run (must happen
 # after the app is created since register_page() looks up the active app).
 import dashboard.pages.index

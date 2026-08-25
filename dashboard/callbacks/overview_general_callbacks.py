@@ -15,6 +15,7 @@ import logging
 from src.data.loaders import load_telemetry_unit_health, load_alerts_data, load_machine_status_for_client
 from src.data.maintenance_repository import get_repository
 from dashboard.callbacks.data_freshness_callbacks import load_data_freshness
+from dashboard.components.source_status import render_service_source_status
 from dashboard.components.labels import translate_component_label, NO_DATA_ICON, NO_DATA_BG, NO_DATA_TEXT
 from config.client_services import is_service_enabled
 
@@ -96,6 +97,20 @@ def clean_numpy_types(data):
         return None
     else:
         return data
+
+
+def _project_store_records(frame: pd.DataFrame, columns: list[str]) -> list[dict]:
+    """Serialize only the columns consumed by the General callbacks.
+
+    The source DataFrames remain untouched. This projection keeps the browser
+    store small while preserving the existing callback contract and nested
+    values such as ``component_details``.
+    """
+
+    if frame.empty:
+        return []
+    selected = [column for column in columns if column in frame.columns]
+    return clean_numpy_types(frame[selected].to_dict("records"))
 
 
 def calculate_alert_criticality_score(df_alerts: pd.DataFrame, days: int = 30) -> pd.DataFrame:
@@ -968,6 +983,15 @@ def register_overview_general_callbacks(app):
     """
     
     @callback(
+        Output("overview-source-status", "children"),
+        [Input("client-selector", "value")],
+    )
+    def update_overview_source_status(client):
+        if not client:
+            return html.Div()
+        return render_service_source_status(client, "overview-general")
+
+    @callback(
         [
             Output("store-overview-data", "data"),
             Output("store-overview-timestamp", "data"),
@@ -997,6 +1021,13 @@ def register_overview_general_callbacks(app):
             # Load Telemetry data using proper loader (most recent week/year available)
             df_telemetry = load_telemetry_unit_health(client)
             if not df_telemetry.empty:
+                # CDA's golden unit-health contract calls the identifier
+                # ``unit`` while General's derived view uses ``unit_id``.
+                # Add the presentation alias before projecting the Store;
+                # the source frame and its schema remain unchanged.
+                if 'unit_id' not in df_telemetry.columns and 'unit' in df_telemetry.columns:
+                    df_telemetry = df_telemetry.copy()
+                    df_telemetry['unit_id'] = df_telemetry['unit']
                 # Get most recent evaluation timestamp
                 if 'evaluation_timestamp' in df_telemetry.columns:
                     df_telemetry['evaluation_timestamp'] = pd.to_datetime(df_telemetry['evaluation_timestamp'])
@@ -1007,7 +1038,6 @@ def register_overview_general_callbacks(app):
             # Load Maintenance data (already filtered by MTD) - MUST pass client parameter
             repo = get_repository(mode="parquet", client=client)
             df_status = repo.get_status_counts()
-            df_downtime = repo.get_downtime_mtd()
             logger.info(f"Maintenance: Loaded {len(df_status)} status records for client: {client}")
             
             # Load Oil analysis data - use machine_status.parquet for overview charts
@@ -1042,12 +1072,27 @@ def register_overview_general_callbacks(app):
                 # can gate columns against config/client_services.json without a
                 # second Input('client-selector', 'value') dependency.
                 "client": client,
-                "telemetry": clean_numpy_types(df_telemetry.to_dict("records")) if not df_telemetry.empty else [],
-                "maintenance_status": clean_numpy_types(df_status.to_dict("records")) if not df_status.empty else [],
-                "maintenance_downtime": clean_numpy_types(df_downtime.to_dict("records")) if not df_downtime.empty else [],
-                "oil": clean_numpy_types(df_oil.to_dict("records")) if not df_oil.empty else [],
-                "alerts": clean_numpy_types(df_alerts.to_dict("records")) if not df_alerts.empty else [],
-                "freshness": clean_numpy_types(df_freshness.to_dict("records")) if not df_freshness.empty else [],
+                "telemetry": _project_store_records(
+                    df_telemetry, ["unit_id", "overall_status"]
+                ),
+                "maintenance_status": _project_store_records(
+                    df_status, ["machine_status", "n_machines", "machine_code"]
+                ),
+                "oil": _project_store_records(
+                    df_oil,
+                    [
+                        "equipo", "estado", "component_details", "components_normal",
+                        "components_alerta", "components_anormal", "latest_sample_date",
+                        "machine_ai_recommendation",
+                    ],
+                ),
+                "alerts": _project_store_records(
+                    df_alerts, ["Timestamp", "UnitId", "Unidad", "componente"]
+                ),
+                "freshness": _project_store_records(
+                    df_freshness,
+                    ["Data", "Unit_Id", "Ultima Fecha de Actualizacion"],
+                ),
                 "metadata": {
                     "telemetry_latest": telemetry_latest,
                     "oil_latest": oil_latest,
