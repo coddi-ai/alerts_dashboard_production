@@ -21,9 +21,11 @@ from src.data.loaders import (
     load_telemetry_alerts_metadata,
     load_component_mapping,
     load_feature_names,
-    load_telemetry_alerts_detail_golden,
+    load_telemetry_alert_detail_for_alert,
     load_oil_classified,
-    load_maintenance_week
+    load_maintenance_week,
+    load_essays_mapping,
+    _data_path,
 )
 from dashboard.components.alerts_charts import (
     create_alerts_per_unit_chart,
@@ -72,6 +74,7 @@ from dashboard.tabs.tab_alerts_detail import (
     create_oil_status_display,
     create_layout as create_detail_layout
 )
+from dashboard.components.source_status import render_service_source_status
 from src.utils.logger import get_logger
 from src.utils.date_utils import format_local, to_utc_naive
 from config.settings import Settings
@@ -152,6 +155,15 @@ def render_tab_content(active_tab):
 # ========================================
 # GENERAL TAB CALLBACKS
 # ========================================
+
+@callback(
+    Output('alerts-source-status', 'children'),
+    Input('client-selector', 'value'),
+)
+def update_alerts_source_status(client):
+    if not client:
+        return html.Div()
+    return render_service_source_status(client, "monitoring-alerts")
 
 @callback(
     [
@@ -899,15 +911,6 @@ def create_telemetry_evidence_section(alert_row: pd.Series, client: str) -> html
     logger.info("Creating telemetry evidence section using golden layer data")
     
     try:
-        # Load golden layer telemetry data
-        telemetry_golden = load_telemetry_alerts_detail_golden(client)
-        
-        if telemetry_golden.empty:
-            return html.Div([
-                dbc.Alert("No hay datos de telemetría disponibles", color="warning")
-            ])
-        
-        # Filter for this specific alert
         alert_ids = list(dict.fromkeys(
             identifier
             for identifier in (
@@ -916,18 +919,28 @@ def create_telemetry_evidence_section(alert_row: pd.Series, client: str) -> html
             )
             if identifier
         ))
+        unit_id = _normalise_alert_identifier(alert_row.get('UnitId'))
+
         if not alert_ids:
             return html.Div([
                 dbc.Alert("Esta alerta no tiene un identificador asociado", color="info")
             ])
-        
-        # Get unit ID
-        unit_id = _normalise_alert_identifier(alert_row.get('UnitId'))
         if not unit_id:
             return html.Div([
                 dbc.Alert("Esta alerta no tiene UnitId asociado", color="info")
             ])
-        
+
+        # Read only the selected alert/unit when Polars is available. The
+        # pandas fallback preserves the previous cached behavior.
+        telemetry_golden = load_telemetry_alert_detail_for_alert(
+            client, alert_ids, unit_id
+        )
+
+        if telemetry_golden.empty:
+            return html.Div([
+                dbc.Alert("No hay datos de telemetría disponibles", color="warning")
+            ])
+
         # Filter telemetry data by BOTH AlertID AND Unit (AlertID is unique
         # per unit, not globally). Keep the comparison textual: Capstone IDs
         # are deterministic strings such as CAP-....
@@ -1217,14 +1230,13 @@ def create_oil_evidence_section(alert_row: pd.Series, client: str) -> html.Div:
         oil_report = oil_report.iloc[0]
         
         # Load essays_elements mapping
-        essays_file = Path("data/oil/essays_elements.xlsx")
+        essays_file = _data_path("oil", "essays_elements.xlsx")
         if not essays_file.exists():
             return html.Div([
                 dbc.Alert("Archivo essays_elements.xlsx no encontrado", color="warning")
             ])
         
-        essays_df = pd.read_excel(essays_file)
-        essays_df = essays_df.dropna(subset=['ElementNameSpanish', 'GroupElement'])
+        essays_df = load_essays_mapping(essays_file)
         
         # Group essays by GroupElement
         group_mapping = essays_df.groupby('GroupElement')['ElementNameSpanish'].apply(list).to_dict()

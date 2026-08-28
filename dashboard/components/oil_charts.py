@@ -334,10 +334,11 @@ def build_oil_time_series_grid(history: pd.DataFrame, comp_limits_four: dict, oi
     # "Paquete de Aditivos" charts for this render. Split into two side-by-side
     # charts (same 2-column layout as the pairs above) so the lines stay readable.
     charts_to_render = list(TIME_SERIES_CHARTS)
-    essays_file = Path("data/oil/essays_elements.xlsx")
+    from src.data.loaders import _data_path
+    essays_file = _data_path("oil", "essays_elements.xlsx")
     if essays_file.exists():
-        essays_df = pd.read_excel(essays_file)
-        essays_df = essays_df.dropna(subset=['ElementNameSpanish', 'GroupElement'])
+        from src.data.loaders import load_essays_mapping
+        essays_df = load_essays_mapping(essays_file)
         aditivo_essays = essays_df[essays_df['GroupElement'] == 'Aditivo']['ElementNameSpanish'].tolist()
         if aditivo_essays:
             primary_aditivos = [e for e in ['Calcio', 'Zinc', 'Fósforo'] if e in aditivo_essays]

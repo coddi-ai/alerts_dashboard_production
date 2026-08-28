@@ -91,6 +91,7 @@ def create_layout(client: str = "cda") -> html.Div:
                 _build_legend()
             ])
         ], className="mb-4"),
+        html.Div(id="data-freshness-source-status"),
         
         # Data Freshness Table
         dbc.Row([

@@ -23,6 +23,8 @@ from dashboard.components.accumulated_curve import (
     _empty_state as _accumulated_empty_state,
 )
 from src.data.loaders import get_latest_analisis_inteligente, get_model_run_date
+from src.data.catalog import dashboard_data_root
+from src.data.fast_io import read_csv as fast_read_csv
 from dashboard.components.labels import NO_DATA_BG, NO_DATA_TEXT
 
 logger = get_logger(__name__)
@@ -30,31 +32,47 @@ logger = get_logger(__name__)
 
 # ── Data Loading (Multi-Component) ────────────────────────────────────────────
 
-@lru_cache(maxsize=8)
-def _discover_components(client: str) -> dict:
-    """Auto-discover available component CSV files for a client.
+@lru_cache(maxsize=16)
+def _discover_components_cached(client: str, data_dir: str, directory_mtime_ns: int) -> dict:
+    """Cache component discovery until the directory generation changes."""
 
-    Cached per client: this lists the predictive golden-layer directory,
-    which on a network filesystem is a round trip and doesn't need repeating
-    on every callback firing within the same process lifetime.
-    """
-    settings = get_settings()
-    data_dir = Path(settings.data_root) / "predictive" / "golden" / client
-
-    if not data_dir.exists():
+    data_path = Path(data_dir)
+    if not data_path.exists():
         return {}
 
     components = {}
-    for fname in sorted(os.listdir(data_dir)):
+    for fname in sorted(os.listdir(data_path)):
         if fname.endswith(".csv"):
             component_name = fname.replace(".csv", "")
-            components[component_name] = data_dir / fname
-
+            components[component_name] = data_path / fname
     return components
 
 
+def _discover_components(client: str) -> dict:
+    """Auto-discover available component CSV files for a client.
+
+    The cache key includes the directory mtime so a newly materialized
+    component becomes visible without restarting the worker.
+    """
+    data_dir = dashboard_data_root() / "predictive" / "golden" / client.lower()
+
+    if not data_dir.exists():
+        return {}
+    try:
+        directory_mtime_ns = data_dir.stat().st_mtime_ns
+    except OSError:
+        return {}
+    return _discover_components_cached(client.lower(), str(data_dir), directory_mtime_ns)
+
+
 @lru_cache(maxsize=16)
-def _load_component_data(filepath: Path, component: str, client: str = "cda"):
+def _load_component_data_cached(
+    filepath: str,
+    component: str,
+    client: str,
+    mtime_ns: int,
+    size: int,
+):
     """Load and precompute predictive data for a single component.
 
     Cached per (filepath, component, client): this CSV can be 20+MB and the
@@ -66,11 +84,12 @@ def _load_component_data(filepath: Path, component: str, client: str = "cda"):
     mutation) — any future caller that needs to mutate df/df_latest must copy
     first, since these objects are shared across calls.
     """
+    filepath = Path(filepath)
     if not filepath.exists():
         logger.warning(f"Predictive data not found: {filepath}")
         return None, None, {}
 
-    df = pd.read_csv(filepath)
+    df = fast_read_csv(filepath)
     df["Fecha"] = pd.to_datetime(df["Fecha"])
     df = df.copy()  # defragment after column assignment
 
@@ -140,6 +159,20 @@ def _load_component_data(filepath: Path, component: str, client: str = "cda"):
         prev_ranking = dict(zip(df_prev["Unit"], df_prev["ranking"]))
 
     return df, df_latest, prev_ranking
+
+
+def _load_component_data(filepath: Path, component: str, client: str = "cda"):
+    """Load a predictive component with invalidation on file generation."""
+    filepath = Path(filepath)
+    if not filepath.exists():
+        return None, None, {}
+    stat = filepath.stat()
+    result = _load_component_data_cached(
+        str(filepath), component, client, stat.st_mtime_ns, stat.st_size
+    )
+    # The cached frames are treated as immutable by the presentation layer.
+    # Avoid copying tens of MB when Resumen and Evidencia mount together.
+    return result[0], result[1], result[2]
 
 
 # ── Color helpers ─────────────────────────────────────────────────────────────
@@ -416,7 +449,7 @@ def _load_component_hours_if_available(client: str):
     try:
         settings = get_settings()
         # Ruta directa al parquet, misma que usaba el dashboard antiguo.
-        hours_path = Path(settings.data_root) / "oil" / "golden" / client.lower() / "cleaned_component_hours.parquet"
+        hours_path = dashboard_data_root() / "oil" / "golden" / client.lower() / "cleaned_component_hours.parquet"
         if not hours_path.exists():
             return None
 

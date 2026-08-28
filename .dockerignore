@@ -8,6 +8,7 @@ __pycache__/
 .venv
 venv/
 data/
+Capstone_Scrapper/
 logs/
 .pytest_cache/
 outputs/

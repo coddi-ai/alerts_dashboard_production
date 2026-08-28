@@ -18,6 +18,11 @@ from typing import Dict, List, Optional
 from src.utils.logger import get_logger
 from src.utils.file_utils import list_excel_files, safe_read_excel, safe_read_parquet
 from src.utils.date_utils import to_utc_naive
+from src.data.fast_io import (
+    read_csv as fast_read_csv,
+    read_csv_filtered as fast_read_csv_filtered,
+    read_parquet as fast_read_parquet,
+)
 
 logger = get_logger(__name__)
 
@@ -34,6 +39,15 @@ def _data_path(*parts: str) -> Path:
 # refresh boundary for the mounted data directory.
 
 
+@lru_cache(maxsize=16)
+def _load_essays_mapping_cached(path: str, mtime_ns: int, size: int) -> pd.DataFrame:
+    """Read one mapping-file generation; callers receive defensive copies."""
+    logger.info(f"Loading essays mapping from {path}")
+    df = pd.read_excel(path, engine='openpyxl').dropna()
+    logger.info(f"Loaded {len(df)} essay mappings")
+    return df
+
+
 def load_essays_mapping(file_path: str | Path = "essays_elements.xlsx") -> pd.DataFrame:
     """
     Load essays mapping table for harmonizing column names.
@@ -44,14 +58,11 @@ def load_essays_mapping(file_path: str | Path = "essays_elements.xlsx") -> pd.Da
     Returns:
         DataFrame with Element → ElementNameSpanish mapping
     """
-    logger.info(f"Loading essays mapping from {file_path}")
-    
-    df = pd.read_excel(file_path, engine='openpyxl')
-    # Drop rows with incomplete mappings
-    df = df.dropna()
-    
-    logger.info(f"Loaded {len(df)} essay mappings")
-    return df
+    path = Path(file_path)
+    stat = path.stat()
+    return _load_essays_mapping_cached(
+        str(path), stat.st_mtime_ns, stat.st_size
+    ).copy(deep=True)
 
 
 def load_cda_data(raw_folder: str | Path) -> pd.DataFrame:
@@ -244,7 +255,7 @@ def load_stewart_limits(file_path: str | Path) -> Dict:
     return limits
 
 
-def load_stewart_limits_four(file_path: str | Path) -> Dict:
+def _load_stewart_limits_four_uncached(file_path: str | Path) -> Dict:
     """
     Load pre-computed four-limit Stewart Limits (LIC/LIM/LSM/LSC) from Parquet file (v2.8).
 
@@ -298,6 +309,23 @@ def load_stewart_limits_four(file_path: str | Path) -> Dict:
 
     logger.info(f"Loaded four-limit Stewart Limits for {len(limits)} clients")
     return limits
+
+
+@lru_cache(maxsize=16)
+def _load_stewart_limits_four_cached(path: str, mtime_ns: int, size: int) -> Dict:
+    """Cache the derived four-limit dictionary by source generation."""
+    return _load_stewart_limits_four_uncached(path)
+
+
+def load_stewart_limits_four(file_path: str | Path) -> Dict:
+    """Return four-limit Stewart data without reparsing unchanged Parquet."""
+    path = Path(file_path)
+    if not path.exists():
+        return {}
+    stat = path.stat()
+    return _load_stewart_limits_four_cached(
+        str(path), stat.st_mtime_ns, stat.st_size
+    )
 
 
 def save_stewart_limits(limits: Dict, file_path: str | Path) -> None:
@@ -456,7 +484,7 @@ def load_silver_data(file_path: str | Path) -> pd.DataFrame:
 # ========================================
 
 @lru_cache(maxsize=8)
-def _load_alerts_data_cached(client: str) -> pd.DataFrame:
+def _load_alerts_data_cached(client: str, path: str, mtime_ns: int, size: int) -> pd.DataFrame:
     """
     Load consolidated alerts data for a specific client.
     
@@ -466,7 +494,7 @@ def _load_alerts_data_cached(client: str) -> pd.DataFrame:
     Returns:
         DataFrame with alerts data including derived columns (has_telemetry, has_tribology, Month)
     """
-    file_path = _data_path("alerts", "golden", client.lower(), "consolidated_alerts.csv")
+    file_path = Path(path)
     logger.info(f"Loading alerts data from {file_path}")
     
     if not file_path.exists():
@@ -474,7 +502,7 @@ def _load_alerts_data_cached(client: str) -> pd.DataFrame:
         return pd.DataFrame()
     
     try:
-        df = pd.read_csv(file_path)
+        df = fast_read_csv(file_path)
         
         # Normalize event timestamps to timezone-naive UTC (W34-06: the single
         # normalization point — every comparison, window and filter downstream
@@ -511,8 +539,14 @@ def _load_alerts_data_cached(client: str) -> pd.DataFrame:
 
 
 def load_alerts_data(client: str) -> pd.DataFrame:
-    """Return alerts data without re-reading the CSV for every callback."""
-    return _load_alerts_data_cached((client or '').lower()).copy(deep=True)
+    """Return alerts data cached by the current source generation."""
+    file_path = _data_path("alerts", "golden", (client or '').lower(), "consolidated_alerts.csv")
+    if not file_path.exists():
+        return pd.DataFrame()
+    stat = file_path.stat()
+    return _load_alerts_data_cached(
+        (client or '').lower(), str(file_path), stat.st_mtime_ns, stat.st_size
+    ).copy(deep=True)
 
 
 def load_telemetry_values(client: str) -> pd.DataFrame:
@@ -616,7 +650,7 @@ def load_telemetry_alerts_metadata(client: str) -> pd.DataFrame:
         return pd.DataFrame()
     
     try:
-        df = pd.read_csv(file_path)
+        df = fast_read_csv(file_path)
         df['AlertID'] = df['AlertID'].astype(str)
         logger.info(f"Loaded {len(df)} telemetry alert metadata records")
         return df
@@ -683,7 +717,9 @@ def load_feature_names(client: str) -> Dict[str, str]:
 
 
 @lru_cache(maxsize=8)
-def _load_telemetry_alerts_detail_golden_cached(client: str) -> pd.DataFrame:
+def _load_telemetry_alerts_detail_golden_cached(
+    client: str, path: str, mtime_ns: int, size: int
+) -> pd.DataFrame:
     """
     Load pre-processed telemetry alert details from golden layer.
     This file contains all signals, limits, and GPS data for alerts in wide format.
@@ -699,7 +735,7 @@ def _load_telemetry_alerts_detail_golden_cached(client: str) -> pd.DataFrame:
         - {Feature}_Value: Sensor values
         - {Feature}_{Kind}_Limit: Limit values (Upper/Lower)
     """
-    file_path = _data_path("telemetry", "golden", client.lower(), "alerts_detail_wide_with_gps.csv")
+    file_path = Path(path)
     logger.info(f"Loading telemetry alerts detail from golden layer: {file_path}")
     
     if not file_path.exists():
@@ -707,7 +743,7 @@ def _load_telemetry_alerts_detail_golden_cached(client: str) -> pd.DataFrame:
         return pd.DataFrame()
     
     try:
-        df = pd.read_csv(file_path)
+        df = fast_read_csv(file_path)
         # W34-06: same UTC-naive normalization point as consolidated_alerts's
         # Timestamp column, so the alert instant and its telemetry evidence
         # window compare against the same clock.
@@ -720,13 +756,89 @@ def _load_telemetry_alerts_detail_golden_cached(client: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def load_telemetry_alerts_detail_golden(client: str) -> pd.DataFrame:
-    """Return cached golden alert evidence as a defensive copy."""
-    return _load_telemetry_alerts_detail_golden_cached((client or '').lower()).copy(deep=True)
+def load_telemetry_alerts_detail_golden(client: str, *, copy: bool = True) -> pd.DataFrame:
+    """Return cached golden alert evidence with optional zero-copy access.
+
+    The detail callback only filters and reads the frame.  It can opt out of a
+    75MB defensive copy while callers that may mutate data retain the safe
+    default.
+    """
+    file_path = _data_path(
+        "telemetry", "golden", (client or '').lower(), "alerts_detail_wide_with_gps.csv"
+    )
+    if not file_path.exists():
+        return pd.DataFrame()
+    stat = file_path.stat()
+    frame = _load_telemetry_alerts_detail_golden_cached(
+        (client or '').lower(), str(file_path), stat.st_mtime_ns, stat.st_size
+    )
+    return frame.copy(deep=True) if copy else frame
+
+
+@lru_cache(maxsize=128)
+def _load_telemetry_alert_detail_for_alert_cached(
+    client: str,
+    path: str,
+    mtime_ns: int,
+    size: int,
+    identifiers: tuple[str, ...],
+    unit_id: str,
+) -> pd.DataFrame:
+    """Cache one filtered alert generation for fast back/forward navigation."""
+    file_path = Path(path)
+    try:
+        frame = fast_read_csv_filtered(
+            file_path,
+            {"AlertID": identifiers, "Unit": (unit_id,)},
+        )
+        if "TimeStart" in frame.columns:
+            frame["TimeStart"] = to_utc_naive(frame["TimeStart"])
+        return frame
+    except Exception as exc:
+        logger.warning("Filtered telemetry detail read failed; using cached source: %s", exc)
+        frame = load_telemetry_alerts_detail_golden(client, copy=False)
+        if frame.empty:
+            return frame
+        alert_keys = frame["AlertID"].astype(str).str.strip()
+        unit_keys = frame["Unit"].astype(str).str.strip()
+        return frame.loc[alert_keys.isin(identifiers) & unit_keys.eq(unit_id)]
+
+
+def load_telemetry_alert_detail_for_alert(
+    client: str,
+    alert_ids: list[str] | tuple[str, ...],
+    unit_id: str,
+) -> pd.DataFrame:
+    """Read only one alert/unit from the wide telemetry evidence CSV.
+
+    Polars can push these predicates into the CSV scan.  With pandas the
+    function falls back to the cached full reader and applies the same filter,
+    preserving behavior on installations that have not installed Polars yet.
+    """
+
+    identifiers = tuple(str(value).strip() for value in alert_ids if str(value).strip())
+    unit_id = str(unit_id or "").strip()
+    if not identifiers or not unit_id:
+        return pd.DataFrame()
+    file_path = _data_path(
+        "telemetry", "golden", (client or '').lower(), "alerts_detail_wide_with_gps.csv"
+    )
+    if not file_path.exists():
+        return pd.DataFrame()
+    stat = file_path.stat()
+    return _load_telemetry_alert_detail_for_alert_cached(
+        (client or '').lower(), str(file_path), stat.st_mtime_ns, stat.st_size,
+        identifiers, unit_id,
+    )
 
 
 @lru_cache(maxsize=8)
-def _load_oil_classified_cached(client: str) -> pd.DataFrame:
+def _load_oil_classified_cached(
+    client: str,
+    path: str,
+    mtime_ns: int,
+    size: int,
+) -> pd.DataFrame:
     """
     Load classified oil reports for alerts dashboard.
     
@@ -736,7 +848,7 @@ def _load_oil_classified_cached(client: str) -> pd.DataFrame:
     Returns:
         DataFrame with classified oil samples (sampleNumber, essay columns, report_status, etc.)
     """
-    file_path = _data_path("oil", "golden", client.lower(), "classified.parquet")
+    file_path = Path(path)
     logger.info(f"Loading oil classified data from {file_path}")
     
     if not file_path.exists():
@@ -754,12 +866,24 @@ def _load_oil_classified_cached(client: str) -> pd.DataFrame:
 
 
 def load_oil_classified(client: str) -> pd.DataFrame:
-    """Return cached classified oil data as a defensive copy."""
-    return _load_oil_classified_cached((client or '').lower()).copy(deep=True)
+    """Return the current classified oil generation as a defensive copy."""
+    client_key = (client or '').lower()
+    file_path = _data_path("oil", "golden", client_key, "classified.parquet")
+    if not file_path.exists():
+        return pd.DataFrame()
+    stat = file_path.stat()
+    return _load_oil_classified_cached(
+        client_key, str(file_path), stat.st_mtime_ns, stat.st_size
+    ).copy(deep=True)
 
 
 @lru_cache(maxsize=8)
-def _load_analisis_inteligente_cached(client: str) -> pd.DataFrame:
+def _load_analisis_inteligente_cached(
+    client: str,
+    path: str,
+    mtime_ns: int,
+    size: int,
+) -> pd.DataFrame:
     """
     Load AI-generated risk analysis/recommendation for Predictivo -> Evidencia
     (one row per Unit per Fecha). Callers filter to a single Unit and take the
@@ -772,7 +896,7 @@ def _load_analisis_inteligente_cached(client: str) -> pd.DataFrame:
         DataFrame with columns including Unit, Fecha, diagnostico,
         causa_probable, acciones. Empty DataFrame if the file is missing.
     """
-    file_path = _data_path("predictive", "golden", client.lower(), "analisis_inteligente.parquet")
+    file_path = Path(path)
     logger.info(f"Loading analisis inteligente data from {file_path}")
 
     if not file_path.exists():
@@ -792,8 +916,17 @@ def _load_analisis_inteligente_cached(client: str) -> pd.DataFrame:
 
 
 def load_analisis_inteligente(client: str) -> pd.DataFrame:
-    """Return cached AI analysis data as a defensive copy."""
-    return _load_analisis_inteligente_cached((client or '').lower()).copy(deep=True)
+    """Return the current AI analysis generation as a defensive copy."""
+    client_key = (client or '').lower()
+    file_path = _data_path(
+        "predictive", "golden", client_key, "analisis_inteligente.parquet"
+    )
+    if not file_path.exists():
+        return pd.DataFrame()
+    stat = file_path.stat()
+    return _load_analisis_inteligente_cached(
+        client_key, str(file_path), stat.st_mtime_ns, stat.st_size
+    ).copy(deep=True)
 
 
 def _filter_analisis_inteligente_component(df: pd.DataFrame, component: str = None) -> pd.DataFrame:
@@ -841,7 +974,12 @@ def get_model_run_date(client: str, component: str = None):
 
 
 @lru_cache(maxsize=8)
-def _load_machine_status_cached(client: str) -> pd.DataFrame:
+def _load_machine_status_cached(
+    client: str,
+    path: str,
+    mtime_ns: int,
+    size: int,
+) -> pd.DataFrame:
     """
     Load machine-level status aggregations for the oil dashboards (fleet
     overview KPIs, heatmap table, machine detail card).
@@ -852,7 +990,7 @@ def _load_machine_status_cached(client: str) -> pd.DataFrame:
     Returns:
         DataFrame with columns: unit_id, overall_status, machine_ai_recommendation, etc.
     """
-    file_path = _data_path("oil", "golden", client.lower(), "machine_status.parquet")
+    file_path = Path(path)
     logger.info(f"Loading machine status from {file_path}")
 
     if not file_path.exists():
@@ -870,8 +1008,15 @@ def _load_machine_status_cached(client: str) -> pd.DataFrame:
 
 
 def load_machine_status_for_client(client: str) -> pd.DataFrame:
-    """Return cached machine status data as a defensive copy."""
-    return _load_machine_status_cached((client or '').lower()).copy(deep=True)
+    """Return the current machine status generation as a defensive copy."""
+    client_key = (client or '').lower()
+    file_path = _data_path("oil", "golden", client_key, "machine_status.parquet")
+    if not file_path.exists():
+        return pd.DataFrame()
+    stat = file_path.stat()
+    return _load_machine_status_cached(
+        client_key, str(file_path), stat.st_mtime_ns, stat.st_size
+    ).copy(deep=True)
 
 
 # ========================================
@@ -921,6 +1066,20 @@ def _latest_telemetry_partition(base: Path) -> Path:
     if not partitions:
         return base
     return max(partitions, key=lambda item: (item[0], item[1]))[2]
+
+
+def _telemetry_partition_generation(path: Path) -> tuple[int, int]:
+    """Return a lightweight generation key for a telemetry partition."""
+
+    files = tuple(item for item in path.rglob("*") if item.is_file()) if path.is_dir() else (path,)
+    if not files:
+        try:
+            stat = path.stat()
+            return stat.st_mtime_ns, stat.st_size
+        except OSError:
+            return 0, 0
+    stats = tuple(item.stat() for item in files)
+    return max(stat.st_mtime_ns for stat in stats), sum(stat.st_size for stat in stats)
 
 
 def _keep_latest_execution(df: pd.DataFrame, keys: list[str]) -> pd.DataFrame:
@@ -981,7 +1140,13 @@ def _load_latest_telemetry_output(
 
 
 @lru_cache(maxsize=8)
-def _load_telemetry_unit_health_cached(client: str) -> pd.DataFrame:
+def _load_telemetry_unit_health_cached(
+    client: str,
+    base_path: str,
+    target_path: str,
+    mtime_ns: int,
+    size: int,
+) -> pd.DataFrame:
     """
     Load unit health assessments from golden layer.
 
@@ -991,7 +1156,8 @@ def _load_telemetry_unit_health_cached(client: str) -> pd.DataFrame:
     Returns:
         DataFrame with unit-level health (overall_status, priority_score, executive_summary, etc.)
     """
-    base = Path(f"data/telemetry/golden/{client.lower()}/unit_health")
+    base = Path(base_path)
+    target = Path(target_path)
     logger.info(f"Loading telemetry unit health from {base}")
 
     if not base.exists():
@@ -999,7 +1165,7 @@ def _load_telemetry_unit_health_cached(client: str) -> pd.DataFrame:
         return pd.DataFrame()
 
     try:
-        df = safe_read_parquet(_latest_telemetry_partition(base))
+        df = safe_read_parquet(target)
         df = _filter_latest_week(df)
         df = _keep_latest_execution(df, ["unit"])
         logger.info(f"Loaded {len(df)} unit health records")
@@ -1018,7 +1184,15 @@ def load_telemetry_unit_health(client: str) -> pd.DataFrame:
     not something to repeat on every login. A caller mutating the returned
     frame in place (e.g. reassigning a column) only affects its own copy.
     """
-    return _load_telemetry_unit_health_cached((client or '').lower()).copy(deep=True)
+    client_key = (client or '').lower()
+    base = _data_path("telemetry", "golden", client_key, "unit_health")
+    if not base.exists():
+        return pd.DataFrame()
+    target = _latest_telemetry_partition(base)
+    mtime_ns, size = _telemetry_partition_generation(target)
+    return _load_telemetry_unit_health_cached(
+        client_key, str(base), str(target), mtime_ns, size
+    ).copy(deep=True)
 
 
 def load_telemetry_system_health(client: str) -> pd.DataFrame:
@@ -1031,7 +1205,7 @@ def load_telemetry_system_health(client: str) -> pd.DataFrame:
     Returns:
         DataFrame with system-level health (system_score, system_status, explanation, etc.)
     """
-    base = Path(f"data/telemetry/golden/{client.lower()}/system_health")
+    base = _data_path("telemetry", "golden", client.lower(), "system_health")
     logger.info(f"Loading telemetry system health from {base}")
 
     if not base.exists():
@@ -1059,7 +1233,7 @@ def load_telemetry_deviation_results(client: str) -> pd.DataFrame:
     Returns:
         DataFrame with per-signal deviation risk scores and abnormal percentages
     """
-    root = Path(f"data/telemetry/golden/{client.lower()}")
+    root = _data_path("telemetry", "golden", client.lower())
     return _load_latest_telemetry_output(
         [root / "deviation_summary", root / "technique_results" / "deviation"],
         "deviation results",
@@ -1077,7 +1251,7 @@ def load_telemetry_events(client: str) -> pd.DataFrame:
     Returns:
         DataFrame with abnormal episodes (duration, severity, classification)
     """
-    root = Path(f"data/telemetry/golden/{client.lower()}")
+    root = _data_path("telemetry", "golden", client.lower())
     return _load_latest_telemetry_output(
         [root / "event_results", root / "technique_results" / "events"],
         "event records",
@@ -1099,7 +1273,7 @@ def load_telemetry_trends(client: str) -> pd.DataFrame:
     Returns:
         DataFrame with trend significance, slopes, and interpretations
     """
-    root = Path(f"data/telemetry/golden/{client.lower()}")
+    root = _data_path("telemetry", "golden", client.lower())
     return _load_latest_telemetry_output(
         [root / "trend_results", root / "technique_results" / "trend"],
         "trend results",
@@ -1117,7 +1291,7 @@ def load_telemetry_baselines(client: str) -> pd.DataFrame:
     Returns:
         DataFrame with percentile thresholds per model_specification/signal/state
     """
-    baselines_dir = Path(f"data/telemetry/silver/{client.lower()}/baselines")
+    baselines_dir = _data_path("telemetry", "silver", client.lower(), "baselines")
     if not baselines_dir.exists():
         logger.warning(f"Baselines directory not found: {baselines_dir}")
         return pd.DataFrame()
@@ -1143,7 +1317,7 @@ def load_telemetry_manifest(client: str) -> dict:
     Returns dict with keys: evaluation_week, evaluation_year, execution_timestamp,
     silver_weeks_available, baseline_version. Returns empty dict if not found.
     """
-    manifest_path = Path(f"data/telemetry/golden/{client.lower()}/latest.json")
+    manifest_path = _data_path("telemetry", "golden", client.lower(), "latest.json")
     if not manifest_path.exists():
         logger.warning(f"Telemetry manifest not found: {manifest_path}")
         return {}
@@ -1170,7 +1344,7 @@ def load_telemetry_limits(client: str) -> pd.DataFrame:
         DataFrame with percentile thresholds (P2, P5, P95, P98 at minimum)
     """
     # Try limits directory first (new schema)
-    limits_dir = Path(f"data/telemetry/silver/{client.lower()}/limits")
+    limits_dir = _data_path("telemetry", "silver", client.lower(), "limits")
     if limits_dir.exists():
         try:
             limit_files = sorted(limits_dir.glob('limits_*.parquet'))
@@ -1202,7 +1376,10 @@ def load_silver_telemetry_week(
     Returns:
         DataFrame with raw sensor data (wide format with states)
     """
-    file_path = Path(f"data/telemetry/silver/{client.lower()}/Telemetry_Wide_With_States/Week{week:02d}Year{year}.parquet")
+    file_path = _data_path(
+        "telemetry", "silver", client.lower(), "Telemetry_Wide_With_States",
+        f"Week{week:02d}Year{year}.parquet",
+    )
 
     if not file_path.exists():
         return pd.DataFrame()
@@ -1220,7 +1397,7 @@ def load_silver_telemetry_week(
                     return pd.DataFrame()
             except Exception:
                 read_columns = columns
-        df = safe_read_parquet(file_path, columns=read_columns) if read_columns else safe_read_parquet(file_path)
+        df = fast_read_parquet(file_path, columns=read_columns) if read_columns else fast_read_parquet(file_path)
         if 'Fecha' in df.columns:
             df['Fecha'] = pd.to_datetime(df['Fecha'])
         return df
@@ -1241,7 +1418,7 @@ def load_telemetry_ai_comments(client: str, level: str) -> pd.DataFrame:
         DataFrame with AI comments for the specified level.
         Returns empty DataFrame if data not available.
     """
-    root = Path(f"data/telemetry/golden/{client.lower()}")
+    root = _data_path("telemetry", "golden", client.lower())
     if level not in {"unit", "system", "signal"}:
         logger.warning("Unknown telemetry AI comment level: %s", level)
         return pd.DataFrame()
@@ -1389,8 +1566,16 @@ def load_maintenance_actions_all_equipment(client: str = "cda", base_path: Optio
         df = pd.read_parquet(file_path)
         
         # Convert date strings to datetime (UTC to handle mixed timezones)
-        df['event_ts'] = pd.to_datetime(df['event_ts'], utc=True)
-        df['change_date'] = pd.to_datetime(df['change_date'], utc=True)
+        # Maintenance exports contain ISO-8601 variants with optional
+        # fractional seconds and a trailing ``Z``. Pandas 3 uses strict
+        # single-format inference by default, so explicitly accept mixed ISO
+        # representations while keeping a uniform UTC dtype.
+        df['event_ts'] = pd.to_datetime(
+            df['event_ts'], utc=True, format='mixed', errors='coerce'
+        )
+        df['change_date'] = pd.to_datetime(
+            df['change_date'], utc=True, format='mixed', errors='coerce'
+        )
         
         logger.info(f"Loaded {len(df)} maintenance actions for {df['machine_code'].nunique()} machines")
         return df

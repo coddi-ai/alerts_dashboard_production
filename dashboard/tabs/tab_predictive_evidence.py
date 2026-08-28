@@ -6,9 +6,7 @@ Supports multi-component model: auto-discovers component CSVs (motor, transmisio
 from dash import html, dcc
 import pandas as pd
 import re
-import os
 from pathlib import Path
-from config.settings import get_settings
 from src.utils.logger import get_logger
 from dashboard.components.predictive_config import (
     get_failure_mode_options,
@@ -32,7 +30,11 @@ from dashboard.components.predictive_tables import create_oil_variables_table
 from dashboard.components.oil_charts import get_essay_limits_four, classify_four_limit_value
 from dashboard.components.ai_analysis_panel import create_ai_analysis_panel
 from src.data.loaders import load_analisis_inteligente
-from dashboard.tabs.tab_predictive_overview import attach_status
+from dashboard.tabs.tab_predictive_overview import (
+    attach_status,
+    _discover_components,
+    _load_component_data as _load_cached_component_data,
+)
 from src.charts.signals import SIGNAL_LABELS
 
 logger = get_logger(__name__)
@@ -65,70 +67,17 @@ def _resolve_client_dicts(client, component):
     return oil_labels, telem_labels, oil_limits_four
 
 
-# ── Data Loading (Multi-Component) ────────────────────────────────────────────
-
-def _discover_components(client: str) -> dict:
-    """Auto-discover available component CSV files for a client."""
-    settings = get_settings()
-    data_dir = Path(settings.data_root) / "predictive" / "golden" / client
-
-    if not data_dir.exists():
-        return {}
-
-    components = {}
-    for fname in sorted(os.listdir(data_dir)):
-        if fname.endswith(".csv"):
-            component_name = fname.replace(".csv", "")
-            components[component_name] = data_dir / fname
-
-    return components
-
-
 def _load_component_data(filepath: Path, component: str, client: str = "cda"):
-    """Load predictive data for a single component."""
-    if not filepath.exists():
-        logger.warning(f"Predictive data not found: {filepath}")
+    """Use the same cached/derived frame as Predictive > Resumen.
+
+    The evidence page historically duplicated the full CSV parse and rolling
+    calculations.  The presentation helpers only filter/read these frames, so
+    they share the immutable cached result with Resumen.
+    """
+    result = _load_cached_component_data(filepath, component, client)
+    if result[0] is None:
         return None, None
-
-    df = pd.read_csv(filepath)
-    df["Fecha"] = pd.to_datetime(df["Fecha"])
-
-    # Get failure mode keys for this component
-    failure_modes = get_failure_modes_dict(component, client)
-    fm_keys = list(failure_modes.keys())
-
-    # Compute rolling averages (concat at once to avoid fragmentation)
-    df_sorted = df.sort_values(["Unit", "Fecha"]).copy()
-    rolling_cols = {
-        "ranking_30d": df_sorted.groupby("Unit")["ranking"].transform(
-            lambda x: x.rolling(30, min_periods=1).mean()
-        ),
-        "ranking_90d": df_sorted.groupby("Unit")["ranking"].transform(
-            lambda x: x.rolling(90, min_periods=1).mean()
-        ),
-    }
-    # Also compute 30d rolling for each failure mode (for status classification)
-    for fm in fm_keys:
-        if fm in df_sorted.columns:
-            rolling_cols[f"{fm}_30d"] = df_sorted.groupby("Unit")[fm].transform(
-                lambda x: x.rolling(30, min_periods=1).mean()
-            )
-    df_sorted = pd.concat([df_sorted, pd.DataFrame(rolling_cols, index=df_sorted.index)], axis=1)
-
-    # Latest snapshot
-    df_latest = df_sorted.sort_values("Fecha").groupby("Unit").last().reset_index()
-
-    # Compute max failure mode 30d average per unit
-    fm_30d_cols = [f"{fm}_30d" for fm in fm_keys if f"{fm}_30d" in df_latest.columns]
-    max_fm_30d = df_latest[fm_30d_cols].max(axis=1) if fm_30d_cols else 0.0
-
-    df_latest = df_latest.assign(
-        avg_ranking_30d=df_latest["ranking_30d"],
-        ranking_acum_90d=df_latest["ranking_90d"],
-        max_fm_30d=max_fm_30d,
-    )
-
-    return df_sorted, df_latest
+    return result[0], result[1]
 
 
 # ── Helper functions ──────────────────────────────────────────────────────────

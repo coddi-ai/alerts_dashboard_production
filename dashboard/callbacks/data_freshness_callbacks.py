@@ -9,13 +9,44 @@ import pandas as pd
 from datetime import datetime, timedelta
 from pathlib import Path
 import logging
-import os
 import pytz
+from functools import lru_cache
 
 from src.utils.logger import get_logger
 from dashboard.components.labels import NO_DATA_ICON, NO_DATA_BG, NO_DATA_TEXT
+from src.data.catalog import resolve_data_file
+from dashboard.components.source_status import render_service_source_status
 
 logger = get_logger(__name__)
+
+
+@callback(
+    Output('data-freshness-source-status', 'children'),
+    Input('client-selector', 'value'),
+)
+def update_data_freshness_source_status(selected_client):
+    if not selected_client:
+        return html.Div()
+    return render_service_source_status(selected_client, "overview-data-freshness")
+
+
+@lru_cache(maxsize=16)
+def _load_data_freshness_cached(client: str, path: str, mtime_ns: int, size: int) -> pd.DataFrame:
+    """Read one freshness source generation and keep the cached frame immutable."""
+    try:
+        df = pd.read_csv(path)
+        required_cols = ['Cliente', 'Unit_Id', 'Data', 'Ultima Fecha de Actualizacion']
+        if not all(col in df.columns for col in required_cols):
+            logger.error(f"Missing required columns. Found: {df.columns.tolist()}")
+            return pd.DataFrame()
+        df['Ultima Fecha de Actualizacion'] = pd.to_datetime(
+            df['Ultima Fecha de Actualizacion'], errors='coerce', utc=True
+        )
+        logger.info(f"Loaded {len(df)} data freshness records from {path}")
+        return df
+    except Exception as e:
+        logger.error(f"Error loading data freshness: {e}")
+        return pd.DataFrame()
 
 
 def load_data_freshness(client: str = "cda") -> pd.DataFrame:
@@ -29,30 +60,17 @@ def load_data_freshness(client: str = "cda") -> pd.DataFrame:
         DataFrame with data freshness information
     """
     try:
-        # W34: honor DASHBOARD_DATA_ROOT like every other loader
-        # (src/data/loaders.py::_data_path) — this was the one hardcoded
-        # "data/..." path in the codebase, which made this function
-        # untestable with a tmp_path fixture the way every other loader is.
-        data_root = Path(os.getenv("DASHBOARD_DATA_ROOT", "data")).expanduser()
-        file_path = data_root / "auxiliar" / client.lower() / "Data_Date_Last_Update.csv"
-
-        if not file_path.exists():
-            logger.error(f"Data freshness file not found: {file_path}")
+        file_path = resolve_data_file("auxiliar", client, "Data_Date_Last_Update.csv")
+        if file_path is None:
+            logger.warning(
+                "Data freshness file not found for %s in compatible auxiliary paths",
+                client,
+            )
             return pd.DataFrame()
-        
-        df = pd.read_csv(file_path)
-        
-        # Validate required columns
-        required_cols = ['Cliente', 'Unit_Id', 'Data', 'Ultima Fecha de Actualizacion']
-        if not all(col in df.columns for col in required_cols):
-            logger.error(f"Missing required columns. Found: {df.columns.tolist()}")
-            return pd.DataFrame()
-        
-        # Convert timestamp to datetime (UTC+0)
-        df['Ultima Fecha de Actualizacion'] = pd.to_datetime(df['Ultima Fecha de Actualizacion'])
-        
-        logger.info(f"Loaded {len(df)} data freshness records")
-        return df
+        stat = file_path.stat()
+        return _load_data_freshness_cached(
+            client.lower(), str(file_path), stat.st_mtime_ns, stat.st_size
+        ).copy(deep=True)
         
     except Exception as e:
         logger.error(f"Error loading data freshness: {e}")

@@ -1,8 +1,5 @@
 # Core Data Processing
-# 3.0 y no 2.1: el paquete campbell_ai quito sus copias defensivas apoyandose en que
-# Copy-on-Write es incondicional desde pandas 3. Bajo 2.x, CoW viene apagado y escribir
-# sobre un frame devuelto por el cache lo corrompe. La imagen resuelve a 3.0.5; el piso
-# solo permitia que no fuera asi.
+polars>=1.0.0
 pandas>=3.0
 numpy>=1.24.0
 pyarrow>=14.0.0
@@ -22,6 +19,7 @@ python-dotenv>=1.0.0
 dash>=4.4.1
 dash-bootstrap-components>=1.5.0
 plotly>=5.17.0
+gunicorn>=22.0.0; platform_system != "Windows"
 nbformat>=4.2.0
 itsdangerous>=2.2.0
 
