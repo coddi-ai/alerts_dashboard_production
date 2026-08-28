@@ -17,7 +17,9 @@ import pandas as pd
 from src.campbell_ai.errors import CampbellDataError
 from src.campbell_ai.signals import state_series
 from src.campbell_ai.identity import normalize_client_id
-from src.campbell_ai.resources import CACHES, FrameCache, budget_from_env
+from src.campbell_ai.resources import CACHES, MEGABYTE, FrameCache, budget_from_env
+from src.campbell_ai import index as vocabulary_index
+from src.campbell_ai.schema import declared_columns
 from src.campbell_ai.temporal import DEFAULT_TIMEZONE, current_temporal_context
 from src.charts.signals import signal_label
 
@@ -561,6 +563,9 @@ class DashboardDataRepository:
         probe_cache: dict[tuple[str, int], dict[str, Any]] | None = None,
     ):
         self.data_root = Path(data_root).expanduser().resolve()
+        # Resolved dataset paths, per (dataset, client). Bounded by the catalogue: eleven
+        # datasets times the clients this process serves.
+        self._path_cache: dict[tuple[str, str], Path] = {}
         self.timezone = timezone or DEFAULT_TIMEZONE
         # Both caches are injection points for tests that need isolation (or a tiny
         # budget to exercise eviction) without touching the process-wide ones.
@@ -576,22 +581,48 @@ class DashboardDataRepository:
         return pd.Timestamp(self.temporal_context()["today"])
 
     def dataset_path(self, key: str, client: str) -> Path:
+        """Absolute, authorized path of one dataset for one client.
+
+        Memoized per (dataset, client), and that is not a micro-optimization: `.resolve()`
+        touches the filesystem on Linux - it walks the path resolving symlinks - so this was
+        eleven real round trips per validation pass, on top of the eleven the probe already
+        did. Measured inside the container, `validate_client` spent 22 of its 24 filesystem
+        operations here, producing a path that cannot change: the template is a constant and
+        `data_root` is resolved once in the constructor.
+
+        Discovered by running in Docker. On Windows `Path.resolve()` did not show up as a
+        filesystem call at all, so the local measurement said this was free. It is not, on the
+        platform that matters.
+
+        The traversal guard still runs on every distinct pair, before anything is cached.
+        """
         try:
             spec = DATASET_MAP[key]
         except KeyError as exc:
             raise CampbellDataError(f"Dataset no registrado: {key}") from exc
 
         normalized_client = normalize_client_id(client)
+        cached = self._path_cache.get((key, normalized_client))
+        if cached is not None:
+            return cached
+
         path = (self.data_root / spec.path_template.format(client=normalized_client)).resolve()
         try:
             path.relative_to(self.data_root)
         except ValueError as exc:
             raise CampbellDataError("Ruta de datos fuera del directorio autorizado") from exc
+        self._path_cache[(key, normalized_client)] = path
         return path
 
     def _read_frame(self, path: Path) -> pd.DataFrame:
         if not path.exists():
-            raise CampbellDataError(f"Fuente de datos no disponible: {path.name}")
+            # The primary signal that a declared dataset did not arrive, now that validation
+            # assumes presence. Worth being specific: this message is what an operator reads
+            # instead of "la sesion no abre".
+            raise CampbellDataError(
+                f"Fuente de datos no disponible: {path.name}. Se esperaba en {path.parent}; "
+                "si el dataset deberia existir, la sincronizacion de datos no lo trajo."
+            )
         mtime_ns = path.stat().st_mtime_ns
         cache_key = (str(path), mtime_ns)
         cached = self._frames.get(cache_key)
@@ -635,31 +666,99 @@ class DashboardDataRepository:
         """
         return self._read_frame(self.dataset_path(key, client))
 
-    def _probe_frame(self, path: Path) -> dict[str, Any]:
-        """Read only columns and row count so validation never materializes a dataset."""
-        mtime_ns = path.stat().st_mtime_ns
+    @staticmethod
+    def read_columns(path: Path) -> list[str]:
+        """Column names of a dataset file, read from its header or footer.
+
+        The one place that knows how to get columns off disk. `_probe_frame` uses it when the
+        schema is not declared, and `schema.build` / `schema.verify_against_disk` use it to
+        generate and to check that declaration - so what is declared and what is verified can
+        never be produced by two different readers that disagree.
+        """
+        suffix = path.suffix.lower()
+        if suffix == ".parquet":
+            import pyarrow.parquet as pq
+
+            return [str(name) for name in pq.ParquetFile(path).schema_arrow.names]
+        if suffix == ".csv":
+            header = pd.read_csv(path, nrows=0, low_memory=False)
+            return [str(column) for column in header.columns]
+        raise CampbellDataError(f"Formato no soportado: {path.suffix}")
+
+    def _probe_frame(
+        self,
+        path: Path,
+        *,
+        count_rows: bool = False,
+        dataset_key: str = "",
+        client: str = "",
+    ) -> dict[str, Any]:
+        """Shape of a dataset without materializing it: columns, size, optionally row count.
+
+        ``count_rows`` is off by default, and that default is the fix for a real production
+        symptom. Counting rows in a CSV means reading every byte of it, and validation walks
+        the whole catalogue on every initialization: for CDA that is 11 files and 71 MB, of
+        which 67 MB are read *only* to fill a row count - three large CSVs whose totals nobody
+        needs at that moment. On local disk the walk costs ~1.7 s; on network storage whose
+        throughput has collapsed to its baseline it is the difference between a session that
+        opens at once and one that sits on "Leyendo datos" for over a minute.
+
+        Parquet keeps its count regardless: it comes from the file footer, so it is free.
+
+        The count is not lost, only deferred. `describe_datasets` still asks for it, and a
+        cached entry probed without rows is upgraded in place the first time somebody does -
+        so the expensive read happens when a caller actually wants the number, once per file
+        version, instead of on every session opening.
+        """
+        stat = path.stat()
+        mtime_ns = stat.st_mtime_ns
         cache_key = (str(path), mtime_ns)
         with _PROBE_LOCK:
             cached = self._probe_cache.get(cache_key)
-            if cached is not None:
+            if cached is not None and not (count_rows and cached.get("rows") is None):
                 return cached
         frame = self._frames.get(cache_key)
         if frame is not None:
+            # The whole frame is already resident, so the count costs nothing.
             probe = {
                 "columns": [str(column) for column in frame.columns],
                 "rows": int(len(frame)),
+                "size_bytes": stat.st_size,
+                "columns_from": "frame",
+            }
+        elif (
+            not count_rows
+            and dataset_key
+            and client
+            and (
+                declared := declared_columns(client, dataset_key, path.suffix)
+            )
+            is not None
+        ):
+            # Declared columns: the file is never opened, only `stat`-ed. This is the whole
+            # point of the frozen schema - on network storage an open is a round trip, and
+            # validation used to pay eleven of them per session opening to rediscover columns
+            # that do not change. See `src/campbell_ai/schema/__init__.py` for the two lines
+            # of defence that make trusting the declaration safe.
+            probe = {
+                "columns": declared,
+                "rows": None,
+                "size_bytes": stat.st_size,
+                "columns_from": "declared",
             }
         elif path.suffix.lower() == ".parquet":
             import pyarrow.parquet as pq
 
             metadata = pq.ParquetFile(path)
+            # From the footer, not from the data: cheap enough to always include.
             probe = {
                 "columns": [str(name) for name in metadata.schema_arrow.names],
                 "rows": int(metadata.metadata.num_rows),
+                "size_bytes": stat.st_size,
+                "columns_from": "footer",
             }
         elif path.suffix.lower() == ".csv":
-            header = pd.read_csv(path, nrows=0, low_memory=False)
-            columns = [str(column) for column in header.columns]
+            columns = self.read_columns(path)
             # Count rows by scanning bytes rather than parsing a column. `read_csv`
             # with `usecols=[0]` still tokenizes every field of every row to find the
             # boundaries and allocates the whole file as one block under
@@ -668,7 +767,9 @@ class DashboardDataRepository:
             # `count_csv_data_rows` for how quoted newlines stay correct.
             probe = {
                 "columns": columns,
-                "rows": count_csv_data_rows(path) if columns else 0,
+                "rows": (count_csv_data_rows(path) if columns else 0) if count_rows else None,
+                "size_bytes": stat.st_size,
+                "columns_from": "header",
             }
         else:
             raise CampbellDataError(f"Formato no soportado: {path.suffix}")
@@ -680,6 +781,11 @@ class DashboardDataRepository:
             # Oldest-first trim; insertion order is good enough for entries this small.
             while len(self._probe_cache) >= _MAX_PROBE_ENTRIES:
                 self._probe_cache.pop(next(iter(self._probe_cache)))
+            previous = self._probe_cache.get(cache_key)
+            if previous is not None and probe.get("rows") is None:
+                # A concurrent caller already paid for the count; keep it rather than
+                # replacing it with a probe that skipped it.
+                probe = {**probe, "rows": previous.get("rows")}
             self._probe_cache[cache_key] = probe
         return probe
 
@@ -706,19 +812,30 @@ class DashboardDataRepository:
         return missing
 
     def _manifest_status(self) -> dict[str, Any]:
+        """Whether the data manifest is present and parseable.
+
+        One filesystem touch, not three. It used to ask `exists()` twice for the same question
+        and then read - and this runs on every session opening, where the whole point of the
+        declared schema is that opening a session touches almost nothing. Reading and letting
+        the absence raise answers presence and validity in a single operation.
+        """
         manifest_path = self.data_root / "auxiliar" / "manifest.json"
         status: dict[str, Any] = {
             "path": str(manifest_path),
-            "exists": manifest_path.exists(),
+            "exists": False,
             "valid": False,
         }
-        if not manifest_path.exists():
-            return status
         try:
             payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-            status["valid"] = isinstance(payload, dict)
+        except FileNotFoundError:
+            return status
         except (OSError, json.JSONDecodeError):
-            status["valid"] = False
+            # Present but unreadable or malformed: a different fact from absent, and the
+            # caller distinguishes them.
+            status["exists"] = True
+            return status
+        status["exists"] = True
+        status["valid"] = isinstance(payload, dict)
         return status
 
     def validate_client(self, client: str) -> dict[str, Any]:
@@ -727,22 +844,68 @@ class DashboardDataRepository:
         available_count = 0
         for spec in DATASETS:
             path = self.dataset_path(spec.key, normalized_client)
+
+            # Declared datasets are assumed present, and nothing on disk is touched.
+            #
+            # This is a deliberate reversal of what validation used to do. Checking presence
+            # cost one `stat` per dataset per pass, twice per session opening - 93 filesystem
+            # operations to open a chat - and it bought a distinction the declaration already
+            # makes: the JSON records what each client *has*, so a client that genuinely lacks
+            # a dataset (enex declares 3 of the 11) is still correctly limited here.
+            #
+            # What is given up is narrower than it looks: only the transient case, a file that
+            # should be there and failed to sync. That now surfaces as an exception when
+            # something reads it - `_read_frame` says which client and which dataset - instead
+            # of as a session that refuses to open. Plus `verify_against_disk` looks for real,
+            # once per container, and reports anything missing in `/diagnostics`.
+            declared = declared_columns(normalized_client, spec.key, path.suffix)
+            if declared is not None:
+                missing = self._validate_columns(declared, spec)
+                if not missing:
+                    available_count += 1
+                datasets[spec.key] = {
+                    "label": spec.label,
+                    "path": str(path),
+                    "exists": True,
+                    "valid": not missing,
+                    "missing_columns": missing,
+                    # Unknown without touching the file, and deliberately not guessed. Both
+                    # are informational; `describe_dataset` reads the real numbers on demand.
+                    "rows": None,
+                    "size_bytes": None,
+                    "size_mb": None,
+                    "columns": declared,
+                    "presence": "declared",
+                }
+                continue
+
             item: dict[str, Any] = {
                 "label": spec.label,
                 "path": str(path),
                 "exists": path.exists(),
                 "valid": False,
                 "missing_columns": [],
+                # Not declared for this client, so presence was actually checked. A new client
+                # or a dataset added since the declaration was generated lands here.
+                "presence": "checked",
             }
-            if path.exists():
+            if item["exists"]:
                 try:
-                    probe = self._probe_frame(path)
+                    # No row count here: validation only has to answer "is this source
+                    # present and does it carry the columns we need", and the count is what
+                    # makes the walk expensive. `size_mb` gives the same sense of volume for
+                    # free, from the same `stat` the probe already does.
+                    probe = self._probe_frame(
+                        path, dataset_key=spec.key, client=normalized_client
+                    )
                     missing = self._validate_columns(probe["columns"], spec)
                     item.update(
                         {
                             "valid": not missing,
                             "missing_columns": missing,
-                            "rows": probe["rows"],
+                            "rows": probe.get("rows"),
+                            "size_bytes": int(probe.get("size_bytes", 0)),
+                            "size_mb": round(probe.get("size_bytes", 0) / MEGABYTE, 2),
                             "columns": probe["columns"],
                         }
                     )
@@ -1059,7 +1222,11 @@ class DashboardDataRepository:
             compact[key] = {
                 "available": value["exists"],
                 "valid": value["valid"],
-                "rows": value.get("rows", 0),
+                # None means "not counted during validation", not "empty". The agent has
+                # `describe_datasets` when it needs the real number; size gives it the sense
+                # of volume without reading every byte of every file.
+                "rows": value.get("rows"),
+                "size_mb": value.get("size_mb"),
                 "read_with": DATASET_TOOLS.get(key, "sin herramienta directa"),
                 "columns": columns[:40],
                 "columns_truncated": len(columns) > 40,
@@ -1101,7 +1268,9 @@ class DashboardDataRepository:
         by_client = limits.get(normalized_client.upper()) or limits.get(normalized_client, {})
         return by_client.get(str(machine), {}).get(str(component), {})
 
-    def client_capabilities(self, client: str) -> dict[str, Any]:
+    def client_capabilities(
+        self, client: str, validation: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         """Which analyses are possible for this client, and why the rest are not.
 
         Data coverage differs per company, so an agent that assumes CDA's catalogue
@@ -1110,7 +1279,9 @@ class DashboardDataRepository:
         instead of a mid-answer failure.
         """
         normalized = normalize_client_id(client)
-        validation = self.validate_client(normalized)
+        # Reused when the caller already has it. `initialize` validates and then asks for
+        # capabilities microseconds later; recomputing here doubled the whole pass.
+        validation = validation or self.validate_client(normalized)
         datasets = validation["datasets"]
         predictive_allowed = predictive_module_allows(normalized)
 
@@ -1205,7 +1376,8 @@ class DashboardDataRepository:
                 described[key] = entry
                 continue
             try:
-                probe = self._probe_frame(path)
+                # Here the count is the point: the agent is asking how much data exists.
+                probe = self._probe_frame(path, count_rows=True)
                 entry["rows"] = probe["rows"]
                 entry["columns"] = probe["columns"][:60]
                 entry["columns_truncated"] = len(probe["columns"]) > 60
@@ -1231,10 +1403,20 @@ class DashboardDataRepository:
         )
 
     def _filter_vocabulary(self, key: str, client: str) -> dict[str, Any]:
-        """Allowed values for each filter parameter of one dataset."""
+        """Allowed values for each filter parameter of one dataset.
+
+        Served from the persisted index when it was derived from this exact file version, which
+        is what removes a full frame read from a schema query - up to 17,6 MB for
+        `alerts_detail`. A fingerprint that does not match reads the frame and rewrites the
+        entry: the index never answers for a file it has not seen.
+        """
         specs = DATASET_FILTERS.get(key, ())
         if not specs:
             return {}
+        path = self.dataset_path(key, client)
+        indexed = vocabulary_index.lookup(client, key, path)
+        if indexed is not None:
+            return indexed
         frame = self.load(key, client)
         vocabulary: dict[str, Any] = {}
         for spec in specs:
@@ -1248,6 +1430,7 @@ class DashboardDataRepository:
                 entry["values"] = values
                 entry["values_truncated"] = len(values) >= 25
             vocabulary[spec.parameter] = entry
+        vocabulary_index.store(client, key, path, vocabulary)
         return vocabulary
 
     def query_alerts(

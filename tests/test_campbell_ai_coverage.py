@@ -112,10 +112,18 @@ def test_capability_keys_are_unique():
     assert len(keys) == len(set(keys))
 
 
-def test_a_client_with_no_data_reports_everything_unavailable(tmp_path):
+def test_an_undeclared_client_with_no_data_reports_everything_unavailable(tmp_path):
+    """The guarantee that survives assuming presence.
+
+    A declared dataset is taken as present without touching disk, so a *declared* client with
+    an empty data root now reports its declared coverage. What must still hold is the case
+    that has no declaration to lean on: an unknown client falls back to checking the
+    filesystem, finds nothing, and is offered nothing - rather than inheriting some other
+    client's catalogue.
+    """
     repository = DashboardDataRepository(tmp_path / "empty")
 
-    capabilities = repository.client_capabilities("cda")
+    capabilities = repository.client_capabilities("cliente_nuevo")
 
     assert capabilities["available"] == []
     assert len(capabilities["unavailable"]) == len(ANALYSIS_CAPABILITIES)

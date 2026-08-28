@@ -439,8 +439,12 @@ def test_distributions_survive_list_valued_columns(tmp_path):
     assert result["by_action_type"]["Reemplazo"] == 1
 
 
-def test_validation_reports_row_counts_without_materializing_datasets(tmp_path):
-    """Row counts must respect quoted newlines and skip a full parse."""
+def test_validation_reports_shape_without_counting_rows(tmp_path, monkeypatch):
+    """Validation answers "present, and with the right columns" - and nothing costlier.
+
+    It used to also report a row count, which for a CSV means reading every byte of it. That
+    was the expensive half of a walk performed on every session opening.
+    """
     target = tmp_path / "alerts" / "golden" / "cda"
     target.mkdir(parents=True)
     pd.DataFrame(
@@ -459,8 +463,25 @@ def test_validation_reports_row_counts_without_materializing_datasets(tmp_path):
 
     status = repository.validate_client("CDA")
 
-    assert status["datasets"]["alerts"]["rows"] == 1
+    alerts = status["datasets"]["alerts"]
+    assert alerts["valid"] is True
+    # Declared: columns come from the JSON and nothing on disk is touched, so neither the row
+    # count nor the size is known. Both are informational and deliberately left as None rather
+    # than guessed - `describe_dataset` reads the real numbers when the agent asks.
+    assert alerts["presence"] == "declared"
+    assert alerts["rows"] is None
+    assert alerts["size_bytes"] is None
     assert frames.stats()["entries"] == 0, "validation must not materialize a frame"
+
+    # And the path that does look: with the declaration off, presence is checked and the size
+    # is real. This is the escape hatch, so it has to actually change behaviour.
+    monkeypatch.setenv("CAMPBELL_AI_FROZEN_SCHEMA", "false")
+    repository._probe_cache.clear()
+    checked = repository.validate_client("CDA")["datasets"]["alerts"]
+    assert checked["presence"] == "checked"
+    assert checked["exists"] is True
+    assert checked["size_bytes"] > 0
+    assert checked["rows"] is None, "validar sigue sin contar filas"
 
 
 def test_visualization_uses_dashboard_data_without_creating_files(tmp_path):
@@ -875,15 +896,21 @@ def test_phase_is_readable_while_the_initialization_is_still_running(
 
 
 def test_progress_entry_is_cleared_when_initialization_fails(tmp_path, monkeypatch):
-    """A failed call must not leave a phase that never ends."""
+    """A failed call must not leave a phase that never ends.
+
+    The failure is an unauthorized company rather than missing data: validation now assumes a
+    declared dataset is present, so an empty data root no longer raises - by design. What is
+    under test is the `finally` that clears the progress entry, and it must hold for whichever
+    phase throws.
+    """
     monkeypatch.setattr(
         "src.campbell_ai.identity.get_user",
         lambda username: {"role": "client", "clients": ["CDA"]},
     )
     progress.reset()
-    service = CampbellAIService(_settings(tmp_path))  # sin datos: validate falla
+    service = CampbellAIService(_settings(tmp_path))
 
-    with pytest.raises(CampbellDataError):
-        asyncio.run(service.initialize("user", "CDA"))
+    with pytest.raises(CampbellAuthorizationError):
+        asyncio.run(service.initialize("user", "EMIN"))
 
-    assert progress.snapshot(progress.progress_key("user", "CDA"))["active"] is False
+    assert progress.snapshot(progress.progress_key("user", "EMIN"))["active"] is False

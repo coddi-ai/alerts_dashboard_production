@@ -93,7 +93,14 @@ class CampbellAIService:
                     "label": item.get("label", key),
                     "exists": bool(item.get("exists")),
                     "valid": bool(item.get("valid")),
-                    "rows": int(item.get("rows", 0)),
+                    # Left as None when validation skipped the count, never coerced to 0:
+                    # zero rows and "not counted" are different facts, and the second one
+                    # dressed as the first would read as an empty dataset.
+                    "rows": (
+                        int(item["rows"]) if item.get("rows") is not None else None
+                    ),
+                    "size_bytes": item.get("size_bytes"),
+                    "size_mb": item.get("size_mb"),
                     "missing_columns": item.get("missing_columns", []),
                 }
                 for key, item in validation.get("datasets", {}).items()
@@ -189,8 +196,11 @@ class CampbellAIService:
             # dataset probes. Cheap on a warm cache, but the cold call is the one that matters
             # and it is file work either way.
             _phase("capabilities")
+            # The validation from the phase above is handed over instead of recomputed.
+            # `client_capabilities` used to call `validate_client` itself, so a session
+            # opening ran the whole pass twice.
             capabilities = await asyncio.to_thread(
-                self.repository.client_capabilities, principal.company_id
+                self.repository.client_capabilities, principal.company_id, validation
             )
             _phase("")
 

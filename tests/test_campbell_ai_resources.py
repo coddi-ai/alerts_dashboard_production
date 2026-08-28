@@ -16,7 +16,7 @@ Covers:
 3. CacheRegistry clears everything registered, surviving a failing member
 4. DashboardDataRepository holds frames in a bounded cache and retires stale mtimes
 5. _probe_frame no longer parses the whole CSV to count rows
-6. ResourceJanitor reclaims on pressure, honours its cooldown, and once per idle stretch
+6. ResourceJanitor reclaims once per idle stretch and warns on a rising thread census
 7. configure_api_logging installs a bounded rotating handler without touching root
 8. LogArchiver seals the active log, uploads it, and only deletes on success
 9. diagnostics.snapshot and tail_log return usable payloads
@@ -51,7 +51,6 @@ from src.campbell_ai.resources import (
     FrameCache,
     frame_nbytes,
     memory_snapshot,
-    watermark_from_env,
 )
 
 
@@ -389,11 +388,19 @@ def test_probe_counts_rows_without_parsing_the_file(dataset_root, monkeypatch):
 
     monkeypatch.setattr(data_module.pd, "read_csv", watched_read_csv)
 
-    probe = repo._probe_frame(
-        dataset_root / "alerts" / "golden" / "cda" / "consolidated_alerts.csv"
-    )
-    assert probe["rows"] == 2
-    assert probe["columns"] == ["UnitId", "Timestamp", "note"]
+    path = dataset_root / "alerts" / "golden" / "cda" / "consolidated_alerts.csv"
+
+    # Default: columns and size, no row count - the expensive part is opt-in.
+    cheap = repo._probe_frame(path)
+    assert cheap["rows"] is None
+    assert cheap["columns"] == ["UnitId", "Timestamp", "note"]
+    assert cheap["size_bytes"] > 0
+
+    # Asked for, the count arrives without parsing the CSV, and upgrades the cached entry
+    # so the read is paid once per file version rather than once per caller.
+    counted = repo._probe_frame(path, count_rows=True)
+    assert counted["rows"] == 2
+    assert repo._probe_frame(path)["rows"] == 2
     assert full_reads == [], "row counting must not parse the CSV"
 
 
@@ -412,7 +419,8 @@ def test_probe_cache_is_bounded(dataset_root):
 def test_validation_does_not_materialize_frames(dataset_root):
     repo = _repo(dataset_root)
     status = repo.validate_client("CDA")
-    assert status["datasets"]["alerts"]["rows"] == 2
+    assert status["datasets"]["alerts"]["rows"] is None, "validar no debe contar filas"
+    assert status["datasets"]["alerts"]["valid"] is True
     assert repo._frames.stats()["entries"] == 0
 
 
@@ -547,50 +555,14 @@ def _janitor(**kwargs) -> ResourceJanitor:
     defaults = dict(
         interval_seconds=5,
         idle_seconds=0,
-        rss_watermark_bytes=None,
         thread_warn_threshold=10_000,
     )
     defaults.update(kwargs)
     return ResourceJanitor(**defaults)
 
 
-def test_janitor_reclaims_under_memory_pressure(monkeypatch):
-    janitor = _janitor(rss_watermark_bytes=100)
-    monkeypatch.setattr("src.campbell_ai.janitor.process_rss_bytes", lambda: 500)
-
-    report = janitor.tick()
-    assert report is not None
-    assert report["reason"] == "memory_pressure"
-    assert janitor.stats()["reclaims_pressure"] == 1
-
-
-def test_janitor_stays_quiet_below_the_watermark(monkeypatch):
-    janitor = _janitor(rss_watermark_bytes=1000)
-    monkeypatch.setattr("src.campbell_ai.janitor.process_rss_bytes", lambda: 10)
-    assert janitor.tick() is None
-    assert janitor.stats()["reclaims_pressure"] == 0
-
-
-def test_janitor_respects_the_pressure_cooldown(monkeypatch):
-    """Repeating a reclaim that did not help every tick only burns CPU."""
-    janitor = _janitor(rss_watermark_bytes=100, pressure_cooldown_seconds=3600)
-    monkeypatch.setattr("src.campbell_ai.janitor.process_rss_bytes", lambda: 500)
-
-    assert janitor.tick() is not None
-    assert janitor.tick() is None, "second tick inside the cooldown must not reclaim"
-    assert janitor.stats()["reclaims_pressure"] == 1
-
-
-def test_janitor_cannot_reclaim_when_rss_is_unavailable(monkeypatch):
-    """Off Linux there is no RSS; 'cannot tell' must not mean 'reclaim constantly'."""
-    janitor = _janitor(rss_watermark_bytes=100)
-    monkeypatch.setattr("src.campbell_ai.janitor.process_rss_bytes", lambda: None)
-    assert janitor.tick() is None
-
-
 def test_janitor_reclaims_once_per_idle_stretch(monkeypatch):
     janitor = _janitor(idle_seconds=1)
-    monkeypatch.setattr("src.campbell_ai.janitor.process_rss_bytes", lambda: 10)
 
     janitor.touch()
     assert janitor.tick() is None, "not idle yet"
@@ -650,15 +622,8 @@ def test_health_polling_neither_counts_as_activity_nor_reaches_the_log(monkeypat
 
 def test_janitor_idle_disabled_by_zero(monkeypatch):
     janitor = _janitor(idle_seconds=0)
-    monkeypatch.setattr("src.campbell_ai.janitor.process_rss_bytes", lambda: 10)
     time.sleep(0.05)
     assert janitor.tick() is None
-
-
-def test_janitor_force_reclaim_ignores_watermark(monkeypatch):
-    janitor = _janitor(rss_watermark_bytes=10**12)
-    monkeypatch.setattr("src.campbell_ai.janitor.process_rss_bytes", lambda: 1)
-    assert janitor.force_reclaim("manual")["reason"] == "manual"
 
 
 def test_janitor_start_and_stop_is_clean():
@@ -667,72 +632,6 @@ def test_janitor_start_and_stop_is_clean():
     assert janitor.stats()["running"] is True
     janitor.stop(timeout=2)
     assert janitor.stats()["running"] is False
-
-
-def test_watermark_prefers_explicit_env(monkeypatch):
-    monkeypatch.setenv("CAMPBELL_AI_RSS_LIMIT_MB", "256")
-    assert watermark_from_env() == 256 * 1024 * 1024
-
-
-def test_watermark_falls_back_when_env_is_garbage(monkeypatch):
-    monkeypatch.setenv("CAMPBELL_AI_RSS_LIMIT_MB", "not-a-number")
-    monkeypatch.setattr(
-        "src.campbell_ai.resources.container_memory_limit_bytes", lambda: None
-    )
-    assert watermark_from_env(fallback_mb=123) == 123 * 1024 * 1024
-
-
-def test_watermark_derives_from_cgroup_limit(monkeypatch):
-    monkeypatch.delenv("CAMPBELL_AI_RSS_LIMIT_MB", raising=False)
-    monkeypatch.setattr(
-        "src.campbell_ai.resources.container_memory_limit_bytes",
-        lambda: 1000 * 1024 * 1024,
-    )
-    assert watermark_from_env(limit_ratio=0.5) == 500 * 1024 * 1024
-
-
-def test_watermark_default_sits_above_the_measured_peak(monkeypatch):
-    """The watermark is the trigger, and it has to clear ordinary load.
-
-    At or below the measured 3-user peak it would fire during normal operation, and a
-    watchdog that trips constantly is noise rather than protection.
-    """
-    from src.campbell_ai.resources import (
-        DEFAULT_FALLBACK_WATERMARK_MB,
-        MEASURED_PEAK_FLOW_MB,
-        MEGABYTE,
-        PEAK_HEADROOM_RATIO,
-    )
-
-    monkeypatch.delenv("CAMPBELL_AI_RSS_LIMIT_MB", raising=False)
-    monkeypatch.setattr(
-        "src.campbell_ai.resources.container_memory_limit_bytes", lambda: None
-    )
-
-    assert PEAK_HEADROOM_RATIO == 1.5
-    assert DEFAULT_FALLBACK_WATERMARK_MB == int(MEASURED_PEAK_FLOW_MB * 1.5)
-
-    watermark = watermark_from_env()
-    assert watermark == DEFAULT_FALLBACK_WATERMARK_MB * MEGABYTE
-    # Clear of the measured peak, by the declared margin.
-    assert watermark > MEASURED_PEAK_FLOW_MB * MEGABYTE
-    # And clear of the 5-user peak measured at 547 MB, so a burst beyond the expected load
-    # does not shed cache either.
-    assert watermark > 547 * MEGABYTE
-
-
-def test_a_real_cgroup_limit_beats_the_assumed_ceiling(monkeypatch):
-    """A limit granted later must take effect without touching configuration.
-
-    This is why the default is not an ENV in the Dockerfile: baked in, it would keep
-    overriding whatever the deployment actually granted.
-    """
-    monkeypatch.delenv("CAMPBELL_AI_RSS_LIMIT_MB", raising=False)
-    monkeypatch.setattr(
-        "src.campbell_ai.resources.container_memory_limit_bytes",
-        lambda: 2048 * 1024 * 1024,
-    )
-    assert watermark_from_env() == int(2048 * 1024 * 1024 * 0.72)
 
 
 def test_memory_snapshot_shape():
@@ -825,8 +724,13 @@ def test_unlimited_cgroup_v2_reports_no_limit(monkeypatch, fake_proc):
 
 
 def test_unlimited_cgroup_v1_sentinel_is_rejected(monkeypatch, fake_proc):
-    """v1 writes a number near 2**63 instead of a word; treating it as a real limit
-    would put the watermark at petabytes and disable the watchdog silently."""
+    """v1 writes a number near 2**63 instead of a word.
+
+    Treating that as a real ceiling would make `/diagnostics` report a container limit of
+    petabytes and an `rss_pct_of_limit` of essentially zero - a reassuring number with no
+    basis. The limit is only ever reported, never enforced, so being honest about not
+    knowing it is the whole job here.
+    """
     from src.campbell_ai import resources
 
     monkeypatch.setattr(
@@ -865,40 +769,6 @@ def test_memory_snapshot_percentage_is_none_without_a_limit(monkeypatch, fake_pr
     fake_proc("statm", "_PROC_STATM", "5000 131072 0 0 0 0 0\n")
     monkeypatch.setattr(resources, "container_memory_limit_bytes", lambda: None)
     assert resources.memory_snapshot()["rss_pct_of_limit"] is None
-
-
-def test_watermark_from_a_realistic_cgroup_limit(monkeypatch, fake_proc):
-    """End to end: a 1 GB container must produce a sub-limit watermark, since a reclaim
-    has to run while there is still room to allocate the machinery that performs it."""
-    from src.campbell_ai import resources
-
-    monkeypatch.delenv("CAMPBELL_AI_RSS_LIMIT_MB", raising=False)
-    fake_proc("memory.max", "_CGROUP_V2_LIMIT", str(1024 * 1024 * 1024) + "\n")
-
-    watermark = resources.watermark_from_env()
-    assert watermark == int(1024 * 1024 * 1024 * 0.72)
-    assert watermark < 1024 * 1024 * 1024
-
-
-def test_janitor_pressure_fires_against_a_real_rss_reading(monkeypatch, fake_proc):
-    """The pressure path driven by the actual probes rather than a stubbed function."""
-    from src.campbell_ai import resources
-
-    # 800 MB resident against a 1 GB limit: past the 72% watermark.
-    fake_proc("statm", "_PROC_STATM", f"900000 {800 * 256} 0 0 0 0 0\n")
-    fake_proc("memory.max", "_CGROUP_V2_LIMIT", str(1024 * 1024 * 1024) + "\n")
-    monkeypatch.setattr(resources.os, "sysconf", lambda name: 4096, raising=False)
-    monkeypatch.delenv("CAMPBELL_AI_RSS_LIMIT_MB", raising=False)
-
-    janitor = ResourceJanitor(
-        interval_seconds=5,
-        idle_seconds=0,
-        rss_watermark_bytes=resources.watermark_from_env(),
-        thread_warn_threshold=10_000,
-    )
-    report = janitor.tick()
-    assert report is not None and report["reason"] == "memory_pressure"
-    assert report["rss_before_mb"] == 800.0
 
 
 # --------------------------------------------------------------------------------------
@@ -1583,3 +1453,270 @@ def test_no_query_method_deep_copies_its_dataset():
     )
     # `load()` documents why, so the reasoning survives without this test being read.
     assert "Do not add a defensive `.copy()` on the result." in source
+
+# --------------------------------------------------------------------------------------
+# 10. Declared column schema
+# --------------------------------------------------------------------------------------
+
+
+def test_validation_opens_no_files_when_the_schema_is_declared(dataset_root, monkeypatch):
+    """The point of the declaration: zero file opens per session opening.
+
+    Milliseconds are not the metric here. Each open is a round trip on network storage, and
+    validation used to pay one per dataset to rediscover columns that do not change. This
+    counts the opens rather than timing them, because that is what the deployment feels.
+    """
+    import pandas as pd_module
+    import pyarrow.parquet as pq_module
+
+    import src.campbell_ai.data as data_module
+    import src.campbell_ai.schema as schema_module
+
+    opens = {"n": 0}
+    real_csv, real_pq = pd_module.read_csv, pq_module.ParquetFile
+    monkeypatch.setattr(
+        pd_module, "read_csv", lambda *a, **k: (opens.__setitem__("n", opens["n"] + 1), real_csv(*a, **k))[1]
+    )
+    monkeypatch.setattr(
+        pq_module, "ParquetFile", lambda *a, **k: (opens.__setitem__("n", opens["n"] + 1), real_pq(*a, **k))[1]
+    )
+
+    repo = _repo(dataset_root)
+    path = repo.dataset_path("alerts", "cda")
+    declared = repo.read_columns(path)
+    opens["n"] = 0
+
+    # Declared for this client and dataset: the probe should only `stat`.
+    monkeypatch.setattr(
+        schema_module,
+        "_LOADED",
+        {"cda": {"alerts": {"format": "csv", "columns": declared}}},
+    )
+    monkeypatch.setattr(data_module, "declared_columns", schema_module.declared_columns)
+    repo._probe_cache.clear()
+
+    probe = repo._probe_frame(path, dataset_key="alerts", client="cda")
+    assert probe["columns"] == declared
+    assert probe["columns_from"] == "declared"
+    assert opens["n"] == 0, "una declaracion que abre el archivo no ahorra nada"
+
+    # The escape hatch has to actually reach the probe, or it is not an escape hatch.
+    monkeypatch.setenv("CAMPBELL_AI_FROZEN_SCHEMA", "false")
+    repo._probe_cache.clear()
+    fallback = repo._probe_frame(path, dataset_key="alerts", client="cda")
+    assert fallback["columns_from"] == "header"
+    assert fallback["columns"] == declared
+    assert opens["n"] > 0
+
+
+def test_a_declared_schema_that_cannot_be_trusted_falls_back(dataset_root, monkeypatch):
+    """Every way the declaration can be wrong degrades to reading the header.
+
+    A declaration is a performance shortcut. The moment it might not describe the file, the
+    only safe answer is to go and look - never to answer from it anyway.
+    """
+    import src.campbell_ai.data as data_module
+    import src.campbell_ai.schema as schema_module
+
+    repo = _repo(dataset_root)
+    path = repo.dataset_path("alerts", "cda")
+    real = repo.read_columns(path)
+
+    casos = {
+        "cliente no declarado": {"otro": {"alerts": {"format": "csv", "columns": real}}},
+        "dataset no declarado": {"cda": {"otro": {"format": "csv", "columns": real}}},
+        # El formato cambio: ya no es el mismo archivo que se declaro.
+        "formato distinto": {"cda": {"alerts": {"format": "parquet", "columns": real}}},
+        "columnas vacias": {"cda": {"alerts": {"format": "csv", "columns": []}}},
+        "entrada malformada": {"cda": {"alerts": "no soy un dict"}},
+    }
+    for etiqueta, contenido in casos.items():
+        monkeypatch.setattr(schema_module, "_LOADED", contenido)
+        repo._probe_cache.clear()
+        probe = repo._probe_frame(path, dataset_key="alerts", client="cda")
+        assert probe["columns_from"] == "header", etiqueta
+        assert probe["columns"] == real, etiqueta
+
+    # Y un archivo de declaracion ilegible no puede tumbar el arranque.
+    schema_module.reset()
+    monkeypatch.setattr(schema_module, "SCHEMA_FILE", dataset_root / "no-existe.json")
+    assert schema_module.declared_columns("cda", "alerts", ".csv") is None
+    assert schema_module.describe()["loaded"] is False
+    schema_module.reset()
+
+
+def test_the_declared_schema_still_matches_the_data_on_disk():
+    """The check that would catch the ETL renaming a column.
+
+    Skipped where the datasets are not present, because there is nothing to compare against -
+    and a green result from an empty comparison would be worse than a skip.
+    """
+    import src.campbell_ai.schema as schema_module
+    from src.campbell_ai.data import DashboardDataRepository
+
+    data_root = project_root / "data"
+    if not data_root.exists():
+        pytest.skip("sin datos locales para comparar")
+
+    schema_module.reset()
+    report = schema_module.verify_against_disk(DashboardDataRepository(data_root))
+    assert report["checked"] > 0, "la declaracion no cubrio ningun dataset presente"
+    assert report["mismatches"] == [], (
+        "el esquema declarado quedo desfasado de los datos: regenera con "
+        "`python -m src.campbell_ai.schema.build`"
+    )
+
+# --------------------------------------------------------------------------------------
+# 11. Persisted vocabulary index
+# --------------------------------------------------------------------------------------
+
+
+def test_the_vocabulary_index_never_answers_for_a_file_it_has_not_seen(
+    dataset_root, monkeypatch, tmp_path
+):
+    """The rule the whole index depends on: a changed file invalidates the entry.
+
+    Not a nicety. The agent is told "si un valor no aparece aqui, no existe en la fuente", so a
+    stale vocabulary does not make it slower or vaguer - it makes it deny data that exists. The
+    index has to prefer reading the frame over answering from a fingerprint that moved.
+    """
+    import src.campbell_ai.index as index_module
+
+    monkeypatch.setenv("CAMPBELL_AI_INDEX_DIR", str(tmp_path / "idx"))
+    index_module.reset()
+
+    repo = _repo(dataset_root)
+    path = repo.dataset_path("alerts", "cda")
+
+    reads = {"n": 0}
+    real_load = repo.load
+
+    def counted_load(key, client):
+        reads["n"] += 1
+        return real_load(key, client)
+
+    monkeypatch.setattr(repo, "load", counted_load)
+
+    first = repo._filter_vocabulary("alerts", "cda")
+    assert reads["n"] == 1, "la primera vez tiene que leer el frame"
+    assert first, "el vocabulario no puede venir vacio"
+
+    # Served from the index: no second read.
+    assert repo._filter_vocabulary("alerts", "cda") == first
+    assert reads["n"] == 1
+
+    # Same content, new mtime - which is what an EFS re-sync produces. The entry must not be
+    # trusted: whether the values changed is precisely what cannot be known without looking.
+    stamp = time.time() + 120
+    os.utime(path, (stamp, stamp))
+    assert repo._filter_vocabulary("alerts", "cda") == first
+    assert reads["n"] == 2, "una huella distinta obliga a releer"
+    assert index_module.index_stats()["stale"] >= 1
+
+    # And the rewritten entry is trusted again, against the new fingerprint.
+    assert repo._filter_vocabulary("alerts", "cda") == first
+    assert reads["n"] == 2
+
+
+def test_the_vocabulary_index_survives_a_restart_and_a_corrupt_file(
+    dataset_root, monkeypatch, tmp_path
+):
+    """Persisted, because `logs/` outlives the container - and never fatal when broken."""
+    import src.campbell_ai.index as index_module
+
+    directory = tmp_path / "idx"
+    monkeypatch.setenv("CAMPBELL_AI_INDEX_DIR", str(directory))
+    index_module.reset()
+
+    repo = _repo(dataset_root)
+    expected = repo._filter_vocabulary("alerts", "cda")
+    assert (directory / index_module.INDEX_FILENAME).exists()
+
+    # A fresh process: empty memory, the file still there.
+    index_module.reset()
+    reads = {"n": 0}
+    real_load = repo.load
+    monkeypatch.setattr(
+        repo, "load", lambda k, c: (reads.__setitem__("n", reads["n"] + 1), real_load(k, c))[1]
+    )
+    assert repo._filter_vocabulary("alerts", "cda") == expected
+    assert reads["n"] == 0, "el indice en disco tiene que servir tras un reinicio"
+
+    # A truncated or hand-edited file degrades to reading the frame instead of raising.
+    (directory / index_module.INDEX_FILENAME).write_text("{no soy json", encoding="utf-8")
+    index_module.reset()
+    assert repo._filter_vocabulary("alerts", "cda") == expected
+    assert reads["n"] == 1
+
+    # Turned off, it is bypassed entirely rather than partially consulted.
+    monkeypatch.setenv("CAMPBELL_AI_VOCABULARY_INDEX", "false")
+    index_module.reset()
+    assert repo._filter_vocabulary("alerts", "cda") == expected
+    assert reads["n"] == 2
+    assert index_module.index_stats()["entries"] == 0
+
+def test_a_declared_dataset_that_never_arrived_fails_when_it_is_read(
+    dataset_root, monkeypatch
+):
+    """The trade this design accepted, asserted end to end.
+
+    Validation assumes a declared dataset is present, so a file that failed to sync no longer
+    stops a session from opening. It has to fail somewhere, and that somewhere is the read -
+    with a message that says which file was expected and where, because this is now the primary
+    signal that the data did not arrive.
+    """
+    import src.campbell_ai.data as data_module
+    import src.campbell_ai.schema as schema_module
+    from src.campbell_ai.errors import CampbellDataError
+
+    repo = _repo(dataset_root)
+    faltante = repo.dataset_path("maintenance_actions", "cda")
+    assert not faltante.exists(), "el fixture no debe traer este dataset"
+
+    monkeypatch.setattr(
+        schema_module,
+        "_LOADED",
+        {
+            "cda": {
+                "maintenance_actions": {
+                    "format": faltante.suffix.lstrip("."),
+                    "columns": ["machine_code", "action_type_name"],
+                }
+            }
+        },
+    )
+    repo._probe_cache.clear()
+
+    # La validacion lo da por presente: abrir la sesion no falla.
+    item = repo.validate_client("cda")["datasets"]["maintenance_actions"]
+    assert item["exists"] is True
+    assert item["presence"] == "declared"
+
+    # Y al leerlo de verdad, falla con un mensaje que sirve para actuar.
+    with pytest.raises(CampbellDataError) as fallo:
+        repo.load("maintenance_actions", "cda")
+    mensaje = str(fallo.value)
+    assert faltante.name in mensaje
+    assert "sincronizacion" in mensaje, "el error tiene que decir por que puede faltar"
+
+
+def test_capabilities_does_not_revalidate_when_the_caller_already_did(dataset_root):
+    """`initialize` validates and then asks for capabilities; that was the same pass twice."""
+    repo = _repo(dataset_root)
+    llamadas = {"n": 0}
+    real = repo.validate_client
+
+    def contada(client):
+        llamadas["n"] += 1
+        return real(client)
+
+    validation = real("cda")
+    repo.validate_client = contada
+    capabilities = repo.client_capabilities("cda", validation)
+
+    assert llamadas["n"] == 0, "recibio la validacion y no debe repetirla"
+    assert capabilities["available"] or capabilities["unavailable"]
+
+    # Sin recibirla, la calcula: el parametro es una optimizacion, no un requisito.
+    repo.client_capabilities("cda")
+    assert llamadas["n"] == 1

@@ -59,39 +59,6 @@ _IMPLAUSIBLE_LIMIT = 1 << 55  # 32 PiB
 
 MEGABYTE = 1024 * 1024
 
-# Fraction of a *declared* cgroup limit at which caches are dropped. Below 1.0 on purpose:
-# a reclaim has to run while there is still room to allocate the machinery that performs it,
-# and to absorb the transient parse buffers a single CSV read needs (~63 MB for CDA's
-# largest).
-DEFAULT_WATERMARK_RATIO = 0.72
-
-# Measured peak footprint of this process under the expected load: three people asking
-# questions at once, against the heaviest client. Numbers from the profile in MEMORY.md:
-#
-#   interpreter                                        15 MB
-#   + the full API import (pandas, pyarrow, agents)   117 MB   <- baseline
-#   + CDA's working set cached                        281 MB   <- normal steady state
-#   1 concurrent user   peak 337 MB
-#   2 concurrent users  peak 397 MB
-#   3 concurrent users  peak 461 MB   <- this constant
-#   5 concurrent users  peak 547 MB
-#
-# Concurrency is not free: each simultaneous query materializes its own filtered result, so
-# the peak grows about 60 MB per additional user even though the cache itself is shared and
-# does not grow at all. Worth knowing before assuming more users cost nothing.
-MEASURED_PEAK_FLOW_MB = 461
-
-# Headroom over that peak before the janitor starts shedding cache. Anything at or below the
-# measured peak would fire during ordinary operation, and a watchdog that trips constantly is
-# noise rather than protection; 50% above it means normal load never trips it while genuinely
-# runaway growth does.
-PEAK_HEADROOM_RATIO = 1.5
-
-# Watermark used when the cgroup declares no limit. Derived from the two constants above
-# rather than written as a literal, so the measurement and the trigger cannot drift apart.
-DEFAULT_FALLBACK_WATERMARK_MB = int(MEASURED_PEAK_FLOW_MB * PEAK_HEADROOM_RATIO)
-
-
 def _read_int(path: Path) -> Optional[int]:
     """Read a single integer out of a /proc or /sys file, or None if unreadable."""
     try:
@@ -453,47 +420,3 @@ def budget_from_env(variable: str, default_mb: int) -> int:
         except ValueError:
             pass
     return max(1, int(default_mb)) * MEGABYTE
-
-
-def watermark_from_env(
-    variable: str = "CAMPBELL_AI_RSS_LIMIT_MB",
-    *,
-    limit_ratio: float = DEFAULT_WATERMARK_RATIO,
-    fallback_mb: int = DEFAULT_FALLBACK_WATERMARK_MB,
-) -> int:
-    """Resolve the RSS level that should trigger a reclaim.
-
-    Note what this is: the level at which caches start being dropped, **not** the ceiling.
-    Setting it equal to the ceiling would mean the janitor first acts at the moment the
-    process is already out of room, which is too late to be useful - hence the ratio.
-
-    Preference order matters:
-
-    1. An explicit ``CAMPBELL_AI_RSS_LIMIT_MB``, because an operator who has measured this
-       deployment knows better than any default here.
-    2. A fraction of the cgroup limit. Preferred over any hardcoded value because it is the
-       only one that adapts when the container is resized - which is also why this default
-       does not belong in a Dockerfile ``ENV``: baked in, it would keep overriding a real
-       limit someone grants later.
-    3. ``fallback_mb``, already a watermark rather than a ceiling, for a container with no
-       limit at all.
-
-    Note the asymmetry between 2 and 3, which is deliberate rather than an oversight: a
-    declared limit yields a *tighter* trigger than the measurement-based fallback (0.72 x
-    800 MB = 576, against a 691 MB fallback). With a real limit the OOM killer is real and
-    shedding cache early is what survives it; without one, the trigger only has to catch
-    runaway growth, so it sits above the measured peak instead of below an imaginary
-    ceiling.
-    """
-    raw = os.getenv(variable, "").strip()
-    if raw:
-        try:
-            return max(1, int(float(raw))) * MEGABYTE
-        except ValueError:
-            # An unreadable value falls through to the derived ones rather than failing:
-            # a typo in the environment must not leave the watchdog with no watermark.
-            pass
-    limit = container_memory_limit_bytes()
-    if limit:
-        return int(limit * limit_ratio)
-    return max(1, int(fallback_mb)) * MEGABYTE
