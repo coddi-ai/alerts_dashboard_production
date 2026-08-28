@@ -13,7 +13,7 @@ from dash import callback, Input, Output, State, no_update
 import pandas as pd
 import plotly.graph_objects as go
 from config.settings import get_settings
-from src.utils.file_utils import safe_read_parquet
+from src.data.loaders import load_oil_classified
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -29,12 +29,11 @@ def _load_compliance_data(client: str) -> pd.DataFrame:
     if not client:
         return pd.DataFrame()
 
-    settings = get_settings()
-    path = settings.get_classified_reports_path(client.lower())
-    if not path.exists():
-        return pd.DataFrame()
-
-    df = safe_read_parquet(path)
+    # Reuse the process-local, defensive-copy loader shared by Aceite,
+    # Alertas and General.  Compliance is callback-heavy (date range, KPI,
+    # weekly chart and unit chart) and used to parse the same Parquet once per
+    # callback.
+    df = load_oil_classified(client)
     if df.empty:
         return pd.DataFrame()
 

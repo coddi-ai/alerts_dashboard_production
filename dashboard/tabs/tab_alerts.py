@@ -35,6 +35,7 @@ def create_layout() -> html.Div:
                 )
             ])
         ], className="mb-4"),
+        html.Div(id="alerts-source-status"),
         
         # Internal Tabs
         dcc.Tabs(

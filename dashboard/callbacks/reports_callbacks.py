@@ -11,7 +11,7 @@ import json
 import re
 from pathlib import Path
 from config.settings import get_settings
-from src.data.loaders import load_oil_classified
+from src.data.loaders import load_oil_classified, load_essays_mapping, _data_path
 from src.data.loaders import load_stewart_limits_four
 from dashboard.components.oil_charts import (
     get_essay_limits_four,
@@ -1362,13 +1362,12 @@ def create_evidence_tables(sample, limits, df):
     from pathlib import Path
     
     # Load essays_elements to get GroupElement mapping
-    essays_file = Path("data/oil/essays_elements.xlsx")
+    essays_file = _data_path("oil", "essays_elements.xlsx")
     if not essays_file.exists():
         return html.P("essays_elements.xlsx not found", className="text-muted")
     
     try:
-        essays_df = pd.read_excel(essays_file)
-        essays_df = essays_df.dropna(subset=['ElementNameSpanish', 'GroupElement'])
+        essays_df = load_essays_mapping(essays_file)
         
         # Group essays by GroupElement
         group_mapping = essays_df.groupby('GroupElement')['ElementNameSpanish'].apply(list).to_dict()

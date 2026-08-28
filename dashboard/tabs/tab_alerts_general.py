@@ -4,6 +4,8 @@ from datetime import date, timedelta
 from dash import html, dcc
 import dash_bootstrap_components as dbc
 
+from dashboard.components.labels import SOURCE_STYLE, source_style, light_tint
+
 
 # Fixed heights for the three weekly-analysis cards (Distribución por unidad /
 # Evolución temporal / Distribución por sistema) so the row's height stays
@@ -16,6 +18,29 @@ ALERTS_CHART_CARD_BODY_HEIGHT = 420
 def _default_alert_dates() -> tuple[str, str]:
     today = date.today()
     return (today - timedelta(days=27)).isoformat(), today.isoformat()
+
+
+def _build_source_legend() -> html.Div:
+    """Color legend for the alert source (Trigger_type) — decodes the same
+    colors the table's Mixto row-highlight and the "Alertas multitécnicas"
+    KPI card use, all read from labels.py's SOURCE_STYLE (W34-04)."""
+    canonical_keys = ("Telemetria", "Tribologia", "Mixto")  # one entry per concept, not per alias
+    swatches = []
+    for raw in canonical_keys:
+        label, color = source_style(raw)
+        swatches.append(
+            html.Span([
+                html.Span(style={
+                    "display": "inline-block", "width": "10px", "height": "10px",
+                    "borderRadius": "2px", "backgroundColor": color, "marginRight": "6px",
+                }),
+                label,
+            ], className="d-inline-flex align-items-center me-3")
+        )
+    return html.Div(
+        [html.Small("Fuente: ", className="text-muted fw-bold me-2")] + swatches,
+        className="d-flex flex-wrap align-items-center mt-2",
+    )
 
 
 def create_layout() -> html.Div:
@@ -110,6 +135,7 @@ def create_layout() -> html.Div:
             dbc.CardHeader([
                 html.H5([html.I(className="fas fa-table me-2"), "Alertas del período"], className="mb-0"),
                 html.Small("Seleccione una fila para leer el resumen completo.", className="text-muted"),
+                _build_source_legend(),
             ], className="bg-light"),
             dbc.CardBody([
                 dcc.Loading(html.Div(id="alerts-table-container"), type="circle"),
@@ -121,10 +147,14 @@ def create_layout() -> html.Div:
 
 def create_summary_stats_display(total_alerts: int, total_units: int, telemetry_pct: float = 0, oil_pct: float = 0, mixed_count: int = 0) -> html.Div:
     """Render only the three client-facing alert KPIs."""
+    # W34-04: same color as the table's Mixto highlight and the legend above
+    # — this card used to have its own independent accent (#7c6a9a) that had
+    # drifted from the table's border color (#6f42c1).
+    mixto_color = source_style("Mixto")[1]
     cards = [
         ("Total de alertas", total_alerts, "fas fa-exclamation-triangle", "#355c7d", "#eef4f8"),
         ("Unidades afectadas", total_units, "fas fa-truck", "#4f8a8b", "#edf7f6"),
-        ("Alertas mixtas", mixed_count, "fas fa-layer-group", "#7c6a9a", "#f3eff8"),
+        ("Alertas multitécnicas", mixed_count, "fas fa-layer-group", mixto_color, light_tint(mixto_color)),
     ]
     return html.Div([
         html.H4([html.I(className="fas fa-chart-line me-2"), "Resumen ejecutivo"], className="text-primary mb-3"),

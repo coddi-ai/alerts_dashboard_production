@@ -9,7 +9,7 @@ from dash import callback, Input, Output, State, ctx, html, dcc, dash_table
 from dash.exceptions import PreventUpdate
 import dash_bootstrap_components as dbc
 
-from src.data.loaders import load_silver_telemetry_week
+from src.data.loaders import load_silver_telemetry_week, _data_path
 from dashboard.components.telemetry_charts import (
     STATUS_COLORS,
     build_fleet_heatmap,
@@ -30,6 +30,7 @@ from dashboard.components.telemetry_report import (
 )
 from dashboard.tabs.tab_telemetry_fleet import create_telemetry_fleet_layout
 from dashboard.tabs.tab_telemetry_unit_detail import create_telemetry_unit_detail_layout
+from dashboard.components.source_status import render_service_source_status
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -40,12 +41,16 @@ def update_telemetry_availability(client):
     if not client:
         return html.Div()
     snapshot = load_telemetry_snapshot(client)
+    source_status = render_service_source_status(client, "monitoring-telemetry")
     if snapshot.unit_health.empty and snapshot.system_health.empty:
-        return dbc.Alert([
-            html.I(className="fas fa-info-circle me-2"),
-            f"No hay datos de Telemetría disponibles para el cliente {str(client).upper()}."
-        ], color="info")
-    return html.Div()
+        return html.Div([
+            source_status,
+            dbc.Alert([
+                html.I(className="fas fa-info-circle me-2"),
+                f"No hay datos de Telemetría disponibles para el cliente {str(client).upper()}."
+            ], color="info"),
+        ])
+    return source_status
 
 
 @callback(
@@ -596,7 +601,7 @@ def _load_recent_telemetry_signal_cached(
     if available_weeks:
         candidates = [(anchor_year, int(w)) for w in sorted({int(w) for w in available_weeks}, reverse=True)[:weeks]]
     else:
-        silver_dir = Path(f"data/telemetry/silver/{client.lower()}/Telemetry_Wide_With_States")
+        silver_dir = _data_path("telemetry", "silver", client.lower(), "Telemetry_Wide_With_States")
         existing = [
             week for week in range(1, 54)
             if (silver_dir / f"Week{week:02d}Year{anchor_year}.parquet").exists()
@@ -639,9 +644,18 @@ def _signal_kpi_table(row: dict) -> html.Table:
 
 @callback(
     Output('telemetry-detail-signal-cards', 'children'),
-    [Input('telemetry-detail-signal-selector', 'value'), Input('telemetry-detail-system-selector', 'value'), Input('telemetry-detail-unit-selector', 'value'), Input('client-selector', 'value')],
+    [
+        Input('telemetry-detail-signal-selector', 'value'),
+        Input('telemetry-detail-system-selector', 'value'),
+        Input('telemetry-detail-unit-selector', 'value'),
+        Input('client-selector', 'value'),
+        # W34-09: the 1/7/30-day buttons only change the plotted window —
+        # unit/sistema/señal are separate Inputs above and are untouched by
+        # this one changing.
+        Input('telemetry-detail-window-days', 'value'),
+    ],
 )
-def update_signal_cards(signal, system, unit, client):
+def update_signal_cards(signal, system, unit, client, window_days):
     if not signal or not system or not unit or not client:
         return dbc.Alert("Seleccione una unidad, sistema y señal para ver evidencia.", color="info")
     try:
@@ -661,7 +675,15 @@ def update_signal_cards(signal, system, unit, client):
         event_df = _events_for_signal_cached(
             client.lower(), snapshot.cache_key, unit, signal
         )
-        figure = build_signal_timeseries_card(signal, raw, snapshot.limits, trend_df, unit, event_df)
+        # W34-09: simplified view — window_days from the button group,
+        # show_events left at its default (False): no event/anomaly
+        # overlays. event_df is still loaded above because the KPI table
+        # below (_signal_kpi_table) shows total_events/warnings independent
+        # of whether the chart draws overlays for them.
+        figure = build_signal_timeseries_card(
+            signal, raw, snapshot.limits, trend_df, unit, event_df,
+            window_days=window_days or 1,
+        )
         metadata = snapshot.signal_metadata.get(signal, {})
         coverage_notice = None
         if not has_valid_series:

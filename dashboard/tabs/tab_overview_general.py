@@ -43,6 +43,7 @@ def create_layout() -> html.Div:
                 ], className="text-muted")
             ], md=12),
         ], className="mb-3"),
+        html.Div(id="overview-source-status"),
         # Hidden placeholder for refresh button callback
         html.Div(id='btn-refresh-overview', style={'display': 'none'}),
         
