@@ -82,6 +82,12 @@ logs/
 *.db
 # ...except hand-edited config, not generated data - must ship with the code
 !config/client_services.json
+# The declared column schema. Generated, but by `python -m src.campbell_ai.schema.build` and
+# then committed on purpose: the service trusts it instead of reading 11 file headers on every
+# session opening, so a schema change has to arrive as a reviewable diff and not as behaviour
+# that shifted underneath. The vocabulary index is the opposite case and stays ignored - it
+# lives under logs/ because it is derived from data that changes every half hour.
+!src/campbell_ai/schema/dataset_columns.json
 # Docker
 *.pid
 *.seed

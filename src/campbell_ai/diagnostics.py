@@ -32,6 +32,7 @@ from src.campbell_ai.log_archive import log_archive_stats
 from src.campbell_ai.progress import active_count as active_initializations
 from src.campbell_ai.logging_setup import logging_description
 from src.campbell_ai.resources import CACHES, MEGABYTE, memory_snapshot
+from src.campbell_ai.schema import describe as schema_description
 
 # Wall-clock start of this process, captured at first import. `time.monotonic` cannot be
 # compared across processes and gives no absolute date, so both are kept.
@@ -195,6 +196,10 @@ def snapshot(*, include_disk: bool = True) -> dict[str, Any]:
         "cache_names": CACHES.names(),
         "janitor": janitor_stats(),
         "initializations": initialize_phases_info(),
+        # State of the declared schema: whether it is in use, and whether it still matches the
+        # data. The second half is the one that matters - trusting a declaration is only safe
+        # while somebody can see that it is still true.
+        "schema": schema_description(),
         "logging": logging_description(),
         "log_files": log_files_info(),
         "log_archive": log_archive_stats(),

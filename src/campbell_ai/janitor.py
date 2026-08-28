@@ -1,14 +1,6 @@
-"""Background reclamation of cached memory, by pressure and by inactivity.
+"""Background reclamation of cached memory on inactivity, plus a thread census.
 
 Two independent triggers, because they catch different failures:
-
-**Pressure.** When resident memory crosses a watermark derived from the container's own
-cgroup limit, every registered cache is dropped. This is the difference between a
-service that sheds cache and one that gets OOM-killed: with a container in the low
-hundreds of megabytes to a gigabyte and a pandas working set of over 100 MB for the
-largest client, "grow until something breaks" is not a strategy. The watermark sits
-below the limit, since a reclaim has to happen while there is still room to allocate
-the machinery that performs it.
 
 **Inactivity.** Overnight, or during any quiet stretch, the caches hold frames nobody is
 going to ask for. Releasing them costs a single slow question later and buys back
@@ -40,10 +32,9 @@ from typing import Any, Callable, Optional
 
 from src.campbell_ai.resources import (
     MEGABYTE,
+    container_memory_limit_bytes,
     memory_snapshot,
-    process_rss_bytes,
     reclaim,
-    watermark_from_env,
 )
 
 
@@ -76,25 +67,14 @@ class ResourceJanitor:
         process_name: str = "campbell-api",
         interval_seconds: int = 60,
         idle_seconds: int = 600,
-        rss_watermark_bytes: Optional[int] = None,
         thread_warn_threshold: int = 60,
-        pressure_cooldown_seconds: Optional[int] = None,
         on_reclaim: Optional[Callable[[dict[str, Any]], None]] = None,
     ):
         self.process_name = process_name
         self.interval_seconds = max(5, int(interval_seconds))
         # Zero disables idle reclamation without disabling the watchdog.
         self.idle_seconds = max(0, int(idle_seconds))
-        self.rss_watermark_bytes = rss_watermark_bytes
         self.thread_warn_threshold = max(1, int(thread_warn_threshold))
-        # A reclaim that did not help must not be retried every tick: if the footprint is
-        # not in the caches, repeating it only burns CPU and floods the log with identical
-        # lines, hiding the one useful signal (that it never frees anything).
-        self.pressure_cooldown_seconds = (
-            int(pressure_cooldown_seconds)
-            if pressure_cooldown_seconds is not None
-            else max(120, self.interval_seconds * 3)
-        )
         self._on_reclaim = on_reclaim
 
         self._stop = threading.Event()
@@ -107,11 +87,8 @@ class ResourceJanitor:
         # Activity timestamp the last idle reclaim was performed against. Idle
         # reclamation is allowed again only after new activity moves this forward.
         self._idle_reclaim_marker: Optional[float] = None
-        self._last_pressure_reclaim: Optional[float] = None
-        self._reclaims_pressure = 0
         self._reclaims_idle = 0
         self._last_reclaim: Optional[dict[str, Any]] = None
-        self._peak_rss_bytes = 0
         self._peak_threads = 0
 
     # -- activity ------------------------------------------------------------
@@ -138,13 +115,10 @@ class ResourceJanitor:
         )
         self._thread.start()
         logger.info(
-            "janitor started process=%s interval=%ss idle=%ss watermark=%s",
+            "janitor started process=%s interval=%ss idle=%ss",
             self.process_name,
             self.interval_seconds,
             self.idle_seconds or "off",
-            f"{self.rss_watermark_bytes / MEGABYTE:.0f}MB"
-            if self.rss_watermark_bytes
-            else "unset",
         )
         return self
 
@@ -172,12 +146,9 @@ class ResourceJanitor:
         Exposed and synchronous so tests drive it directly instead of waiting on a
         thread, and so a diagnostics endpoint can force an evaluation on demand.
         """
-        rss = process_rss_bytes()
         threads = threading.active_count()
 
         with self._lock:
-            if rss is not None:
-                self._peak_rss_bytes = max(self._peak_rss_bytes, rss)
             self._peak_threads = max(self._peak_threads, threads)
 
         if threads >= self.thread_warn_threshold:
@@ -191,24 +162,10 @@ class ResourceJanitor:
                 self.thread_warn_threshold,
             )
 
-        if self._should_reclaim_for_pressure(rss):
-            return self._reclaim("memory_pressure", rss=rss)
-
         if self._should_reclaim_for_idle():
-            return self._reclaim("inactivity", rss=rss)
+            return self._reclaim("inactivity")
 
         return None
-
-    def _should_reclaim_for_pressure(self, rss: Optional[int]) -> bool:
-        if rss is None or not self.rss_watermark_bytes:
-            return False
-        if rss < self.rss_watermark_bytes:
-            return False
-        with self._lock:
-            last = self._last_pressure_reclaim
-        if last is not None and time.monotonic() - last < self.pressure_cooldown_seconds:
-            return False
-        return True
 
     def _should_reclaim_for_idle(self) -> bool:
         if not self.idle_seconds:
@@ -219,14 +176,11 @@ class ResourceJanitor:
             # Already reclaimed for this quiet stretch; wait for new activity.
             return self._idle_reclaim_marker != self._last_activity
 
-    def _reclaim(self, reason: str, *, rss: Optional[int]) -> dict[str, Any]:
+    def _reclaim(self, reason: str) -> dict[str, Any]:
         report = reclaim(reason)
         now = time.monotonic()
         with self._lock:
-            if reason == "memory_pressure":
-                self._last_pressure_reclaim = now
-                self._reclaims_pressure += 1
-            else:
+            if True:
                 self._idle_reclaim_marker = self._last_activity
                 self._reclaims_idle += 1
             self._last_reclaim = report
@@ -243,20 +197,6 @@ class ResourceJanitor:
             report.get("gc_collected"),
             ",".join(sorted(report.get("caches_cleared", {}))) or "none",
         )
-        if reason == "memory_pressure" and isinstance(freed, (int, float)) and freed < 16:
-            # The actionable case: pressure was real, the caches were dropped, and the
-            # footprint did not move. Whatever is holding memory is not a cache, so
-            # raising the reclaim frequency cannot help and the next place to look is the
-            # thread census and the heap.
-            logger.warning(
-                "reclaim freed almost nothing process=%s freed=%sMB rss=%sMB threads=%s "
-                "- footprint is likely not cache-held",
-                self.process_name,
-                freed,
-                report.get("rss_after_mb"),
-                threading.active_count(),
-            )
-
         if self._on_reclaim is not None:
             try:
                 self._on_reclaim(report)
@@ -265,8 +205,8 @@ class ResourceJanitor:
         return report
 
     def force_reclaim(self, reason: str = "manual") -> dict[str, Any]:
-        """Reclaim now, ignoring watermark and cooldown. For operator endpoints."""
-        return self._reclaim(reason, rss=process_rss_bytes())
+        """Reclaim now, on demand. For the operator endpoint."""
+        return self._reclaim(reason)
 
     # -- reporting -----------------------------------------------------------
 
@@ -280,16 +220,8 @@ class ResourceJanitor:
                 "interval_seconds": self.interval_seconds,
                 "idle_seconds_threshold": self.idle_seconds,
                 "idle_seconds_now": round(time.monotonic() - self._last_activity, 1),
-                "rss_watermark_mb": round(self.rss_watermark_bytes / MEGABYTE, 1)
-                if self.rss_watermark_bytes
-                else None,
-                "peak_rss_mb": round(self._peak_rss_bytes / MEGABYTE, 1)
-                if self._peak_rss_bytes
-                else None,
-                "threads_now": threading.active_count(),
                 "peak_threads": self._peak_threads,
                 "thread_warn_threshold": self.thread_warn_threshold,
-                "reclaims_pressure": self._reclaims_pressure,
                 "reclaims_idle": self._reclaims_idle,
                 "last_reclaim": self._last_reclaim,
             }
@@ -320,7 +252,6 @@ def start_janitor(process_name: str = "campbell-api") -> Optional[ResourceJanito
             # Ten minutes: nothing here is warm-cache sensitive for a user who is not
             # currently asking a question.
             idle_seconds=_env_int("CAMPBELL_AI_JANITOR_IDLE_SECONDS", 600),
-            rss_watermark_bytes=watermark_from_env("CAMPBELL_AI_RSS_LIMIT_MB"),
             thread_warn_threshold=_env_int("CAMPBELL_AI_THREAD_WARN", 60),
         )
         _JANITOR = janitor.start()

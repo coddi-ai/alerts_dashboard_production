@@ -71,7 +71,7 @@ services:
     expose:
       - "8000"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/campbell-ai/health"]
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://localhost:8000/api/v1/campbell-ai/health"]
       interval: 10s
       timeout: 5s
       retries: 5
