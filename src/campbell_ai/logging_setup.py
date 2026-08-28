@@ -61,23 +61,32 @@ FILE_FORMAT = (
 )
 CONSOLE_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 
-# Request paths whose access lines are dropped from the file. The compose healthcheck polls
-# `/health` every 10 seconds, which is ~8.600 lines a day saying nothing happened.
+# Request paths whose access lines are dropped entirely. The compose healthcheck polls
+# `/health` every 10 seconds, and each probe used to leave four lines in the container log -
+# curl's response body, two lines of its progress meter, and uvicorn's access line - about
+# 34.000 a day that say nothing happened. Three of the four are gone now that the healthcheck
+# runs `curl -fsS -o /dev/null`; this drops the fourth.
 #
-# Two things were broken by keeping them, not one. The obvious cost is a log where the real
-# lines are one in a hundred, rotating on noise. The subtler one: `LogArchiver.seal_active_log`
-# uses the file's own `st_mtime` as proof that the file has gone quiet, and a line every ten
-# seconds means it never does - so the newest log was never sealed and never archived, and the
-# whole point of the archiver was to make those lines readable without a console.
+# That volume was not a tidiness problem. A log export of the API covering a real incident came
+# back 100% healthcheck - 600 events, 25 minutes, not one application line - so the incident it
+# was pulled to explain was simply not in it.
+#
+# And it broke the archiver too: `LogArchiver.seal_active_log` uses the file's own `st_mtime` as
+# proof that the file has gone quiet, and a line every ten seconds means it never does. The
+# newest log was therefore never sealed and never shipped, which was the archiver's whole point.
 NOISY_ACCESS_PATHS = ("/api/v1/campbell-ai/health",)
 
 
 class _DropMonitoringAccess(logging.Filter):
     """Drop `uvicorn.access` lines for endpoints that only observe the service.
 
-    Applied to the file handler rather than to the access logger, so uvicorn's own console
-    output is untouched: somebody watching `docker logs` to see whether the healthcheck passes
-    still sees it.
+    Attached to the `uvicorn.access` *logger*, so the record never reaches any handler - the
+    file, and uvicorn's own console handler that this module otherwise leaves alone. The console
+    is the one that matters: it is what the container log driver captures and what an operator
+    actually reads.
+
+    Nothing is lost by dropping these. A failing healthcheck shows up as the container's health
+    status, which is where anybody would look for it, and `curl -fsS` still fails loudly.
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
@@ -181,7 +190,6 @@ def configure_api_logging(force: bool = False) -> dict[str, Any]:
                 logging.Formatter(FILE_FORMAT, datefmt="%Y-%m-%d %H:%M:%S")
             )
             file_handler._campbell_ai_managed = True  # type: ignore[attr-defined]
-            file_handler.addFilter(_DropMonitoringAccess())
             package_logger.addHandler(file_handler)
             # Same handler object on the server loggers: one file, one lock, no
             # interleaving between the application's lines and the request lines.
@@ -190,6 +198,20 @@ def configure_api_logging(force: bool = False) -> dict[str, Any]:
             _HANDLER = file_handler
         except OSError as exc:
             file_error = f"{type(exc).__name__}: {exc}"
+
+        # The filter goes on the logger, not on the file handler, and that placement is the
+        # whole point: a record dropped at the logger never reaches *any* handler - including
+        # uvicorn's own console handler, which this module deliberately does not manage and
+        # which is what the container log captures. Filtering only the file left the healthcheck
+        # filling CloudWatch at four lines every ten seconds, ~34.000 a day, which is what
+        # exhausted a log export before it reached a single application line.
+        access_logger = logging.getLogger("uvicorn.access")
+        for existing in list(access_logger.filters):
+            if getattr(existing, "_campbell_ai_managed", False):
+                access_logger.removeFilter(existing)
+        monitoring_filter = _DropMonitoringAccess()
+        monitoring_filter._campbell_ai_managed = True  # type: ignore[attr-defined]
+        access_logger.addFilter(monitoring_filter)
 
         if want_console:
             console = logging.StreamHandler()

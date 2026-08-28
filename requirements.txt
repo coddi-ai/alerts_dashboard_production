@@ -1,6 +1,6 @@
 # Core Data Processing
-pandas>=2.1.0
 polars>=1.0.0
+pandas>=3.0
 numpy>=1.24.0
 pyarrow>=14.0.0
 openpyxl>=3.1.0
@@ -13,7 +13,10 @@ pydantic-settings>=2.1.0
 python-dotenv>=1.0.0
 
 # Dashboard
-dash>=2.14.0
+# 4.x y no 2.14: dashboard/tabs/tab_telemetry_fleet.py usa `closeOnSelect` en un
+# dcc.Dropdown, que no existe antes de Dash 3 y lanza TypeError al construir la pagina.
+# La imagen del despliegue corre 4.4.1 y funciona; el piso permitia un entorno donde no.
+dash>=4.4.1
 dash-bootstrap-components>=1.5.0
 plotly>=5.17.0
 gunicorn>=22.0.0; platform_system != "Windows"
