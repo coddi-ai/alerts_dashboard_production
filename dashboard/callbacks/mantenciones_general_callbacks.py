@@ -13,6 +13,7 @@ from src.data.maintenance_repository import get_repository
 from dashboard.tabs.tab_mantenciones_general import (
     create_status_donut_chart,
     create_downtime_trend_chart,
+    create_system_pareto_chart,
     create_detentions_table,
     create_jobs_table,
     create_empty_figure
@@ -30,6 +31,56 @@ def register_mantenciones_general_callbacks(app):
     """
     
     @callback(
+        Output("filter-system", "options"),
+        [Input("client-selector", "value")]
+    )
+    def update_system_filter_options(client):
+        """Populate the System filter with every system present in the client's data."""
+        if not client:
+            raise PreventUpdate
+
+        try:
+            repo = get_repository(mode="parquet", client=client)
+            systems = repo.get_available_systems()
+            return [{"label": s, "value": s} for s in systems]
+        except Exception as e:
+            logger.error(f"Error loading system filter options: {e}")
+            return []
+
+    @callback(
+        [
+            Output("filter-equipment", "options"),
+            Output("filter-equipment", "value"),
+        ],
+        [
+            Input("filter-system", "value"),
+            Input("client-selector", "value"),
+        ],
+        [State("filter-equipment", "value")]
+    )
+    def update_equipment_filter_options(selected_systems, client, current_equipment):
+        """
+        Populate the Equipment filter, cascading on the System selection: with
+        systems selected, only machines with at least one action on those
+        systems are offered. Any previously-selected machine that falls out
+        of the new option set is dropped instead of left as a stale value.
+        """
+        if not client:
+            raise PreventUpdate
+
+        try:
+            repo = get_repository(mode="parquet", client=client)
+            equipment = repo.get_available_equipment(systems=selected_systems or None)
+        except Exception as e:
+            logger.error(f"Error loading equipment filter options: {e}")
+            return [], None
+
+        options = [{"label": code, "value": code} for code in equipment]
+        valid_values = set(equipment)
+        new_value = [v for v in (current_equipment or []) if v in valid_values] or None
+        return options, new_value
+
+    @callback(
         [
             Output("store-general-data", "data"),
             Output("store-general-timestamp", "data"),
@@ -39,33 +90,55 @@ def register_mantenciones_general_callbacks(app):
             Input("btn-refresh-general", "n_clicks"),
             Input("store-general-loaded", "data"),
             Input("client-selector", "value"),
+            Input("filter-date-range", "start_date"),
+            Input("filter-date-range", "end_date"),
+            Input("filter-system", "value"),
+            Input("filter-equipment", "value"),
         ],
         prevent_initial_call=False
     )
-    def load_general_data(n_clicks, loaded, client):
+    def load_general_data(n_clicks, loaded, client, date_start, date_end, systems, equipment):
         """
         Load all data for the general view.
-        Triggered by refresh button or initial page load.
+        Triggered by refresh button, initial page load, or any filter change.
         """
         if not client:
             raise PreventUpdate
-            
+
         try:
-            logger.info(f"Loading mantenciones general data for client: {client}... (n_clicks={n_clicks}, loaded={loaded})")
-            
+            logger.info(
+                f"Loading mantenciones general data for client: {client}... "
+                f"(n_clicks={n_clicks}, loaded={loaded}, systems={systems}, equipment={equipment}, "
+                f"date_start={date_start}, date_end={date_end})"
+            )
+
             # Get repository (using parquet mode for real data) - MUST pass client parameter
             repo = get_repository(mode="parquet", client=client)
-            
+
             # Get period info
             period_info = repo.get_data_period_info()
-            
-            # Load all datasets
-            df_status = repo.get_status_counts()
-            df_downtime_mtd = repo.get_downtime_mtd()
-            df_last_detentions = repo.get_last_detentions(n_per_machine=1)  # Solo el último periodo por equipo
-            df_jobs_last_week = repo.get_jobs_last_week()
-            df_downtime_by_day = repo.get_downtime_by_day_mtd()
-            
+
+            # Load all datasets. Status KPIs are real-time (not historical),
+            # so they respond to System/Equipment but deliberately not to the
+            # date-range filter - see MaintenanceRepository.get_status_counts.
+            df_status = repo.get_status_counts(systems=systems, equipment=equipment)
+            df_downtime_mtd = repo.get_downtime_mtd(
+                systems=systems, equipment=equipment, date_start=date_start, date_end=date_end
+            )
+            df_last_detentions = repo.get_last_detentions(
+                n_per_machine=1, systems=systems, equipment=equipment,
+                date_start=date_start, date_end=date_end
+            )  # Solo el último periodo por equipo
+            df_jobs_last_week = repo.get_jobs_last_week(
+                systems=systems, equipment=equipment, date_start=date_start, date_end=date_end
+            )
+            df_downtime_by_day = repo.get_downtime_by_day_mtd(
+                systems=systems, equipment=equipment, date_start=date_start, date_end=date_end
+            )
+            df_by_system = repo.get_maintenance_by_system(
+                systems=systems, equipment=equipment, date_start=date_start, date_end=date_end
+            )
+
             # Convert to JSON-serializable format
             data = {
                 "status": df_status.to_dict("records"),
@@ -73,6 +146,7 @@ def register_mantenciones_general_callbacks(app):
                 "last_detentions": df_last_detentions.to_dict("records"),
                 "jobs_last_week": df_jobs_last_week.to_dict("records"),
                 "downtime_by_day": df_downtime_by_day.to_dict("records"),
+                "by_system": df_by_system.to_dict("records"),
                 "period_info": period_info,  # Información del período
             }
             
@@ -160,6 +234,23 @@ def register_mantenciones_general_callbacks(app):
             logger.error(f"Error updating downtime trend: {e}")
             return create_empty_figure("Error al cargar gráfico")
     
+    @callback(
+        Output("chart-system-pareto", "figure"),
+        [Input("store-general-data", "data")]
+    )
+    def update_system_pareto_chart(data):
+        """Update maintenance-by-system Pareto chart."""
+        if not data or not data.get("by_system"):
+            return create_empty_figure("No hay datos de sistemas disponibles")
+
+        try:
+            import pandas as pd
+            df_by_system = pd.DataFrame(data["by_system"])
+            return create_system_pareto_chart(df_by_system)
+        except Exception as e:
+            logger.error(f"Error updating system pareto chart: {e}")
+            return create_empty_figure("Error al cargar gráfico")
+
     @callback(
         Output("table-last-detentions", "children"),
         [Input("store-general-data", "data")]

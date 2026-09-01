@@ -143,6 +143,7 @@ import dashboard.pages.overview_data_freshness
 import dashboard.pages.monitoring_alerts
 import dashboard.pages.monitoring_telemetry
 import dashboard.pages.monitoring_oil
+import dashboard.pages.monitoring_mantenciones
 import dashboard.pages.predictive_motor
 import dashboard.pages.predictive_transmision
 import dashboard.pages.agents_campbell_ai

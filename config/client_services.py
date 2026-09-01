@@ -57,6 +57,7 @@ KNOWN_SERVICE_IDS: List[str] = [
     "monitoring-alerts",
     "monitoring-telemetry",
     "monitoring-oil",
+    "monitoring-mantenciones",
     "predictive",
     "agents-campbell-ai",
     "integration-validacion-avisos",

@@ -5,7 +5,7 @@ Provides data access functions that can work in dummy or production mode.
 
 import pandas as pd
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, List
 import logging
 
 from src.data.dummy_generator import generate_dummy_tables
@@ -72,7 +72,90 @@ class MaintenanceRepository:
                 "kpis": self._get_parquet_kpis(),
             }
         return self._parquet_cache
-    
+
+    def _filtered_actions(
+        self,
+        systems: Optional[List[str]] = None,
+        equipment: Optional[List[str]] = None,
+        date_start: Optional[str] = None,
+        date_end: Optional[str] = None,
+    ) -> pd.DataFrame:
+        """
+        Apply the dashboard's System / Equipment / date-range filters to the
+        raw maintenance-actions table (parquet mode only - every action-based
+        get_* method funnels through this so the filters behave identically
+        everywhere). Absent filters are a no-op, matching the "no filter ->
+        full dataset" default.
+
+        date_start/date_end are inclusive on both ends.
+        """
+        df = self._get_parquet_data()["actions"]
+        if df.empty:
+            return df
+
+        if systems:
+            df = df[df["action_system_name"].isin(systems)]
+        if equipment:
+            df = df[df["machine_code"].isin(equipment)]
+        if date_start:
+            df = df[df["change_date"] >= pd.Timestamp(date_start, tz="UTC")]
+        if date_end:
+            df = df[df["change_date"] < pd.Timestamp(date_end, tz="UTC") + timedelta(days=1)]
+
+        # Always a safe-to-mutate copy: callers (e.g. get_downtime_by_day_mtd)
+        # add derived columns on the result, which would otherwise risk a
+        # SettingWithCopyWarning on a boolean-indexed slice.
+        return df.copy()
+
+    def _machines_for_systems(self, systems: Optional[List[str]]) -> Optional[set]:
+        """machine_code values with at least one action tagged with any of `systems`.
+
+        Returns None (no restriction) when `systems` is empty/None - the
+        status KPIs are per-machine, not per-action, so a System filter has
+        to be resolved to the machines it touches via the actions table.
+        """
+        if not systems:
+            return None
+        df_actions = self._get_parquet_data()["actions"]
+        if df_actions.empty:
+            return set()
+        return set(
+            df_actions.loc[df_actions["action_system_name"].isin(systems), "machine_code"]
+            .dropna()
+            .unique()
+        )
+
+    def get_available_systems(self) -> List[str]:
+        """Distinct system names present in the data, for populating the System filter."""
+        if self.mode == "parquet":
+            df_actions = self._get_parquet_data()["actions"]
+            if df_actions.empty:
+                return []
+            return sorted(df_actions["action_system_name"].dropna().unique().tolist())
+        elif self.mode == "dummy":
+            return sorted(self._get_dummy_data()["systems"]["system_name"].tolist())
+        else:
+            raise NotImplementedError("Production mode not yet implemented")
+
+    def get_available_equipment(self, systems: Optional[List[str]] = None) -> List[str]:
+        """
+        Distinct machine codes present in the data, for populating the
+        Equipment filter. When `systems` is given, scoped to machines that
+        have at least one action on those systems (cascading filter).
+        """
+        if self.mode == "parquet":
+            df_actions = self._get_parquet_data()["actions"]
+            if df_actions.empty:
+                return []
+            if systems:
+                df_actions = df_actions[df_actions["action_system_name"].isin(systems)]
+            return sorted(df_actions["machine_code"].dropna().unique().tolist())
+        elif self.mode == "dummy":
+            data = self._get_dummy_data()
+            return sorted(data["machines"]["machine_code"].tolist())
+        else:
+            raise NotImplementedError("Production mode not yet implemented")
+
     def get_data_period_info(self) -> dict:
         """
         Get information about the period covered by the data.
@@ -123,14 +206,22 @@ class MaintenanceRepository:
                 "period_label": "Mes Actual"
             }
     
-    def get_status_counts(self, start_date: Optional[datetime] = None, end_date: Optional[datetime] = None) -> pd.DataFrame:
+    def get_status_counts(
+        self,
+        systems: Optional[List[str]] = None,
+        equipment: Optional[List[str]] = None,
+    ) -> pd.DataFrame:
         """
         Get count of machines by status (SANO vs DETENIDO).
-        
+
         Args:
-            start_date: Start date for filtering
-            end_date: End date for filtering
-            
+            systems: Restrict to machines with at least one action on any of
+                these systems. Deliberately no date_start/date_end here -
+                equipment status is real-time, not a historical figure, so
+                the dashboard's date-range filter does not apply to it (only
+                System/Equipment narrow which machines are counted).
+            equipment: Restrict to these machine codes.
+
         Returns:
             DataFrame with columns: machine_status, n_machines
         """
@@ -138,27 +229,32 @@ class MaintenanceRepository:
             data = self._get_dummy_data()
             df_machines = data["machines"]
             df_records = data["records"]
-            
+
             # Determinar qué máquinas están detenidas (tienen records ongoing)
             detenidos = df_records[df_records["ongoing"] == True]["machine_id"].unique()
-            
+
             status_data = [
                 {"machine_status": "DETENIDO", "n_machines": len(detenidos)},
                 {"machine_status": "SANO", "n_machines": len(df_machines) - len(detenidos)},
             ]
             return pd.DataFrame(status_data)
-        
+
         elif self.mode == "parquet":
             # General only needs the compact KPI source for this operation;
             # do not parse the detailed action history on the login path.
             df_kpis = self._get_parquet_kpis()
-            
+
             if df_kpis.empty:
                 return pd.DataFrame([
                     {"machine_status": "DETENIDO", "n_machines": 0},
                     {"machine_status": "SANO", "n_machines": 0}
                 ])
-            
+
+            if equipment:
+                df_kpis = df_kpis[df_kpis["machine_code"].isin(equipment)]
+            if systems:
+                df_kpis = df_kpis[df_kpis["machine_code"].isin(self._machines_for_systems(systems))]
+
             # Usar equipment_status de query_4
             # equipment_status = 'OPERATIVO' significa SANO
             # Si tiene has_ongoing_maintenance = True, está DETENIDO
@@ -182,10 +278,16 @@ class MaintenanceRepository:
             # TODO: Implement SQL query for production
             raise NotImplementedError("Production mode not yet implemented")
     
-    def get_downtime_mtd(self) -> pd.DataFrame:
+    def get_downtime_mtd(
+        self,
+        systems: Optional[List[str]] = None,
+        equipment: Optional[List[str]] = None,
+        date_start: Optional[str] = None,
+        date_end: Optional[str] = None,
+    ) -> pd.DataFrame:
         """
         Get total downtime hours for current month (Month-To-Date).
-        
+
         Returns:
             DataFrame with column: total_downtime_hours_mtd
         """
@@ -227,8 +329,10 @@ class MaintenanceRepository:
         
         elif self.mode == "parquet":
             # Calculate MTD from the daily downtime data to ensure consistency
-            df_daily = self.get_downtime_by_day_mtd()
-            
+            df_daily = self.get_downtime_by_day_mtd(
+                systems=systems, equipment=equipment, date_start=date_start, date_end=date_end
+            )
+
             if df_daily.empty:
                 return pd.DataFrame([{"total_downtime_hours_mtd": 0.0}])
             
@@ -242,13 +346,20 @@ class MaintenanceRepository:
             # TODO: Implement SQL query for production
             raise NotImplementedError("Production mode not yet implemented")
     
-    def get_last_detentions(self, n_per_machine: int = 3) -> pd.DataFrame:
+    def get_last_detentions(
+        self,
+        n_per_machine: int = 3,
+        systems: Optional[List[str]] = None,
+        equipment: Optional[List[str]] = None,
+        date_start: Optional[str] = None,
+        date_end: Optional[str] = None,
+    ) -> pd.DataFrame:
         """
         Get last detention periods per machine.
-        
+
         Args:
             n_per_machine: Number of last detentions per machine
-            
+
         Returns:
             DataFrame with columns: machine_code, record_id, start_date, end_date, 
                                    ongoing, duration_hours, job_types
@@ -298,15 +409,16 @@ class MaintenanceRepository:
             return result.sort_values(["machine_code", "start_date"], ascending=[True, False])
         
         elif self.mode == "parquet":
-            data = self._get_parquet_data()
-            df_actions = data["actions"]
-            
+            df_actions = self._filtered_actions(
+                systems=systems, equipment=equipment, date_start=date_start, date_end=date_end
+            )
+
             if df_actions.empty:
                 return pd.DataFrame(columns=[
                     "machine_code", "record_id", "start_date", "end_date",
                     "ongoing", "duration_hours", "job_types"
                 ])
-            
+
             # Filtrar registros válidos (con machine_id y record_id)
             df_valid = df_actions[
                 df_actions['machine_id'].notna() & 
@@ -385,10 +497,17 @@ class MaintenanceRepository:
             # TODO: Implement SQL query for production
             raise NotImplementedError("Production mode not yet implemented")
     
-    def get_jobs_last_week(self) -> pd.DataFrame:
+    def get_jobs_last_week(
+        self,
+        systems: Optional[List[str]] = None,
+        equipment: Optional[List[str]] = None,
+        date_start: Optional[str] = None,
+        date_end: Optional[str] = None,
+    ) -> pd.DataFrame:
         """
-        Get jobs performed in the last week.
-        
+        Get jobs performed in the last week (or, when an explicit date range
+        is given, within that range instead of the rolling last-week window).
+
         Returns:
             DataFrame with columns: job_id, machine_code, system_name, subsystem_name,
                                    job_type, start_date, end_date, ongoing, notes
@@ -436,25 +555,34 @@ class MaintenanceRepository:
             return result.sort_values("start_date", ascending=False)
         
         elif self.mode == "parquet":
-            data = self._get_parquet_data()
-            df_actions = data["actions"]
-            
+            df_actions = self._filtered_actions(systems=systems, equipment=equipment)
+
             if df_actions.empty:
                 return pd.DataFrame(columns=[
                     "job_id", "machine_code", "system_name", "subsystem_name",
                     "job_type", "start_date", "end_date", "ongoing", "notes"
                 ])
-            
-            # Filtrar últimas 10 semanas (70 días) para capturar datos históricos
-            now = datetime.now()
-            period_start = pd.Timestamp(now - timedelta(days=70), tz='UTC')
-            
-            # Filtrar por change_date
-            df = df_actions[df_actions["change_date"] >= period_start].copy()
-            
-            # Si no hay datos en el período, usar todos los datos disponibles
-            if df.empty:
-                df = df_actions.copy()
+
+            if date_start or date_end:
+                # Explicit range from the dashboard filter overrides the
+                # rolling "last week" window entirely.
+                df = self._filtered_actions(
+                    systems=systems, equipment=equipment, date_start=date_start, date_end=date_end
+                )
+            else:
+                # Filtrar últimas 10 semanas (70 días) para capturar datos históricos,
+                # ancladas a la última fecha disponible en los datos (no a la fecha
+                # real de hoy, que puede estar muy por delante de los datos cargados).
+                latest_date = df_actions["change_date"].max()
+                if pd.isna(latest_date):
+                    df = df_actions.copy()
+                else:
+                    period_start = latest_date - timedelta(days=70)
+                    df = df_actions[df_actions["change_date"] >= period_start].copy()
+
+                    # Si no hay datos en el período, usar todos los datos disponibles
+                    if df.empty:
+                        df = df_actions.copy()
             
             # Preparar datos para el formato esperado usando las columnas correctas
             result = df[[
@@ -484,11 +612,81 @@ class MaintenanceRepository:
             # TODO: Implement SQL query for production
             raise NotImplementedError("Production mode not yet implemented")
     
-    def get_downtime_by_day_mtd(self) -> pd.DataFrame:
+    # Excluded from the by-system Pareto: "Equipo" is a generic catch-all
+    # system (not a specific one) and "Estación del Operador - Cabina" is out
+    # of scope for this view - both would otherwise dominate the chart.
+    _PARETO_EXCLUDED_SYSTEMS = {"Equipo", "Estación del Operador - Cabina"}
+
+    def get_maintenance_by_system(
+        self,
+        systems: Optional[List[str]] = None,
+        equipment: Optional[List[str]] = None,
+        date_start: Optional[str] = None,
+        date_end: Optional[str] = None,
+    ) -> pd.DataFrame:
         """
-        Get downtime hours by day for the most recent month with data available (MTD - Month To Date).
-        If no data exists for current month, uses the last month with available data.
-        
+        Get maintenance record counts grouped by system, for a Pareto chart.
+        Excludes _PARETO_EXCLUDED_SYSTEMS.
+
+        Returns:
+            DataFrame with columns: system_name, count, cumulative_pct
+            (sorted descending by count).
+        """
+        if self.mode == "dummy":
+            data = self._get_dummy_data()
+            df_jobs = data["jobs"]
+            df_systems = data["systems"]
+
+            if df_jobs.empty:
+                return pd.DataFrame(columns=["system_name", "count", "cumulative_pct"])
+
+            df = df_jobs.merge(
+                df_systems[["system_id", "system_name"]],
+                on="system_id",
+                how="left"
+            )
+            counts = df["system_name"].fillna("Sin Sistema").value_counts().reset_index()
+            counts.columns = ["system_name", "count"]
+
+        elif self.mode == "parquet":
+            df_actions = self._filtered_actions(
+                systems=systems, equipment=equipment, date_start=date_start, date_end=date_end
+            )
+
+            if df_actions.empty:
+                return pd.DataFrame(columns=["system_name", "count", "cumulative_pct"])
+
+            counts = df_actions["action_system_name"].fillna("Sin Sistema").value_counts().reset_index()
+            counts.columns = ["system_name", "count"]
+
+        else:
+            # TODO: Implement SQL query for production
+            raise NotImplementedError("Production mode not yet implemented")
+
+        counts = counts[~counts["system_name"].isin(self._PARETO_EXCLUDED_SYSTEMS)]
+        counts = counts.sort_values("count", ascending=False).reset_index(drop=True)
+        total = int(counts["count"].sum())
+        counts["cumulative_pct"] = (counts["count"].cumsum() / total * 100) if total else 0.0
+        # Guard against float drift so the last point always reads exactly 100%.
+        if len(counts):
+            counts.loc[counts.index[-1], "cumulative_pct"] = 100.0
+
+        return counts
+
+    def get_downtime_by_day_mtd(
+        self,
+        systems: Optional[List[str]] = None,
+        equipment: Optional[List[str]] = None,
+        date_start: Optional[str] = None,
+        date_end: Optional[str] = None,
+    ) -> pd.DataFrame:
+        """
+        Get downtime hours by day. With no explicit date_start/date_end, uses
+        the most recent month with data available (MTD - Month To Date); if
+        no data exists for the current month, uses the last month with
+        available data. An explicit date range overrides that auto-detected
+        month entirely and is used as-is.
+
         Returns:
             DataFrame with columns: date, downtime_hours
         """
@@ -536,42 +734,53 @@ class MaintenanceRepository:
             return pd.DataFrame(daily_hours)
         
         elif self.mode == "parquet":
-            data = self._get_parquet_data()
-            df_actions = data["actions"]
-            
+            df_actions = self._filtered_actions(systems=systems, equipment=equipment)
+
             if df_actions.empty:
                 return pd.DataFrame(columns=["date", "downtime_hours"])
-            
-            # Encontrar el último mes con datos disponibles
+
             df_actions['date'] = df_actions['change_date'].dt.date
-            latest_date = df_actions['change_date'].max()
-            
-            if pd.isna(latest_date):
-                logger.warning("No valid dates found in maintenance actions")
-                return pd.DataFrame(columns=["date", "downtime_hours"])
-            
-            # Usar el año y mes de la última fecha disponible
-            latest_year = latest_date.year
-            latest_month = latest_date.month
-            
-            # Calcular inicio y fin del último mes con datos
-            month_start = pd.Timestamp(datetime(latest_year, latest_month, 1), tz='UTC')
-            
-            # Fin del mes: primer día del siguiente mes - 1 día
-            if latest_month == 12:
-                month_end = pd.Timestamp(datetime(latest_year + 1, 1, 1), tz='UTC')
+
+            if date_start or date_end:
+                # Explicit range from the dashboard filter overrides the
+                # auto-detected "latest available month" entirely.
+                df_month = self._filtered_actions(
+                    systems=systems, equipment=equipment, date_start=date_start, date_end=date_end
+                )
+                if not df_month.empty:
+                    df_month['date'] = df_month['change_date'].dt.date
+                if df_month.empty:
+                    return pd.DataFrame(columns=["date", "downtime_hours"])
             else:
-                month_end = pd.Timestamp(datetime(latest_year, latest_month + 1, 1), tz='UTC')
-            
-            # Filtrar acciones del último mes con datos
-            df_month = df_actions[
-                (df_actions["change_date"] >= month_start) &
-                (df_actions["change_date"] < month_end)
-            ].copy()
-            
-            if df_month.empty:
-                logger.warning(f"No maintenance actions found for last available month ({latest_year}-{latest_month:02d})")
-                return pd.DataFrame(columns=["date", "downtime_hours"])
+                # Encontrar el último mes con datos disponibles
+                latest_date = df_actions['change_date'].max()
+
+                if pd.isna(latest_date):
+                    logger.warning("No valid dates found in maintenance actions")
+                    return pd.DataFrame(columns=["date", "downtime_hours"])
+
+                # Usar el año y mes de la última fecha disponible
+                latest_year = latest_date.year
+                latest_month = latest_date.month
+
+                # Calcular inicio y fin del último mes con datos
+                month_start = pd.Timestamp(datetime(latest_year, latest_month, 1), tz='UTC')
+
+                # Fin del mes: primer día del siguiente mes - 1 día
+                if latest_month == 12:
+                    month_end = pd.Timestamp(datetime(latest_year + 1, 1, 1), tz='UTC')
+                else:
+                    month_end = pd.Timestamp(datetime(latest_year, latest_month + 1, 1), tz='UTC')
+
+                # Filtrar acciones del último mes con datos
+                df_month = df_actions[
+                    (df_actions["change_date"] >= month_start) &
+                    (df_actions["change_date"] < month_end)
+                ].copy()
+
+                if df_month.empty:
+                    logger.warning(f"No maintenance actions found for last available month ({latest_year}-{latest_month:02d})")
+                    return pd.DataFrame(columns=["date", "downtime_hours"])
             
             # Contar acciones por día como proxy de actividad de mantenimiento
             daily_counts = df_month.groupby('date').size().reset_index(name='action_count')
@@ -580,8 +789,7 @@ class MaintenanceRepository:
             # - Cada acción representa ~1.5 horas de trabajo en promedio
             # - Esto es un estimado basado en la actividad registrada
             daily_counts['downtime_hours'] = daily_counts['action_count'] * 1.5
-            
-            logger.info(f"MTD downtime: Using last available month {latest_year}-{latest_month:02d}")
+
             logger.info(f"Data range: {len(daily_counts)} days from {daily_counts['date'].min()} to {daily_counts['date'].max()}")
             logger.info(f"Total actions: {daily_counts['action_count'].sum()}, Total hours: {daily_counts['downtime_hours'].sum():.2f}")
             
