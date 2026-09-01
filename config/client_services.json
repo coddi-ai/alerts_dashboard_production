@@ -24,7 +24,7 @@
   "ENEX": {
     "overview-general": {"display": true, "dummy": false},
     "monitoring-oil": {"display": true, "dummy": false},
-    "agents-campbell-ai": {"display": true, "dummy": true},
+    "agents-campbell-ai": {"display": true, "dummy": false},
     "integration-validacion-avisos": {"display": true, "dummy": true},
     "integration-seguimiento-avisos": {"display": true, "dummy": true}
   },
@@ -35,6 +35,10 @@
     "monitoring-oil": {"display": true, "dummy": false},
     "predictive": {"display": true, "dummy": false},
     "agents-campbell-ai": {"display": true, "dummy": false},
+    "integration-validacion-avisos": {"display": true, "dummy": false},
+    "integration-seguimiento-avisos": {"display": true, "dummy": false}
+  },
+  "CENTINELA" : {
     "integration-validacion-avisos": {"display": true, "dummy": false},
     "integration-seguimiento-avisos": {"display": true, "dummy": false}
   }

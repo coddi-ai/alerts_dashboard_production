@@ -68,7 +68,7 @@ class Settings(BaseSettings):
     report_threshold_anormal: int = Field(default=5, description="Report threshold for Anormal (>=)")
     
     # Clients
-    clients: List[str] = Field(default=["CDA", "EMIN", "ENEX", "CAPSTONE"], description="List of client names")
+    clients: List[str] = Field(default=["CDA", "EMIN", "ENEX", "CAPSTONE", "CENTINELA"], description="List of client names")
     
     # Module access control - clients allowed to access specific modules.
     # Predictive module access is now centralized in config/client_services.json

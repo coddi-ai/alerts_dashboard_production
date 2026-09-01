@@ -20,7 +20,7 @@ def hash_password(password: str) -> str:
     """
     return hashlib.sha256(password.encode()).hexdigest()
 
-ALL = ["CDA", "EMIN", "ENEX", 'CAPSTONE']
+ALL = ["CDA", "EMIN", "ENEX", 'CAPSTONE', 'CENTINELA']
 # User database
 # Format: {username: {"password": hashed_password, "name": display_name, "clients": [allowed_clients]}}
 USERS: Dict[str, Dict[str, any]] = {
@@ -69,6 +69,12 @@ USERS: Dict[str, Dict[str, any]] = {
         "clients": ["CAPSTONE"],  # Only CAPSTONE data
         "role": "client"
     },
+    'centinela_user': {
+        "password": hash_password("Centinela.2026"),  # Change in production
+        "name": "Centinela User",
+        "clients": ["CENTINELA"],  # Only CENTINELA data
+        "role": "client"
+    },
     # Arturo Casanga - CDA Stake holder with access to CDA data
     "a.casanga": {
         "password": hash_password("Teck.2026"),  # Change in production!
@@ -106,7 +112,7 @@ USERS: Dict[str, Dict[str, any]] = {
     },
     # Francisco Vilches - Coddi Administrator with access to all data
     "r.monsalves": {
-        "password": hash_password("Coddi.2026"),  # Change in production!
+        "password": hash_password("poto123"),  # Change in production!
         "name": "Rodrigo Monsalves",
         "clients": ALL,
         "role": "admin"
