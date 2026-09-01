@@ -28,6 +28,7 @@ logger = get_logger(__name__)
 
 FAILURE_MODE_CONFIG = {
     "cda": {
+        "components": {
         "motor": {
             "abrasive_wear_risk": {
                 "label": "Desgaste Abrasivo",
@@ -116,8 +117,10 @@ FAILURE_MODE_CONFIG = {
                 "description": "Degradación en la calidad de los cambios de marcha"
             }
         },
+        },  # end "components"
     },
     "capstone": {
+        "components": {
         # Motor Cummins QSK60. Nombres de telemetría en snake_case / Celsius,
         # correspondientes a la fuente nueva (migración ago-2026).
         # Los modos combustion y coolant perdieron variables sin reemplazo —
@@ -215,6 +218,7 @@ FAILURE_MODE_CONFIG = {
                 "description": "Desgaste de anillos y liner con fuga de gases de combustión al cárter"
             },
         },
+        },  # end "components"
     },
 }
 
@@ -307,6 +311,48 @@ OIL_LABELS = {
         "Viscocidad":  "Viscosidad (cSt)",
     },
 }
+
+
+# =============================================================================
+# Data Contract v2.0 (Change 3) — per-client `signals` catalog + per-mode
+# `signals` list, layered onto FAILURE_MODE_CONFIG without touching the
+# existing `oil_variables`/`telemetry_variables` keys or any helper that
+# already reads them:
+#   FAILURE_MODE_CONFIG["capstone"]["components"]["motor"]["blowby_risk"]
+#     -> {..., "signals": [...]}
+#   FAILURE_MODE_CONFIG["capstone"]["signals"]["crankcase_pressure_inh2o"]
+#     -> {"technique": "telemetry", "label": "...", "unit": "inH2O"}
+# =============================================================================
+
+import re as _re_config
+
+
+def _split_label_unit(label: str) -> tuple:
+    """'Hierro (ppm)' -> ('Hierro (ppm)', 'ppm'); no trailing parens -> ''."""
+    m = _re_config.search(r"\(([^)]+)\)\s*$", label or "")
+    return label, (m.group(1) if m else "")
+
+
+def _build_signals_catalog(client_key: str) -> dict:
+    catalog = {}
+    for name, label in OIL_LABELS.get(client_key, {}).items():
+        _, unit = _split_label_unit(label)
+        catalog[name] = {"technique": "oil", "label": label, "unit": unit}
+    for name, label in TELEMETRY_LABELS.get(client_key, {}).items():
+        _, unit = _split_label_unit(label)
+        catalog[name] = {"technique": "telemetry", "label": label, "unit": unit}
+    return catalog
+
+
+for _client_key, _client_cfg in FAILURE_MODE_CONFIG.items():
+    _client_cfg["signals"] = _build_signals_catalog(_client_key)
+    for _component_modes in _client_cfg.get("components", {}).values():
+        for _mode_cfg in _component_modes.values():
+            _mode_cfg["signals"] = (
+                list(_mode_cfg.get("oil_variables", []))
+                + list(_mode_cfg.get("telemetry_variables", []))
+            )
+del _client_key, _client_cfg, _component_modes, _mode_cfg
 
 
 # =============================================================================
@@ -584,7 +630,15 @@ def get_failure_modes_for_component(component: str, client: str = "cda") -> dict
     """Config completa de modos de falla de un componente para un cliente."""
     client_config = _resolve_client_config(FAILURE_MODE_CONFIG, client)
     component_key = (component or "").lower()
-    return client_config.get(component_key, {})
+    return client_config.get("components", {}).get(component_key, {})
+
+
+def get_signals_catalog(client: str = "cda") -> dict:
+    """Catálogo {signal_name: {technique, label, unit}} de un cliente
+    (Data Contract v2.0 §5 — construido desde OIL_LABELS/TELEMETRY_LABELS,
+    ver _build_signals_catalog)."""
+    client_config = _resolve_client_config(FAILURE_MODE_CONFIG, client)
+    return client_config.get("signals", {})
 
 
 def get_failure_mode_label(mode_key: str, component: str = "motor",
@@ -641,7 +695,7 @@ def get_failure_mode_options(component: str = "motor",
 def get_available_components(client: str = "cda") -> list:
     """Lista de componentes con configuración para un cliente."""
     client_config = _resolve_client_config(FAILURE_MODE_CONFIG, client)
-    return list(client_config.keys())
+    return list(client_config.get("components", {}).keys())
 
 
 def get_failure_modes_dict(component: str = "motor",
@@ -651,3 +705,44 @@ def get_failure_modes_dict(component: str = "motor",
         k: v["label"]
         for k, v in get_failure_modes_for_component(component, client).items()
     }
+
+
+def humanize_mode_key(mode_key: str) -> str:
+    """Fallback label for a failure mode present in a client's actual data
+    but not yet mapped in FAILURE_MODE_CONFIG for that client (e.g. CDA's
+    risk_scores now carries turbocharger_risk/coolant_contamination_risk,
+    but CDA's telemetry vocabulary has no confirmed variable mapping for
+    them yet). Never fabricates a variable mapping - just a readable label,
+    same "absence over a guessed value" principle as OIL_THRESHOLDS["capstone"]
+    above.
+    """
+    return (mode_key or "").replace("_risk", "").replace("_", " ").strip().title()
+
+
+def resolve_failure_modes(component: str, client: str = "cda") -> dict:
+    """Mode -> label map driven by the modes actually present in this
+    client/component's data when the new-layout tables exist (Data Contract
+    v2.0 Change 3: failure-mode tables/charts must render every mode present
+    in the data, never a hardcoded count). Falls back to the config-only
+    list unchanged for components still on the legacy CSV.
+    """
+    base = get_failure_modes_dict(component, client)
+    try:
+        from src.data import predictive_v2
+        data_keys = predictive_v2.get_failure_mode_keys(client, component)
+    except Exception:
+        logger.warning(
+            "No se pudieron resolver modos de falla desde datos para %s/%s",
+            client, component,
+        )
+        data_keys = []
+    if not data_keys:
+        return base
+    return {k: base.get(k, humanize_mode_key(k)) for k in data_keys}
+
+
+def resolve_failure_mode_options(component: str = "motor",
+                                 client: str = "cda") -> list:
+    """Dropdown {label, value} options, data-driven like resolve_failure_modes."""
+    modes = resolve_failure_modes(component, client)
+    return [{"label": label, "value": key} for key, label in modes.items()]

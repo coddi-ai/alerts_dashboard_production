@@ -23,6 +23,10 @@ import pandas as pd
 import plotly.graph_objects as go
 from dash import dcc, html
 
+from src.utils.logger import get_logger
+
+logger = get_logger(__name__)
+
 
 # =========================================================================
 # CONFIGURACION (verbatim de curva_acumulada.py, salvo DEBUG_TAIL)
@@ -1245,4 +1249,175 @@ def render_accumulated_section(df, df_component_hours, component="motor"):
             figure=fig,
             config={"displayModeBar": False, "responsive": True},
         ),
+    ], className="card", style={"marginTop": "16px"})
+
+
+# =========================================================================
+# Data Contract v2.0 (Change 6) — build the curve from the precomputed
+# `cumulative_risk_curve` table instead of the client-side pipeline above.
+# Only used when predictive_v2.read_cumulative_risk_curve() returns data for
+# a client/component; callers fall back to render_accumulated_section (the
+# Oil-join pipeline above) otherwise. Only the 8 confirmed columns are used
+# - see CURVE_TABLE_COLUMNS in src/data/predictive_v2.py.
+# =========================================================================
+
+from src.data.predictive_v2 import CUMULATIVE_CURVE_COLUMNS  # noqa: E402
+
+
+def build_accumulated_figure_from_curve(df_curve, component="motor"):
+    """
+    Build the cumulative-curve figure directly from the precomputed
+    `cumulative_risk_curve` table. Zone boundaries come from the table's own
+    per-point `banda_media`/`banda_umbral` (a single function of component
+    hours, shared across curves), not from build_reference_band/K_SIGMA.
+
+    Returns (figure, resumen) or (None, empty DataFrame) - same contract as
+    build_accumulated_figure, so render_accumulated_section_from_curve can
+    reuse _zone_summary_row/_empty_state unchanged.
+    """
+    if df_curve is None or df_curve.empty:
+        return None, pd.DataFrame()
+
+    missing = [c for c in CUMULATIVE_CURVE_COLUMNS if c not in df_curve.columns]
+    if missing:
+        return None, pd.DataFrame()
+
+    df = df_curve.loc[:, CUMULATIVE_CURVE_COLUMNS].copy()
+    df = df.dropna(subset=["componentHours_filled", "ranking_acumulado_ajustado"])
+    if df.empty:
+        return None, pd.DataFrame()
+
+    # ── Curva vigente de cada unidad (la actual, una por unidad) ──
+    df_plot = df[df["es_vigente"] == True].copy()  # noqa: E712 - bool compare, column may be object dtype
+    if df_plot.empty:
+        return None, pd.DataFrame()
+
+    # ── Banda de referencia: puntos únicos (hora, media, umbral) ya
+    # calculados upstream - una sola función de horas, compartida entre
+    # curvas, así que basta con deduplicar sobre todo el histórico. ──
+    band_points = (
+        df.loc[:, ["componentHours_filled", "banda_media", "banda_umbral"]]
+        .dropna()
+        .drop_duplicates(subset=["componentHours_filled"])
+        .sort_values("componentHours_filled")
+    )
+    if band_points.empty:
+        return None, pd.DataFrame()
+    grid_v = band_points["componentHours_filled"].to_numpy(dtype=float)
+    media_v = band_points["banda_media"].to_numpy(dtype=float)
+    hi_v = band_points["banda_umbral"].to_numpy(dtype=float)
+
+    units = sorted(df_plot["Unit"].unique())
+    color_map = {u: PALETTE[i % len(PALETTE)] for i, u in enumerate(units)}
+
+    fig = go.Figure()
+
+    y_top = max(float(df_plot["ranking_acumulado_ajustado"].max()), float(hi_v.max())) * 1.05
+    y_bottom = np.zeros_like(grid_v)
+    x_ida_vuelta = np.concatenate([grid_v, grid_v[::-1]])
+
+    fig.add_trace(go.Scatter(
+        x=x_ida_vuelta, y=np.concatenate([media_v, y_bottom[::-1]]),
+        fill="toself", fillcolor=ZONE_COLORS["Normal"],
+        line=dict(width=0), hoverinfo="skip", name="Zona normal", legendgroup="zonas",
+    ))
+    fig.add_trace(go.Scatter(
+        x=x_ida_vuelta, y=np.concatenate([hi_v, media_v[::-1]]),
+        fill="toself", fillcolor=ZONE_COLORS["Alerta"],
+        line=dict(width=0), hoverinfo="skip", name="Zona de alerta", legendgroup="zonas",
+    ))
+    fig.add_trace(go.Scatter(
+        x=x_ida_vuelta, y=np.concatenate([np.full_like(grid_v, y_top), hi_v[::-1]]),
+        fill="toself", fillcolor=ZONE_COLORS["Anormal"],
+        line=dict(width=0), hoverinfo="skip", name="Zona anormal", legendgroup="zonas",
+    ))
+
+    for unit in units:
+        g_unit = df_plot[df_plot["Unit"] == unit].sort_values("componentHours_filled")
+        fig.add_trace(go.Scatter(
+            x=g_unit["componentHours_filled"], y=g_unit["ranking_acumulado_ajustado"],
+            mode="lines", name=unit, legendgroup=unit,
+            line=dict(color=color_map[unit], width=2.2), opacity=0.85,
+            hovertemplate=(
+                f"<b>{unit}</b><br>Horas: %{{x:,.0f}}<br>"
+                "Ranking acum.: %{y:,.0f}<extra></extra>"
+            ),
+        ))
+
+    fig.add_trace(go.Scatter(
+        x=grid_v, y=media_v, mode="lines",
+        line=dict(color="#111827", width=2.4, dash="dash"), name="Media de flota",
+    ))
+    fig.add_trace(go.Scatter(
+        x=grid_v, y=hi_v, mode="lines",
+        line=dict(color="rgba(200,60,40,0.7)", width=1.4, dash="dot"), name="Umbral",
+    ))
+
+    fig.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(family="DM Sans, Inter, sans-serif", size=11, color="#6C7280"),
+        height=460, margin=dict(l=64, r=56, t=16, b=52), hovermode="closest",
+        legend=dict(
+            title=dict(text="Máquina", font=dict(size=11)), orientation="v",
+            yanchor="top", y=1, xanchor="left", x=1.01, font=dict(size=10),
+            bgcolor="rgba(0,0,0,0)",
+        ),
+        xaxis=dict(
+            title=dict(text="Horas de componente", font=dict(size=11)),
+            showgrid=True, gridcolor="rgba(0,0,0,0.05)", zeroline=False,
+            tickfont=dict(size=10), rangemode="tozero",
+            range=[0, float(df_plot["componentHours_filled"].max()) * LABEL_X_PAD],
+        ),
+        yaxis=dict(
+            title=dict(text="Ranking acumulado", font=dict(size=11)),
+            showgrid=True, gridcolor="rgba(0,0,0,0.05)", zeroline=False,
+            tickfont=dict(size=10), rangemode="tozero",
+        ),
+    )
+
+    resumen = (
+        df_plot.dropna(subset=["zona_final"])
+        .drop_duplicates(subset=["Unit"])
+        .loc[:, ["Unit", "zona_final"]]
+    )
+    return fig, resumen
+
+
+def render_accumulated_section_from_curve(df_curve, component="motor"):
+    """
+    Change 6: card for the cumulative-curve section built from the
+    precomputed `cumulative_risk_curve` table, when it exists for this
+    client/component. Same card shell as render_accumulated_section (title +
+    zone chips + graph) so the rest of the page doesn't need to know which
+    source produced it. Returns None (not an empty-state div) on any
+    failure, so the caller can fall back to the Oil-join pipeline instead of
+    showing a dead end.
+    """
+    try:
+        fig, resumen = build_accumulated_figure_from_curve(df_curve, component=component)
+    except Exception as exc:  # noqa: BLE001 - nunca romper el overview
+        logger.warning(f"No se pudo construir la curva desde cumulative_risk_curve: {exc}")
+        return None
+
+    if fig is None:
+        return None
+
+    config = df_curve.attrs.get("config", {}) if hasattr(df_curve, "attrs") else {}
+    k_sigma = config.get("K_SIGMA")
+    banda_txt = f" La banda de referencia es la media de flota + {k_sigma}σ." if k_sigma else ""
+
+    return html.Div([
+        html.Div([
+            html.H4([
+                html.I(className="fas fa-chart-line me-2"),
+                "Curva Acumulada de Riesgo",
+            ], className="text-primary mb-3 mt-4 pb-2 border-bottom"),
+            html.P(
+                "Ranking acumulado por ciclo de vida frente a las horas del componente."
+                + banda_txt,
+                className="text-muted mb-3",
+            ),
+        ]),
+        _zone_summary_row(resumen),
+        dcc.Graph(figure=fig, config={"displayModeBar": False, "responsive": True}),
     ], className="card", style={"marginTop": "16px"})
