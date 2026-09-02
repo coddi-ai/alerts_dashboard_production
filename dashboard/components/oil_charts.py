@@ -462,3 +462,270 @@ def build_oil_time_series_grid(history: pd.DataFrame, comp_limits_four: dict, oi
         return html.P("Sin datos de ensayos disponibles", className="text-muted")
 
     return dbc.Row(chart_elements)
+
+
+def build_oil_radar_view(oil_report: pd.Series, comp_limits_four: dict, oil_hour_range: str, essays_df: pd.DataFrame):
+    """
+    Build the "Último Ensayo" grouped radar-chart + table view for a single
+    oil sample.
+
+    One polar radar chart (against normalized LIC/LIM/LSM/LSC rings) plus a
+    threshold table is rendered per essay group (Desgaste, Aditivos, then the
+    rest alphabetically). Shared by the Alerts > Detail > Oil Evidence
+    "Último Ensayo" tab (dashboard/callbacks/alerts_callbacks.py) and the
+    Monitoring > Oil > Details "Análisis de Series Temporales" "Último
+    Ensayo" tab (dashboard/callbacks/reports_callbacks.py), so both render
+    from the same grouping, normalization and status-classification logic.
+
+    Args:
+        oil_report: Single sample row (classified oil report schema).
+        comp_limits_four: Four-limit Stewart limits for this component, as
+            returned by load_stewart_limits_four(...)[client][machine][component].
+        oil_hour_range: oilHourRange of `oil_report`, for stratified limit lookup.
+        essays_df: Essays/elements mapping (GroupElement, ElementNameSpanish),
+            as returned by load_essays_mapping(...).
+
+    Returns:
+        List of dbc.Row (chart + table per essay group), or a single
+        placeholder element if there is nothing to plot.
+    """
+    from dash import dash_table
+
+    group_mapping = essays_df.groupby('GroupElement')['ElementNameSpanish'].apply(list).to_dict()
+
+    priority_groups = ['Desgaste', 'Aditivos']
+    ordered_groups = [g for g in priority_groups if g in group_mapping]
+    ordered_groups.extend(sorted(g for g in group_mapping if g not in priority_groups))
+
+    def get_essay_limits(essay_name):
+        return get_essay_limits_four(comp_limits_four, essay_name, oil_hour_range)
+
+    def _fmt_limit(v):
+        return round(v, 2) if v is not None else '—'
+
+    charts_and_tables = []
+
+    for group_name in ordered_groups:
+        essays = group_mapping[group_name]
+
+        valid_essays = [
+            e for e in essays
+            if e in oil_report.index and pd.notna(oil_report[e]) and get_essay_limits(e) is not None
+        ]
+        if not valid_essays:
+            continue
+
+        normalized_values = []
+        actual_values = []
+        table_data = []
+        group_has_lower = False
+
+        for essay in valid_essays:
+            value = float(oil_report[essay])
+            actual_values.append(value)
+
+            essay_limits = get_essay_limits(essay)
+            lic = essay_limits.get('LIC')
+            lim = essay_limits.get('LIM')
+            lsm = essay_limits.get('LSM', 0)
+            lsc = essay_limits.get('LSC', 0)
+            has_lower = lic is not None and lim is not None
+            group_has_lower = group_has_lower or has_lower
+
+            if has_lower:
+                if value < lic:
+                    norm_value = max((value / lic) * 20, 0.0) if lic else 0.0
+                elif value < lim:
+                    norm_value = 20 + (value - lic) / max(lim - lic, 1e-9) * 20
+                elif value <= lsm:
+                    norm_value = 40 + (value - lim) / max(lsm - lim, 1e-9) * 20
+                elif value <= lsc:
+                    norm_value = 60 + (value - lsm) / max(lsc - lsm, 1e-9) * 20
+                else:
+                    norm_value = min(80 + (value - lsc) / max(lsc, 1e-9) * 20, 100)
+            else:
+                if value <= lsm:
+                    norm_value = (value / lsm) * 60 if lsm else 0.0
+                elif value <= lsc:
+                    norm_value = 60 + (value - lsm) / max(lsc - lsm, 1e-9) * 20
+                else:
+                    norm_value = min(80 + (value - lsc) / max(lsc, 1e-9) * 20, 100)
+
+            normalized_values.append(min(max(norm_value, 0.0), 100))
+
+            status = classify_four_limit_value(value, lic, lim, lsm, lsc)
+            color = FOUR_LIMIT_STATUS_HEX_COLORS.get(status, '#28a745')
+
+            table_data.append({
+                'essay': essay,
+                'value': round(value, 2),
+                'status': status,
+                'lic': _fmt_limit(lic),
+                'lim': _fmt_limit(lim),
+                'lsm': _fmt_limit(lsm),
+                'lsc': _fmt_limit(lsc),
+                '_color': color
+            })
+
+        table_data.sort(key=lambda x: (FOUR_LIMIT_STATUS_ORDER.get(x['status'], 9), x['essay']))
+
+        fig = go.Figure()
+
+        if group_has_lower:
+            ring_specs = [
+                (80, 'LSC (Superior Condenatorio)', UPPER_LIMIT_COLOR),
+                (60, 'LSM (Superior Marginal)', 'orange'),
+                (40, 'LIM (Inferior Marginal)', LOWER_LIMIT_COLOR),
+                (20, 'LIC (Inferior Condenatorio)', LOWER_LIMIT_COLOR),
+            ]
+        else:
+            ring_specs = [
+                (80, 'LSC (Superior Condenatorio)', UPPER_LIMIT_COLOR),
+                (60, 'LSM (Superior Marginal)', 'orange'),
+            ]
+
+        for radius, ring_name, ring_color in ring_specs:
+            fig.add_trace(go.Scatterpolar(
+                r=[radius] * len(valid_essays),
+                theta=valid_essays,
+                name=ring_name,
+                line=dict(color=ring_color, dash='dash', width=2),
+                fill=None,
+                mode='lines'
+            ))
+
+        status_color = {
+            'Anormal': '#dc3545',
+            'Condenatorio': '#fd7e14',
+            'Critico': '#dc3545',
+            'Normal': '#28a745'
+        }.get(oil_report.get('report_status', 'Normal'), '#17a2b8')
+
+        fig.add_trace(go.Scatterpolar(
+            r=normalized_values,
+            theta=valid_essays,
+            name='Valores Actuales',
+            line=dict(color=status_color, width=3),
+            fill='toself',
+            fillcolor=status_color,
+            opacity=0.4,
+            hovertemplate='<b>%{theta}</b><br>Valor Real: %{customdata}<br>Normalizado: %{r:.1f}<extra></extra>',
+            customdata=actual_values
+        ))
+
+        fig.update_layout(
+            polar=dict(
+                radialaxis=dict(
+                    visible=True,
+                    range=[0, 100],
+                    tickvals=[0, 25, 50, 75, 100],
+                    ticktext=['0', '25', '50', '75', '100']
+                ),
+                angularaxis=dict(
+                    rotation=90,
+                    direction='clockwise'
+                )
+            ),
+            title=dict(
+                text=f"{group_name}",
+                x=0.5,
+                xanchor='center',
+                font=dict(size=14, weight='bold')
+            ),
+            showlegend=True,
+            legend=dict(
+                orientation='h',
+                yanchor='bottom',
+                y=-0.2,
+                xanchor='center',
+                x=0.5,
+                font=dict(size=10)
+            ),
+            height=400,
+            margin=dict(l=50, r=50, t=50, b=80)
+        )
+
+        group_table = dash_table.DataTable(
+            columns=[
+                {'name': 'Ensayo', 'id': 'essay'},
+                {'name': 'Valor', 'id': 'value', 'type': 'numeric'},
+                {'name': 'Estado', 'id': 'status'},
+                {'name': 'LIC', 'id': 'lic'},
+                {'name': 'LIM', 'id': 'lim'},
+                {'name': 'LSM', 'id': 'lsm'},
+                {'name': 'LSC', 'id': 'lsc'}
+            ],
+            data=table_data,
+            style_table={'overflowX': 'auto'},
+            style_cell={
+                'textAlign': 'left',
+                'padding': '8px',
+                'fontSize': '13px',
+                'fontFamily': 'Arial'
+            },
+            style_header={
+                'backgroundColor': '#2c3e50',
+                'color': 'white',
+                'fontWeight': 'bold',
+                'textAlign': 'center'
+            },
+            style_data_conditional=[
+                {
+                    'if': {'filter_query': '{status} = "Superior Condenatorio"'},
+                    'backgroundColor': '#f8d7da',
+                    'color': '#721c24',
+                    'fontWeight': 'bold'
+                },
+                {
+                    'if': {'filter_query': '{status} = "Inferior Condenatorio"'},
+                    'backgroundColor': '#f8d7da',
+                    'color': '#721c24',
+                    'fontWeight': 'bold'
+                },
+                {
+                    'if': {'filter_query': '{status} = "Superior Marginal"'},
+                    'backgroundColor': '#fff8e1',
+                    'color': '#856404'
+                },
+                {
+                    'if': {'filter_query': '{status} = "Inferior Marginal"'},
+                    'backgroundColor': '#fff8e1',
+                    'color': '#856404'
+                },
+                {
+                    'if': {'filter_query': '{status} = "Normal"'},
+                    'backgroundColor': '#d4edda',
+                    'color': '#155724'
+                }
+            ]
+        )
+
+        charts_and_tables.append(
+            dbc.Row([
+                dbc.Col([
+                    dbc.Card([
+                        dbc.CardBody([
+                            dcc.Graph(
+                                figure=fig,
+                                config={'displayModeBar': False}
+                            )
+                        ])
+                    ], className="shadow-sm mb-3")
+                ], md=6),
+                dbc.Col([
+                    dbc.Card([
+                        dbc.CardHeader([
+                            html.H6(f"Detalle - {group_name}", className="mb-0")
+                        ]),
+                        dbc.CardBody([
+                            group_table
+                        ])
+                    ], className="shadow-sm mb-3")
+                ], md=6)
+            ], className="mb-4")
+        )
+
+    if not charts_and_tables:
+        return [html.P("Sin datos de ensayos disponibles para el último ensayo", className="text-muted")]
+
+    return charts_and_tables

@@ -39,12 +39,7 @@ from dashboard.components.alerts_charts import (
 )
 from dashboard.components.oil_charts import (
     build_oil_time_series_grid,
-    get_essay_limits_four,
-    classify_four_limit_value,
-    FOUR_LIMIT_STATUS_ORDER,
-    FOUR_LIMIT_STATUS_HEX_COLORS,
-    UPPER_LIMIT_COLOR,
-    LOWER_LIMIT_COLOR,
+    build_oil_radar_view,
 )
 from dashboard.components.alerts_tables import (
     # W34-03: create_alerts_datatable is a legacy, unused variant of the
@@ -1205,8 +1200,7 @@ def create_oil_evidence_section(alert_row: pd.Series, client: str) -> html.Div:
     
     try:
         from pathlib import Path
-        from dash import dash_table
-        
+
         # Load oil data
         oil_classified = load_oil_classified(client)
         
@@ -1237,19 +1231,7 @@ def create_oil_evidence_section(alert_row: pd.Series, client: str) -> html.Div:
             ])
         
         essays_df = load_essays_mapping(essays_file)
-        
-        # Group essays by GroupElement
-        group_mapping = essays_df.groupby('GroupElement')['ElementNameSpanish'].apply(list).to_dict()
-        
-        # Order groups: Desgaste, Aditivos, then others alphabetically
-        priority_groups = ['Desgaste', 'Aditivos']
-        ordered_groups = []
-        for group in priority_groups:
-            if group in group_mapping:
-                ordered_groups.append(group)
-        remaining_groups = sorted([g for g in group_mapping.keys() if g not in priority_groups])
-        ordered_groups.extend(remaining_groups)
-        
+
         # Load four-limit Stewart limits (LIC/LIM/LSM/LSC, data contract v2.8)
         from src.data.loaders import load_stewart_limits_four
         from config.settings import get_settings
@@ -1311,254 +1293,10 @@ def create_oil_evidence_section(alert_row: pd.Series, client: str) -> html.Div:
             start_date=default_start_str, end_date=default_end_str,
         )
 
-        # Stratified limit lookup with fallback, shared with Monitoring > Oil > Details
-        # (dashboard/components/oil_charts.py::get_essay_limits_four)
-        def get_essay_limits(essay_name, oil_hour_range):
-            return get_essay_limits_four(comp_limits, essay_name, oil_hour_range)
+        # Radar charts + tables for the latest essay, shared with
+        # Monitoring > Oil > Details (dashboard/components/oil_charts.py::build_oil_radar_view)
+        charts_and_tables = build_oil_radar_view(oil_report, comp_limits, sample_oil_hour_range, essays_df)
 
-        # Create charts and tables for each group
-        charts_and_tables = []
-        
-        for group_name in ordered_groups:
-            essays = group_mapping[group_name]
-            
-            # Filter essays that exist in sample and have limits
-            valid_essays = []
-            for e in essays:
-                if e in oil_report.index and pd.notna(oil_report[e]):
-                    essay_lim = get_essay_limits(e, sample_oil_hour_range)
-                    if essay_lim is not None:
-                        valid_essays.append(e)
-            
-            if not valid_essays:
-                continue
-            
-            # Prepare data for radar chart and table
-            normalized_values = []
-            actual_values = []
-            table_data = []
-            group_has_lower = False
-
-            def _fmt_limit(v):
-                return round(v, 2) if v is not None else '—'
-
-            for essay in valid_essays:
-                value = float(oil_report[essay])
-                actual_values.append(value)
-
-                # Get four-limit thresholds (LIC/LIM/LSM/LSC)
-                essay_limits = get_essay_limits(essay, sample_oil_hour_range)
-                lic = essay_limits.get('LIC')
-                lim = essay_limits.get('LIM')
-                lsm = essay_limits.get('LSM', 0)
-                lsc = essay_limits.get('LSC', 0)
-                has_lower = lic is not None and lim is not None
-                group_has_lower = group_has_lower or has_lower
-
-                # Normalize value to a 0-100 scale for the radar chart
-                if has_lower:
-                    if value < lic:
-                        norm_value = max((value / lic) * 20, 0.0) if lic else 0.0
-                    elif value < lim:
-                        norm_value = 20 + (value - lic) / max(lim - lic, 1e-9) * 20
-                    elif value <= lsm:
-                        norm_value = 40 + (value - lim) / max(lsm - lim, 1e-9) * 20
-                    elif value <= lsc:
-                        norm_value = 60 + (value - lsm) / max(lsc - lsm, 1e-9) * 20
-                    else:
-                        norm_value = min(80 + (value - lsc) / max(lsc, 1e-9) * 20, 100)
-                else:
-                    if value <= lsm:
-                        norm_value = (value / lsm) * 60 if lsm else 0.0
-                    elif value <= lsc:
-                        norm_value = 60 + (value - lsm) / max(lsc - lsm, 1e-9) * 20
-                    else:
-                        norm_value = min(80 + (value - lsc) / max(lsc, 1e-9) * 20, 100)
-
-                normalized_values.append(min(max(norm_value, 0.0), 100))
-
-                # Determine status (data contract v2.8 five-tier classification)
-                status = classify_four_limit_value(value, lic, lim, lsm, lsc)
-                color = FOUR_LIMIT_STATUS_HEX_COLORS.get(status, '#28a745')
-
-                table_data.append({
-                    'essay': essay,
-                    'value': round(value, 2),
-                    'status': status,
-                    'lic': _fmt_limit(lic),
-                    'lim': _fmt_limit(lim),
-                    'lsm': _fmt_limit(lsm),
-                    'lsc': _fmt_limit(lsc),
-                    '_color': color
-                })
-
-            # Sort table by status severity
-            table_data.sort(key=lambda x: (FOUR_LIMIT_STATUS_ORDER.get(x['status'], 9), x['essay']))
-            
-            # Create radar chart
-            fig = go.Figure()
-            
-            # Add threshold rings - LIC/LIM only shown when the group has lower
-            # limits. Lower-limit rings use the shared purple (not blue),
-            # matching every other oil visualization.
-            if group_has_lower:
-                ring_specs = [
-                    (80, 'LSC (Superior Condenatorio)', UPPER_LIMIT_COLOR),
-                    (60, 'LSM (Superior Marginal)', 'orange'),
-                    (40, 'LIM (Inferior Marginal)', LOWER_LIMIT_COLOR),
-                    (20, 'LIC (Inferior Condenatorio)', LOWER_LIMIT_COLOR),
-                ]
-            else:
-                ring_specs = [
-                    (80, 'LSC (Superior Condenatorio)', UPPER_LIMIT_COLOR),
-                    (60, 'LSM (Superior Marginal)', 'orange'),
-                ]
-
-            for radius, ring_name, ring_color in ring_specs:
-                fig.add_trace(go.Scatterpolar(
-                    r=[radius] * len(valid_essays),
-                    theta=valid_essays,
-                    name=ring_name,
-                    line=dict(color=ring_color, dash='dash', width=2),
-                    fill=None,
-                    mode='lines'
-                ))
-            
-            # Determine fill color based on report status
-            status_color = {
-                'Anormal': '#dc3545',
-                'Condenatorio': '#fd7e14',
-                'Critico': '#dc3545',
-                'Normal': '#28a745'
-            }.get(oil_report.get('report_status', 'Normal'), '#17a2b8')
-            
-            # Add actual values
-            fig.add_trace(go.Scatterpolar(
-                r=normalized_values,
-                theta=valid_essays,
-                name='Valores Actuales',
-                line=dict(color=status_color, width=3),
-                fill='toself',
-                fillcolor=status_color,
-                opacity=0.4,
-                hovertemplate='<b>%{theta}</b><br>Valor Real: %{customdata}<br>Normalizado: %{r:.1f}<extra></extra>',
-                customdata=actual_values
-            ))
-            
-            fig.update_layout(
-                polar=dict(
-                    radialaxis=dict(
-                        visible=True,
-                        range=[0, 100],
-                        tickvals=[0, 25, 50, 75, 100],
-                        ticktext=['0', '25', '50', '75', '100']
-                    ),
-                    angularaxis=dict(
-                        rotation=90,
-                        direction='clockwise'
-                    )
-                ),
-                title=dict(
-                    text=f"{group_name}",
-                    x=0.5,
-                    xanchor='center',
-                    font=dict(size=14, weight='bold')
-                ),
-                showlegend=True,
-                legend=dict(
-                    orientation='h',
-                    yanchor='bottom',
-                    y=-0.2,
-                    xanchor='center',
-                    x=0.5,
-                    font=dict(size=10)
-                ),
-                height=400,
-                margin=dict(l=50, r=50, t=50, b=80)
-            )
-            
-            # Create table
-            group_table = dash_table.DataTable(
-                columns=[
-                    {'name': 'Ensayo', 'id': 'essay'},
-                    {'name': 'Valor', 'id': 'value', 'type': 'numeric'},
-                    {'name': 'Estado', 'id': 'status'},
-                    {'name': 'LIC', 'id': 'lic'},
-                    {'name': 'LIM', 'id': 'lim'},
-                    {'name': 'LSM', 'id': 'lsm'},
-                    {'name': 'LSC', 'id': 'lsc'}
-                ],
-                data=table_data,
-                style_table={'overflowX': 'auto'},
-                style_cell={
-                    'textAlign': 'left',
-                    'padding': '8px',
-                    'fontSize': '13px',
-                    'fontFamily': 'Arial'
-                },
-                style_header={
-                    'backgroundColor': '#2c3e50',
-                    'color': 'white',
-                    'fontWeight': 'bold',
-                    'textAlign': 'center'
-                },
-                style_data_conditional=[
-                    {
-                        'if': {'filter_query': '{status} = "Superior Condenatorio"'},
-                        'backgroundColor': '#f8d7da',
-                        'color': '#721c24',
-                        'fontWeight': 'bold'
-                    },
-                    {
-                        'if': {'filter_query': '{status} = "Inferior Condenatorio"'},
-                        'backgroundColor': '#f8d7da',
-                        'color': '#721c24',
-                        'fontWeight': 'bold'
-                    },
-                    {
-                        'if': {'filter_query': '{status} = "Superior Marginal"'},
-                        'backgroundColor': '#fff8e1',
-                        'color': '#856404'
-                    },
-                    {
-                        'if': {'filter_query': '{status} = "Inferior Marginal"'},
-                        'backgroundColor': '#fff8e1',
-                        'color': '#856404'
-                    },
-                    {
-                        'if': {'filter_query': '{status} = "Normal"'},
-                        'backgroundColor': '#d4edda',
-                        'color': '#155724'
-                    }
-                ]
-            )
-            
-            # Add chart and table for this group
-            charts_and_tables.append(
-                dbc.Row([
-                    dbc.Col([
-                        dbc.Card([
-                            dbc.CardBody([
-                                dcc.Graph(
-                                    figure=fig,
-                                    config={'displayModeBar': False}
-                                )
-                            ])
-                        ], className="shadow-sm mb-3")
-                    ], md=6),
-                    dbc.Col([
-                        dbc.Card([
-                            dbc.CardHeader([
-                                html.H6(f"Detalle - {group_name}", className="mb-0")
-                            ]),
-                            dbc.CardBody([
-                                group_table
-                            ])
-                        ], className="shadow-sm mb-3")
-                    ], md=6)
-                ], className="mb-4")
-            )
-        
         # Build final section
         report_status = oil_report.get('report_status', 'N/A')
         status_colors = {
