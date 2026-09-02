@@ -9,8 +9,6 @@ reload. This mirrors what the old section-content routing callback used to
 do for the 'predictive-{component}' sections.
 """
 
-from pathlib import Path
-
 from dash import Input, Output, State, html
 from dash.dependencies import ALL
 import dash
@@ -18,6 +16,7 @@ import dash
 from dashboard.layout import create_placeholder_content
 from config.settings import get_settings
 from config.client_services import is_service_enabled
+from src.data import predictive_v2
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -34,17 +33,22 @@ def _resolve_client(selected_client, user_data) -> str:
 
 
 def _render_component(client: str, component: str):
-    settings = get_settings()
     if not is_service_enabled(client, 'predictive'):
         logger.warning(f"Predictive module accessed by client without access: {client}")
         return create_placeholder_content('Predictivo (no disponible para este cliente)')
 
-    data_dir = Path(settings.data_root) / "predictive" / "golden" / client
-    component_file = data_dir / f"{component}.csv"
+    # Change 1: single shared discovery function - no more inline CSV-only
+    # existence check. A component is available whether it's on the new
+    # partitioned layout (risk_scores) or still legacy-CSV-only.
+    layout = predictive_v2.discover_predictive_layout(client)
+    availability = layout.get(component)
+    has_data = availability is not None and (
+        availability.risk_scores or availability.legacy_csv is not None
+    )
 
-    if not data_dir.exists() or not component_file.exists():
+    if not has_data:
         logger.warning(
-            f"No predictive data found for client {client}, component {component} at {component_file}"
+            f"No predictive data found for client {client}, component {component}"
         )
         return html.Div([
             html.Div([

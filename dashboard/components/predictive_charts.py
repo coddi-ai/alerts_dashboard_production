@@ -580,6 +580,92 @@ def create_telemetry_signal_chart(df_unit, signal, telemetry_labels):
     return fig
 
 
+def create_telemetry_signal_chart_from_long(df_signal, signal, telemetry_labels):
+    """
+    Data Contract v2.0 (Change 2) equivalent of create_telemetry_signal_chart,
+    reading `telemetry/signal_daily_status` (Unit, Fecha, signal_name,
+    pct_time_alert, pct_time_critical) - one row per unit/day/signal,
+    filtered by row instead of pattern-matching wide column names. No
+    per-operational-mode summing needed: the new table is already the daily
+    total per signal.
+
+    `df_signal` must already be filtered to the selected unit; this filters
+    it to `signal` and plots `pct_time_alert`/`pct_time_critical` by Fecha.
+    """
+    if df_signal is None or df_signal.empty or "signal_name" not in df_signal.columns:
+        return None
+
+    df_sig = df_signal[df_signal["signal_name"] == signal].sort_values("Fecha")
+    if df_sig.empty:
+        return None
+
+    has_alert = "pct_time_alert" in df_sig.columns and df_sig["pct_time_alert"].notna().any()
+    has_critical = "pct_time_critical" in df_sig.columns and df_sig["pct_time_critical"].notna().any()
+    if not has_alert and not has_critical:
+        return None
+
+    fig = go.Figure()
+
+    if has_alert:
+        fig.add_trace(go.Bar(
+            x=df_sig["Fecha"],
+            y=df_sig["pct_time_alert"] / 100.0,
+            name="Alert",
+            marker=dict(color="#ef9f27"),
+            hovertemplate="%{x|%d %b %Y}<br>Alert: %{y:.1%}<extra></extra>",
+        ))
+    if has_critical:
+        fig.add_trace(go.Bar(
+            x=df_sig["Fecha"],
+            y=df_sig["pct_time_critical"] / 100.0,
+            name="Crítico",
+            marker=dict(color="#e24b4a"),
+            hovertemplate="%{x|%d %b %Y}<br>Crítico: %{y:.1%}<extra></extra>",
+        ))
+
+    signal_label = telemetry_labels.get(signal, signal)
+
+    fig.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(family="DM Sans, sans-serif", size=11, color="#6C7280"),
+        height=250,
+        margin=dict(l=60, r=24, t=40, b=50),
+        showlegend=True,
+        barmode="stack",
+        title=dict(
+            text=signal_label,
+            font=dict(size=13, weight="bold"),
+            x=0,
+            xanchor="left",
+        ),
+        xaxis=dict(
+            title="",
+            showgrid=False,
+            zeroline=False,
+            tickfont=dict(size=10),
+            tickformat="%d %b",
+        ),
+        yaxis=dict(
+            title="% tiempo",
+            showgrid=True,
+            gridcolor="rgba(0,0,0,0.05)",
+            zeroline=False,
+            tickfont=dict(size=10),
+            tickformat=".0%",
+        ),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1,
+        ),
+    )
+
+    return fig
+
+
 def create_telemetry_alerts_timeseries(df_unit, telemetry_vars, telemetry_labels):
     """
     Crear serie temporal de alertas de telemetría.

@@ -10,8 +10,8 @@ from src.utils.logger import get_logger
 from config.settings import get_settings
 from src.data.loaders import get_latest_component_hours, load_oil_classified
 from dashboard.components.predictive_config import (
-    get_failure_modes_dict,
-    get_failure_mode_options,
+    resolve_failure_modes,
+    resolve_failure_mode_options,
 )
 from dashboard.tabs.tab_predictive_overview import (
     _discover_components,
@@ -139,7 +139,7 @@ def register_callbacks(app):
 
             df, df_latest = _load_evidence_component(filepath, component, client)
             units = sorted(df["Unit"].unique()) if df is not None else []
-            failure_mode_options = get_failure_mode_options(component, client)
+            failure_mode_options = resolve_failure_mode_options(component, client)
 
             return html.Div([
                 # Unit selector
@@ -233,7 +233,7 @@ def register_callbacks(app):
         if df_latest is None or df_latest.empty:
             return no_update, no_update
 
-        failure_modes = get_failure_modes_dict(component, client)
+        failure_modes = resolve_failure_modes(component, client)
         latest = attach_status(df_latest, client, component)
         fm_keys = list(failure_modes.keys())
 
@@ -484,7 +484,7 @@ def register_callbacks(app):
         if df is None or df_latest is None:
             return no_update
 
-        failure_modes = get_failure_modes_dict(component, client)
+        failure_modes = resolve_failure_modes(component, client)
         row = df_latest[df_latest["Unit"] == selected_unit]
         if row.empty:
             return list(failure_modes.keys())[0] if failure_modes else None

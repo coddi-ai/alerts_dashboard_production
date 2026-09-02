@@ -9,12 +9,12 @@ import re
 from pathlib import Path
 from src.utils.logger import get_logger
 from dashboard.components.predictive_config import (
-    get_failure_mode_options,
-    get_failure_modes_dict,
     get_failure_modes_for_component,
     get_failure_mode_methodology,
     get_oil_variables_for_mode,
     get_telemetry_signals_for_mode,
+    resolve_failure_modes,
+    humanize_mode_key,
     OIL_LABELS,
     TELEMETRY_LABELS,
     load_predictive_oil_limits_four,
@@ -25,11 +25,13 @@ from dashboard.components.predictive_charts import (
     create_comparative_bars,
     create_oil_timeseries_90d,
     create_telemetry_signal_chart,
+    create_telemetry_signal_chart_from_long,
 )
 from dashboard.components.predictive_tables import create_oil_variables_table
 from dashboard.components.oil_charts import get_essay_limits_four, classify_four_limit_value
 from dashboard.components.ai_analysis_panel import create_ai_analysis_panel
 from src.data.loaders import load_analisis_inteligente
+from src.data import predictive_v2
 from dashboard.tabs.tab_predictive_overview import (
     attach_status,
     _discover_components,
@@ -298,9 +300,14 @@ def _generate_insight_data(unit, df_unit, df_latest, failure_mode, component="mo
     """Generate complete insight data for a failure mode and unit."""
     oil_labels, telem_labels, oil_limits_four = _resolve_client_dicts(client, component)
     modes = get_failure_modes_for_component(component, client)
-    mode_config = modes.get(failure_mode, {})
+    mode_config = modes.get(failure_mode)
     if not mode_config:
-        return None
+        # Mode present in this client's data but not yet mapped in
+        # FAILURE_MODE_CONFIG (e.g. CDA's turbocharger_risk/
+        # coolant_contamination_risk once its data carries them) - show a
+        # humanized label with no fabricated variable mapping, rather than
+        # hiding the panel entirely.
+        mode_config = {"label": humanize_mode_key(failure_mode), "oil_variables": [], "telemetry_variables": []}
 
     label = mode_config["label"]
     oil_vars = mode_config.get("oil_variables", [])
@@ -502,11 +509,11 @@ def _build_insight_panel(insight):
 
 def render_initial_content(unit, df, df_latest, component="motor", client=None):
     """Render KPIs and fleet comparison for a unit."""
-    failure_modes = get_failure_modes_dict(component, client)
+    failure_modes = resolve_failure_modes(component, client)
 
-    # Status from analisis_inteligente.parquet's `estado` (same source as
-    # Estado de Flota, REQ-PR-04) so the fleet scatter never disagrees with
-    # the priority cards for the same unit.
+    # Status - unit_status_summary when it exists for this client/component,
+    # else analisis_inteligente.parquet (Change 4) - so the fleet scatter
+    # never disagrees with the priority cards for the same unit.
     latest = attach_status(df_latest, client, component)
 
     STATUS_COLORS = {"Anormal": "#e24b4a", "Alerta": "#ef9f27", "Normal": "#1d9e75"}
@@ -593,21 +600,39 @@ def render_initial_content(unit, df, df_latest, component="motor", client=None):
     scatter_fig = create_fleet_scatter(latest, unit, STATUS_COLORS, 30.0)
     bar_fig = create_comparative_bars(row, latest, failure_modes)
 
-    # AI analysis (analisis_inteligente.parquet) for the selected unit.
-    # Always render the three sections rather than hiding the panel when a
-    # unit has no row yet - the pipeline team is expected to backfill
-    # placeholder diagnostico/causa_probable/acciones for units without one
-    # (e.g. healthy units), so the "No disponible" fallback below is meant
-    # to be a rare/transitional case, not the steady-state UI.
+    # AI analysis (Change 7): analisis_inteligente.parquet is an
+    # undocumented-upstream table standing in for the not-yet-shipped
+    # `failure_mode_diagnosis` table (see
+    # documentation/predictive/predictive_data_contracts.md §3/§9) - this is
+    # a known temporary routing, to be re-pointed once that table ships in
+    # the documented partitioned pattern (Change 1's readers apply then).
+    # `analisis_fuente == "omitida"` rows (LLM step skipped for low-risk
+    # units) and any missing/malformed row fall back to the existing
+    # rule-based insight engine instead of an empty AI section, anchored on
+    # the unit's dominant failure mode.
     ai_row = _get_unit_ai_analysis(load_analisis_inteligente(client), unit) if client else None
-    ai_section = html.Div(
-        create_ai_analysis_panel(
-            ai_row.get("diagnostico") if ai_row is not None else None,
-            ai_row.get("causa_probable") if ai_row is not None else None,
-            ai_row.get("acciones") if ai_row is not None else None,
-        ),
-        style={"marginBottom": "1.5rem"},
+    _narrative_cols = ("diagnostico", "causa_probable", "acciones")
+    has_narrative = (
+        ai_row is not None
+        and all(col in ai_row.index for col in _narrative_cols)
+        and str(ai_row.get("analisis_fuente", "")).strip().lower() != "omitida"
+        and any(pd.notna(ai_row.get(col)) and str(ai_row.get(col)).strip() for col in _narrative_cols)
     )
+    if has_narrative:
+        ai_section = html.Div(
+            create_ai_analysis_panel(
+                ai_row.get("diagnostico"),
+                ai_row.get("causa_probable"),
+                ai_row.get("acciones"),
+            ),
+            style={"marginBottom": "1.5rem"},
+        )
+    else:
+        fallback_insight = _generate_insight_data(unit, df_unit, df_latest, dominant_mode, component, client)
+        ai_section = html.Div(
+            _build_insight_panel(fallback_insight),
+            style={"marginBottom": "1.5rem"},
+        )
 
     return html.Div([
         # KPIs
@@ -657,7 +682,7 @@ def render_initial_content(unit, df, df_latest, component="motor", client=None):
 def render_detailed_evidence(unit, df, df_latest, failure_mode, component="motor", client="cda"):
     """Render oil and telemetry evidence for a unit and failure mode."""
     oil_labels, telem_labels, oil_limits_four = _resolve_client_dicts(client, component)
-    failure_modes = get_failure_modes_dict(component, client)
+    failure_modes = resolve_failure_modes(component, client)
 
     if not failure_mode or failure_mode not in failure_modes:
         return html.Div(html.P("Seleccione un modo de falla válido.", className="text-muted text-center", style={"padding": "40px"}))
@@ -708,9 +733,30 @@ def render_detailed_evidence(unit, df, df_latest, failure_mode, component="motor
         window_text = ""
 
     if telem_signals:
+        # Change 2: signal_daily_status (long format, row-filtered by
+        # signal_name) is preferred when it exists for this client/component;
+        # falls back to the legacy wide-column chart for components still on
+        # the CSV, whose telemetry rate columns never appear in the
+        # risk_scores-derived wide frame.
+        layout = predictive_v2.discover_predictive_layout(client) if client else {}
+        use_long_signal = bool(layout.get(component)) and layout[component].signal_daily_status
+        df_signal_unit = None
+        if use_long_signal:
+            df_signal_all = predictive_v2.load_signal_daily_status(client, component)
+            if not df_signal_all.empty and "Unit" in df_signal_all.columns:
+                df_signal_unit = df_signal_all[df_signal_all["Unit"] == unit]
+                if not df_signal_unit.empty:
+                    fecha_fin_sig = df_signal_unit["Fecha"].max()
+                    df_signal_unit = df_signal_unit[
+                        df_signal_unit["Fecha"] >= fecha_fin_sig - pd.Timedelta(days=90)
+                    ]
+
         charts = []
         for signal in telem_signals:
-            fig = create_telemetry_signal_chart(df_unit_90d, signal, telem_labels)
+            if df_signal_unit is not None and not df_signal_unit.empty:
+                fig = create_telemetry_signal_chart_from_long(df_signal_unit, signal, telem_labels)
+            else:
+                fig = create_telemetry_signal_chart(df_unit_90d, signal, telem_labels)
             if fig:
                 charts.append(html.Div([dcc.Graph(figure=fig, config={"displayModeBar": False})], style={"marginBottom": "20px"}))
         telem_charts = html.Div(charts) if charts else html.P(
