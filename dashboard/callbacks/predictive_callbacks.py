@@ -345,9 +345,10 @@ def register_callbacks(app):
                                     if not df_ev_unit.empty:
                                         last_ev_date = df_ev_unit["Fecha"].max()
 
+                            hours_component_name = settings.get_component_hours_name(client, component)
                             unit_hours = all_hours[
                                 (all_hours['_uid_norm'] == unit_norm) &
-                                (all_hours['componentName'] == component)
+                                (all_hours['componentName'] == hours_component_name)
                             ].copy()
 
                             if not unit_hours.empty and last_ev_date is not None:

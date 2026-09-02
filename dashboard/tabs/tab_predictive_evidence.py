@@ -540,58 +540,12 @@ def render_initial_content(unit, df, df_latest, component="motor", client=None):
     last_evidence_date = df_unit["Fecha"].max() if not df_unit.empty else None
     last_date_str = last_evidence_date.strftime("%d %b %Y") if last_evidence_date is not None else "—"
 
-    # ── Load component horómetro at last evidence date ──
-    horometro_value = "—"
-    horometro_sub = "horas acumuladas del componente"
-    if client and last_evidence_date is not None:
-        try:
-            from config.settings import get_settings as _get_settings
-            from src.data.loaders import load_component_hours
-            import re as _re
-            _settings = _get_settings()
-            allowed = [c.upper() for c in _settings.component_hours_allowed_clients]
-            if client.upper() in allowed:
-                comp_hours_file = _settings.get_component_hours_path(client.lower())
-                if comp_hours_file.exists():
-                    all_hours = load_component_hours(comp_hours_file)
-                    if not all_hours.empty:
-                        # Normalize unit IDs for matching (T_09 vs T_9)
-                        def _normalize_unit(uid):
-                            m = _re.match(r'^([A-Za-z]+_)0*(\d+)$', str(uid))
-                            return f"{m.group(1)}{m.group(2)}" if m else str(uid)
-
-                        unit_norm = _normalize_unit(unit)
-                        all_hours['_unitId_norm'] = all_hours['unitId'].apply(_normalize_unit)
-
-                        # Filter by normalized unit and component
-                        unit_comp_hours = all_hours[
-                            (all_hours['_unitId_norm'] == unit_norm) &
-                            (all_hours['componentName'] == component)
-                        ].copy()
-
-                        if not unit_comp_hours.empty:
-                            # Find reading closest to last evidence date
-                            unit_comp_hours['date_diff'] = abs(
-                                unit_comp_hours['sampleDate'] - last_evidence_date
-                            )
-                            closest = unit_comp_hours.sort_values('date_diff').iloc[0]
-                            hrs = closest['componentHours_cleaned']
-                            date_val = closest['sampleDate']
-                            if pd.notna(hrs):
-                                horometro_value = f"{hrs:,.0f}"
-                            if pd.notna(date_val):
-                                horometro_sub = f"al {pd.to_datetime(date_val).strftime('%d %b %Y')}"
-                        else:
-                            logger.info(f"No component hours found for unit={unit} (norm={unit_norm}), component={component}")
-        except Exception as e:
-            logger.warning(f"Could not load component hours for KPI: {e}")
-
-    component_label = (component or "").title()
-
+    # Horómetro is shown once in the persistent unit banner above this
+    # subview (dashboard/callbacks/predictive_callbacks.py's
+    # update_unit_banner) — not repeated here as a KPI.
     kpis = [
         _kpi_card("Ranking actual", f"{ranking_val:.0f}", _ranking_color(ranking_val), "escala 0-100"),
         _kpi_card("Riesgo acum. 30d", f"{ranking_30d_val:.1f}", _ranking_color(ranking_30d_val), "índice histórico"),
-        _kpi_card(f"Horas del {component_label}", horometro_value, "#0891B2", horometro_sub),
         _kpi_card("Modo dominante", dominant_label, "#7C3AED", f"Score: {fm_scores[dominant_mode]:.1f}"),
         _kpi_card("Última evidencia", last_date_str, "#6B7280", "fecha más reciente"),
     ]

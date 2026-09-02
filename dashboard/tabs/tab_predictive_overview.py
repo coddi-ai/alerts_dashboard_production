@@ -30,6 +30,13 @@ from dashboard.components.labels import NO_DATA_BG, NO_DATA_TEXT
 
 logger = get_logger(__name__)
 
+# TEMP FLAG: upstream `unit_status_summary.estado` is currently mis-computed
+# by the data team. Until they ship a fix, compute status client-side instead
+# of trusting the estado column. Set back to False once upstream confirms the
+# fix has landed. Feeds attach_status() below, which every status call site
+# (this tab, tab_predictive_evidence.py, predictive_callbacks.py) goes through.
+COMPUTE_STATUS = True
+
 
 # ── Data Loading (Multi-Component) ────────────────────────────────────────────
 
@@ -235,6 +242,32 @@ def _normalize_unit_id(uid) -> str:
     return f"{m.group(1)}{m.group(2)}" if m else str(uid)
 
 
+def _classify_status_from_scores(row: pd.Series) -> str:
+    """Client-side status classification (temporary, see COMPUTE_STATUS):
+    - Anormal: media_30d >= 60 or some mode >= 80 or ranking_of_the_day >= 70
+    - Alerta:  media_30d >= 35 or some mode >= 50 or ranking_of_the_day >= 40
+    - Normal:  otherwise
+    `max_fm_30d` is already the max across per-mode 30d rolling averages
+    (computed in _load_component_data_cached), so both mode thresholds check
+    against it. `ranking` is the overall ranking's latest (most recent day's
+    raw, non-rolling) value.
+    """
+    media_30d = row.get("avg_ranking_30d")
+    max_fm_30d = row.get("max_fm_30d")
+    ranking_today = row.get("ranking")
+    media_hit = pd.notna(media_30d) and media_30d >= 60
+    mode_hit_80 = pd.notna(max_fm_30d) and max_fm_30d >= 80
+    today_hit_70 = pd.notna(ranking_today) and ranking_today >= 70
+    if media_hit or mode_hit_80 or today_hit_70:
+        return "Anormal"
+    media_hit = pd.notna(media_30d) and media_30d >= 35
+    mode_hit_50 = pd.notna(max_fm_30d) and max_fm_30d >= 50
+    today_hit_40 = pd.notna(ranking_today) and ranking_today >= 40
+    if media_hit or mode_hit_50 or today_hit_40:
+        return "Alerta"
+    return "Normal"
+
+
 def attach_status(latest: pd.DataFrame, client: str, component: str) -> pd.DataFrame:
     """Attach `estado` as `status` (REQ-PR-04).
 
@@ -243,8 +276,18 @@ def attach_status(latest: pd.DataFrame, client: str, component: str) -> pd.DataF
     analisis_inteligente.parquet's `estado` for components not yet migrated
     (e.g. cda/transmision). Units with no row in either default to "Normal"
     so only the three known labels ever appear (REQ-PR-05).
+
+    When COMPUTE_STATUS is True (temporary override - upstream `estado` is
+    currently mis-computed), the estado sources above are bypassed entirely
+    and status is instead classified from the 30d scores already present in
+    `latest` via _classify_status_from_scores.
     """
     latest = latest.copy()
+
+    if COMPUTE_STATUS:
+        latest["status"] = latest.apply(_classify_status_from_scores, axis=1)
+        latest["_status_rank"] = latest["status"].map(_STATUS_RANK).fillna(3)
+        return latest
 
     def _estado_map(df, unit_col="Unit", estado_col="estado"):
         if df.empty or estado_col not in df.columns:
@@ -608,7 +651,8 @@ def _render_component_overview(df_latest, prev_ranking, component: str,
                             m = _re.match(r'^([A-Za-z]+_)0*(\d+)$', str(uid))
                             return f"{m.group(1)}{m.group(2)}" if m else str(uid)
 
-                        comp_hours = all_hours[all_hours['componentName'] == component].copy()
+                        hours_component_name = settings.get_component_hours_name(client, component)
+                        comp_hours = all_hours[all_hours['componentName'] == hours_component_name].copy()
                         if not comp_hours.empty:
                             comp_hours['_uid_norm'] = comp_hours['unitId'].apply(_norm_uid)
                             idx = comp_hours.groupby('_uid_norm')['sampleDate'].idxmax()
