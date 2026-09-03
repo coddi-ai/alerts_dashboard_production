@@ -33,7 +33,7 @@ def _resolve_client(selected_client, user_data) -> str:
 
 
 def _render_component(client: str, component: str):
-    if not is_service_enabled(client, 'predictive'):
+    if not is_service_enabled(client, f'predictive-{component}'):
         logger.warning(f"Predictive module accessed by client without access: {client}")
         return create_placeholder_content('Predictivo (no disponible para este cliente)')
 

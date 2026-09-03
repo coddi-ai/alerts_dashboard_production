@@ -49,11 +49,11 @@ def test_known_client_service_from_config():
     print("TEST 2: Known client/service against the real client_services.json")
     print("=" * 80)
 
-    assert is_service_enabled("CDA", "predictive") is True
-    assert is_service_enabled("EMIN", "predictive") is False
+    assert is_service_enabled("CDA", "predictive-motor") is True
+    assert is_service_enabled("EMIN", "predictive-motor") is False
     assert is_service_enabled("cda", "overview-general") is True  # case-insensitive client
 
-    print("✅ CDA has predictive, EMIN does not, client lookup is case-insensitive")
+    print("✅ CDA has predictive-motor, EMIN does not, client lookup is case-insensitive")
     return True
 
 
@@ -65,7 +65,7 @@ def test_is_service_dummy_defaults_and_lookup():
     # Nothing in the real config is marked dummy yet - both a configured
     # (display=true) and an absent (display=false) service default to False.
     assert is_service_dummy("CDA", "overview-general") is False
-    assert is_service_dummy("EMIN", "predictive") is False
+    assert is_service_dummy("EMIN", "predictive-motor") is False
     assert is_service_dummy("NOT_A_CLIENT", "overview-general") is False
 
     print("✅ is_service_dummy() defaults to False for both configured and absent services")
@@ -79,7 +79,8 @@ def test_get_enabled_services_ordering():
 
     services = get_enabled_services("EMIN")
     assert services == sorted(services, key=client_services.KNOWN_SERVICE_IDS.index)
-    assert "predictive" not in services
+    assert "predictive-motor" not in services
+    assert "predictive-transmision" not in services
 
     print(f"✅ EMIN services in canonical order: {services}")
     return True

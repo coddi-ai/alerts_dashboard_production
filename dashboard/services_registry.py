@@ -16,8 +16,9 @@ from config.client_services import KNOWN_SERVICE_IDS, is_service_dummy, is_servi
 
 # Nav sections in display order. Each service id here must be one of
 # config.client_services.KNOWN_SERVICE_IDS. 'predictive' is a section on its
-# own because its subsections are discovered dynamically per client
-# (dashboard/layout.py::_discover_predictive_components), not listed here.
+# own, built dynamically per client from the per-component
+# `predictive-<component>` service ids (dashboard/layout.py::build_navigation_items),
+# not listed here.
 SERVICE_SECTIONS = [
     {
         "section": "overview",
@@ -58,7 +59,8 @@ SERVICE_LABELS = {
     "monitoring-telemetry": "Telemetría",
     "monitoring-oil": "Aceite",
     "monitoring-mantenciones": "Mantenciones",
-    "predictive": "Predictivo",
+    "predictive-motor": "Predictivo - Motor",
+    "predictive-transmision": "Predictivo - Transmisión",
     "agents-campbell-ai": "Campbell AI",
     "integration-validacion-avisos": "Validación de Avisos",
     "integration-seguimiento-avisos": "Seguimiento de Avisos",
@@ -73,6 +75,8 @@ NAV_PATHS = {
     "monitoring-telemetry": "/monitoring/telemetry",
     "monitoring-oil": "/monitoring/oil",
     "monitoring-mantenciones": "/monitoring/mantenciones",
+    "predictive-motor": "/predictive/motor",
+    "predictive-transmision": "/predictive/transmision",
     "agents-campbell-ai": "/agents/campbell-ai",
     "integration-validacion-avisos": "/integration/validacion-avisos",
     "integration-seguimiento-avisos": "/integration/seguimiento-avisos",
@@ -95,10 +99,6 @@ SERVICE_EXACT_ROUTES = {
     "integration/seguimiento-avisos": "integration-seguimiento-avisos",
     "reporting": "reporting-main",
 }
-# Prefix-matched routes (covers dynamic sub-paths, e.g. /predictive/<component>).
-SERVICE_PREFIX_ROUTES = {
-    "predictive/": "predictive",
-}
 
 
 def nav_path(nav_id: str) -> str:
@@ -112,14 +112,18 @@ def resolve_service_id_for_pathname(rel_path: str) -> Optional[str]:
     """
     Resolve a stripped pathname (as returned by dash.strip_relative_path) to
     a service id, or None if it isn't a client-service-gated route.
+
+    /predictive/<component> resolves to its own `predictive-<component>`
+    service id, one per component, so access can be granted independently
+    per component instead of via a single umbrella service.
     """
     if rel_path in SERVICE_EXACT_ROUTES:
         return SERVICE_EXACT_ROUTES[rel_path]
 
-    candidate = rel_path + "/"
-    for prefix, service_id in SERVICE_PREFIX_ROUTES.items():
-        if candidate.startswith(prefix):
-            return service_id
+    if rel_path.startswith("predictive/"):
+        component = rel_path.split("/", 2)[1]
+        if component:
+            return f"predictive-{component}"
 
     return None
 

@@ -6,7 +6,8 @@
     "monitoring-telemetry": {"display": true, "dummy": false},
     "monitoring-oil": {"display": true, "dummy": false},
     "monitoring-mantenciones": {"display": true, "dummy": false},
-    "predictive": {"display": true, "dummy": false},
+    "predictive-motor": {"display": true, "dummy": false},
+    "predictive-transmision": {"display": true, "dummy": false},
     "agents-campbell-ai": {"display": true, "dummy": false},
     "integration-validacion-avisos": {"display": true, "dummy": false},
     "integration-seguimiento-avisos": {"display": true, "dummy": false},
@@ -14,7 +15,7 @@
   },
   "EMIN": {
     "overview-general": {"display": true, "dummy": false},
-    "overview-data-freshness": {"display": true, "dummy": false},
+    // "overview-data-freshness": {"display": true, "dummy": true},
     "monitoring-alerts": {"display": true, "dummy": false},
     "monitoring-telemetry": {"display": false, "dummy": false},
     "monitoring-oil": {"display": true, "dummy": false},
@@ -32,11 +33,11 @@
   },
   "CAPSTONE": {
     "overview-general": {"display": true, "dummy": false},
-    "overview-data-freshness": {"display": true, "dummy": false},
+    // "overview-data-freshness": {"display": true, "dummy": false},
     "monitoring-alerts": {"display": true, "dummy": false},
     "monitoring-oil": {"display": true, "dummy": false},
     "monitoring-mantenciones": {"display": true, "dummy": true},
-    "predictive": {"display": true, "dummy": false},
+    "predictive-motor": {"display": true, "dummy": false},
     "agents-campbell-ai": {"display": true, "dummy": false},
     "integration-validacion-avisos": {"display": true, "dummy": false},
     "integration-seguimiento-avisos": {"display": true, "dummy": false}

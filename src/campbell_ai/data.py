@@ -369,12 +369,21 @@ def predictive_band(value: float) -> str:
 
 
 def predictive_module_allows(client: str) -> bool:
-    """Honour the dashboard's Predictive module allowlist for the requested client."""
+    """Honour the dashboard's Predictive module allowlist for the requested client.
+
+    Predictive access is granted per component (service ids
+    'predictive-<component>'), so this returns True if the client has at
+    least one predictive component enabled - callers here care about the
+    module as a whole, not which specific component.
+    """
     normalized = normalize_client_id(client)
     try:
-        from config.client_services import is_service_enabled
+        from config.client_services import get_enabled_services
 
-        return bool(is_service_enabled(normalized, "predictive"))
+        return any(
+            service_id.startswith("predictive-")
+            for service_id in get_enabled_services(normalized)
+        )
     except Exception:
         # Older deployments carried this as a Settings field. Keep the fallback
         # tolerant so Campbell AI initialization does not fail if either config shape

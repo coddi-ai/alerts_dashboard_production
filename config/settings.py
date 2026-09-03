@@ -71,8 +71,9 @@ class Settings(BaseSettings):
     clients: List[str] = Field(default=["CDA", "EMIN", "ENEX", "CAPSTONE", "CENTINELA"], description="List of client names")
     
     # Module access control - clients allowed to access specific modules.
-    # Predictive module access is now centralized in config/client_services.json
-    # (service id 'predictive') - see config/client_services.py::is_service_enabled.
+    # Predictive module access is now centralized in config/client_services.json,
+    # one service id per component ('predictive-motor', 'predictive-transmision')
+    # - see config/client_services.py::is_service_enabled.
     component_hours_allowed_clients: List[str] = Field(
         default=["CDA", "ENEX", "CAPSTONE"],
         description="Clients with access to the Component Hours (Horómetro) module"

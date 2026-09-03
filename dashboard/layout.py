@@ -388,10 +388,13 @@ def build_navigation_items(selected_client: str, user_data: dict) -> list:
             return False
         return is_service_enabled(selected_client, service_id)
 
-    user_has_predictive_access = _enabled('predictive')
-
-    # Use statically-known component list for navigation (data availability checked at runtime)
-    predictive_nav_components = list(PREDICTIVE_COMPONENT_ICONS.keys()) if user_has_predictive_access else []
+    # Each predictive component is its own service id (predictive-<component>),
+    # so a client can be granted some components but not others. Statically-known
+    # component list for navigation (data availability checked at runtime).
+    predictive_nav_components = [
+        comp for comp in PREDICTIVE_COMPONENT_ICONS
+        if _enabled(f'predictive-{comp}')
+    ]
 
     # Build navigation from the central services registry, keeping only the
     # services enabled for the selected client - a disabled service is
@@ -416,7 +419,7 @@ def build_navigation_items(selected_client: str, user_data: dict) -> list:
                 'subsections': subsections,
             })
 
-        if section_def['section'] == 'monitoring' and user_has_predictive_access:
+        if section_def['section'] == 'monitoring' and predictive_nav_components:
             navigation_items.append({
                 'section': 'predictive',
                 'label': 'Predictivo',
